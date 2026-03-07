@@ -1,7 +1,7 @@
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-import single_agent
+import _single_agent as single_agent
 
 executor = ThreadPoolExecutor(max_workers=4)
 agents: dict[int, single_agent.SingleAgent] = {}
@@ -10,7 +10,7 @@ lock = threading.Lock()
 
 
 def worker(agent: single_agent.SingleAgent):
-    agent.act()
+    agent.run()
 
 
 def submit_exist(agent_id: int, message: str):
