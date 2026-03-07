@@ -1,9 +1,9 @@
 import _single_agent
-import mcpmanager
+import mcp_manager
 
 
-class Agent(_single_agent.SingleAgent):
-    def __init__(self, prompt: list[dict], globalmcpmanager : mcpmanager.MCPManager, **settings):
+class Agent(_single_agent._SingleAgent):
+    def __init__(self, prompt: list[dict], globalmcpmanager : mcp_manager.MCPManager, **settings):
         tools = globalmcpmanager.get_tools()
         single_settings = {
             "base_url": settings.get("base_url", "https://api.openai.com/v1"),

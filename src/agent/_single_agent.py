@@ -4,7 +4,7 @@ import loguru
 type Prompt = list[dict]
 
 
-class SingleAgent(object):
+class _SingleAgent(object):
     def __init__(self, prompt: Prompt, **settings):
         base_url = settings.get("base_url", "https://api.openai.com/v1")
         api_key = settings.get("api_key", "")
@@ -32,7 +32,7 @@ class SingleAgent(object):
         response = self.client.chat.completions.create(
             model=self.model,
             messages=self.prompt,
-            tools=self.tools,
+            tools=self.tools or None,
             stream=self.stream
         )
         if self.stream:
