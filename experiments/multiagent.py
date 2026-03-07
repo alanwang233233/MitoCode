@@ -21,7 +21,12 @@ def submit_exist(agent_id: int, message: str):
 
 def submit_new(system_prompt: str, api_base: str, api_key: str, initial_message: str, tools=None):
     with lock:
-        agent = single_agent.SingleAgent(system_prompt, api_base, api_key, tools=tools)
+        settings = {
+            "base_url": api_base,
+            "api_key": api_key,
+            "tools": tools,
+        }
+        agent = single_agent.SingleAgent([{"role": "system", "content": system_prompt}], settings)
         global agents_cnt
         agents[agents_cnt] = agent
         agents_cnt += 1

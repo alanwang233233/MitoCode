@@ -26,7 +26,7 @@ class SingleAgent(object):
         self.prompt.append(message)
 
     def append_str_message(self, message: str, is_user: bool = True):
-        self.prompt.append({"role": "user" if is_user else "assistant", "message": message})
+        self.prompt.append({"role": "user" if is_user else "assistant", "content": message})
 
     def run(self):
         response = self.client.chat.completions.create(
@@ -38,13 +38,15 @@ class SingleAgent(object):
         if self.stream:
             full_message = ""
             for chunk in response:
-                delta = chunk["choices"][0]["delta"]
-                if "content" in delta:
-                    delta_message = delta["content"]
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta.content is not None:
+                    delta_message = delta.content
                     full_message += delta_message
                     self.on_token(self, full_message, delta_message)
             self.on_end(self, full_message)
-            self.append_str_message(full_message)
+            self.append_str_message(full_message, is_user=False)
         else:
-            self.append_str_message(str(response.choices[0].message))
+            self.append_str_message(str(response.choices[0].message.content), is_user=False)
         return response

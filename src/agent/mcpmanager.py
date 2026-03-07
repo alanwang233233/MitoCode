@@ -39,7 +39,7 @@ class MCPManager:
             session = await self.stack.enter_async_context(ClientSession(read_stream, write_stream))
             await session.initialize()
             self.sessions.append(session)
-            loguru.logger.debug("Connected to {params.command} {params.args[1] if params.args else ''} MCP Server.")
+            loguru.logger.debug(f"Connected to {params.command} {params.args[1] if params.args else ''} MCP Server.")
 
         for session in self.sessions:
             response = await session.list_tools()
