@@ -231,6 +231,8 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if git ls-remote --heads origin codeql | grep -q codeql; then
             git fetch origin codeql
+            git reset --hard HEAD
+            git clean -fdx
             git checkout codeql
           else
             git checkout --orphan codeql
