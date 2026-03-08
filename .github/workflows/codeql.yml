@@ -13,15 +13,92 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: read
-      contents: read
+      contents: write
       security-events: write
     steps:
       - uses: actions/checkout@v4
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: python
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
         with:
           upload: never
+          output: sarif-results
+      - name: Generate HTML report from SARIF
+        run: |
+          python - <<'EOF'
+          import glob, html, json, os
+
+          sarif_files = glob.glob("sarif-results/*.sarif")
+          results = []
+          for sarif_path in sarif_files:
+              with open(sarif_path) as f:
+                  data = json.load(f)
+              for run in data.get("runs", []):
+                  rules = {r["id"]: r for r in run.get("tool", {}).get("driver", {}).get("rules", [])}
+                  for result in run.get("results", []):
+                      rule_id = result.get("ruleId", "N/A")
+                      message = result.get("message", {}).get("text", "")
+                      severity = rules.get(rule_id, {}).get("defaultConfiguration", {}).get("level", "warning")
+                      locations = result.get("locations", [])
+                      location = ""
+                      if locations:
+                          phys = locations[0].get("physicalLocation", {})
+                          uri = phys.get("artifactLocation", {}).get("uri", "")
+                          line = phys.get("region", {}).get("startLine", "")
+                          location = f"{uri}:{line}" if line else uri
+                      results.append({"rule": rule_id, "message": message, "severity": severity, "location": location})
+
+          rows = "".join(
+              f"<tr><td>{html.escape(r['rule'])}</td><td>{html.escape(r['severity'])}</td>"
+              f"<td>{html.escape(r['message'])}</td><td>{html.escape(r['location'])}</td></tr>"
+              for r in results
+          )
+          html = f"""<!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <title>CodeQL Analysis Report</title>
+            <style>
+              body {{ font-family: Arial, sans-serif; margin: 20px; }}
+              h1 {{ color: #333; }}
+              table {{ border-collapse: collapse; width: 100%; }}
+              th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+              th {{ background-color: #4CAF50; color: white; }}
+              tr:nth-child(even) {{ background-color: #f2f2f2; }}
+            </style>
+          </head>
+          <body>
+            <h1>CodeQL Analysis Report</h1>
+            <p>Total findings: <strong>{len(results)}</strong></p>
+            <table>
+              <tr><th>Rule ID</th><th>Severity</th><th>Message</th><th>Location</th></tr>
+              {rows if rows else "<tr><td colspan='4'>No findings</td></tr>"}
+            </table>
+          </body>
+          </html>"""
+          os.makedirs("sarif-results", exist_ok=True)
+          with open("sarif-results/report.html", "w") as f:
+              f.write(html)
+          print(f"Report generated with {len(results)} findings.")
+          EOF
+      - name: Publish HTML report to codeql branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          cp sarif-results/report.html /tmp/report.html
+          if git ls-remote --heads origin codeql | grep -q codeql; then
+            git fetch origin codeql
+            git checkout codeql
+          else
+            git checkout --orphan codeql
+            git rm -rf .
+            echo "# CodeQL Reports" > README.md
+            git add README.md
+          fi
+          cp /tmp/report.html report.html
+          git add report.html
+          git diff --cached --quiet || git commit -m "chore: update CodeQL HTML report [skip ci]"
+          git push origin codeql
