@@ -48,8 +48,8 @@ jobs:
           ls sarif-results/*.sarif
           echo "----------"
           cat sarif-results/python.sarif
-          python - <<'PYEOF'
           echo "----------"
+          python - <<'PYEOF'
           import glob, html, json, os
           from datetime import datetime, timezone
 
