@@ -47,6 +47,9 @@ jobs:
         env:
           GH_SHA: ${{ github.sha }}
         run: |
+          ls sarif-results/*.sarif
+          git add sarif-results/*.sarif
+          git commit -m "Add SARIF results"
           python - <<'PYEOF'
           import glob, html, json, os
           from datetime import datetime, timezone
