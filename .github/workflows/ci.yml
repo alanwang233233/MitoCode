@@ -4,8 +4,6 @@ on:
   push:
     branches: ["main"]
   pull_request:
-  schedule:
-    - cron: "0 6 * * 1"
 
 jobs:
   ci:
@@ -48,9 +46,10 @@ jobs:
           GH_SHA: ${{ github.sha }}
         run: |
           ls sarif-results/*.sarif
-          git add sarif-results/*.sarif
-          git commit -m "Add SARIF results"
+          echo "----------"
+          cat sarif-results/python.sarif
           python - <<'PYEOF'
+          echo "----------"
           import glob, html, json, os
           from datetime import datetime, timezone
 
@@ -233,6 +232,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if git ls-remote --heads origin codeql | grep -q codeql; then
+            git add sarif-results/*.sarif
+            git commit -m "Add SARIF results"
             git fetch origin codeql
             git reset --hard HEAD
             git clean -fdx
