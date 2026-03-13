@@ -1,34 +1,24 @@
 import threading
 from concurrent.futures import ThreadPoolExecutor
-import _single_agent as single_agent
+from agent.agent import Agent
+from agent import mcp_manager
 
 executor = ThreadPoolExecutor(max_workers=4)
-agents: dict[int, single_agent._SingleAgent] = {}
+agents: dict[int, Agent] = {}
 agents_cnt = 0
 lock = threading.Lock()
-
-
-def worker(agent: single_agent._SingleAgent):
-    agent.run()
-
 
 def submit_exist(agent_id: int, message: str):
     with lock:
         agent = agents[agent_id]
     agent.append_str_message(message)
-    executor.submit(worker, agent)
+    return executor.submit(agent.run)
 
 
-def submit_new(system_prompt: str, api_base: str, api_key: str, initial_message: str, tools=None):
+def submit_new(prompt: list[dict], globalmcpmanager : mcp_manager.MCPManager, **settings):
     with lock:
-        settings = {
-            "base_url": api_base,
-            "api_key": api_key,
-            "tools": tools,
-        }
-        agent = single_agent._SingleAgent([{"role": "system", "content": system_prompt}], settings)
+        agent = Agent(prompt, globalmcpmanager, settings=settings)
         global agents_cnt
         agents[agents_cnt] = agent
         agents_cnt += 1
-    agent.append_str_message(initial_message)
-    executor.submit(worker, agent)
+    return executor.submit(agent.run)
