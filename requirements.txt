@@ -2,3 +2,6 @@ openai
 mcp
 loguru
 uv
+httpx
+httpx-sse
+textual
