@@ -5,3 +5,4 @@ uv
 httpx
 httpx-sse
 textual
+fastapi
