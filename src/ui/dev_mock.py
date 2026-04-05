@@ -82,4 +82,6 @@ async def sync():
             }
         ]
     }
-    return JSONResponse(status_code=200, content=response)
+    async def stream():
+        yield f"data: {json.dumps(response)}\n\n"
+    return StreamingResponse(stream(), media_type="text/event-stream")

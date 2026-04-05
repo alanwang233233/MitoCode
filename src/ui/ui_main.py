@@ -1,4 +1,5 @@
 import json
+import time
 from typing import Dict
 
 import httpx
@@ -6,7 +7,8 @@ from httpx_sse import aconnect_sse
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, VerticalScroll, Grid
 from textual.reactive import reactive
-from textual.widgets import Header, Footer, Tree, Static, Markdown, RichLog
+from textual.widgets import Header, Footer, Static, Markdown, RichLog
+from textual.widgets import Tree
 from textual.widgets._tree import TreeNode
 
 
@@ -114,6 +116,33 @@ class DynamicGrid(Grid):
         self.refresh(layout=True)
 
 
+class AgentTree(Tree):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._last_click_time = 0
+        self._last_click_node = None
+
+    def on_click(self, event) -> None:
+        node = self.get_node_at_line(event.y)
+
+        if node:
+            self.select_node(node)
+
+            current_time = time.time()
+            if (current_time - self._last_click_time < 0.4 and
+                    node == self._last_click_node):
+                node.toggle()
+                self._last_click_time = 0
+            else:
+                self._last_click_time = current_time
+                self._last_click_node = node
+
+            event.stop()
+
+            self.focus()
+
+
 class VibeFrontend(App):
     BINDINGS = [("d", "toggle_dark", "Toggle dark mode"),
                 ("f12", "toggle_debug", "Toggle debug mode"),
@@ -170,13 +199,14 @@ class VibeFrontend(App):
 
     def __init__(self):
         super().__init__()
-        self.agent_tree: Tree = None
+        self.agent_tree: AgentTree = None
         self.grid: DynamicGrid = None
         self.agents: Dict[int, AgentView] = {}
         self.sse_url: str = "http://127.0.0.1:8000/message"
         self.sync_url: str = "http://127.0.0.1:8000/sync"
         self.workspace: str = ""
         self.agent_treenodes: Dict[int, TreeNode] = {}
+        self.agent_data_store: Dict[int, dict] = {}
         self.log_panel = RichLog()
 
     def print_log(self, text):
@@ -185,7 +215,7 @@ class VibeFrontend(App):
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal():
-            self.agent_tree = Tree("Agent Tree", classes="left-pane")
+            self.agent_tree = AgentTree("Agent Tree", classes="left-pane")
             yield self.agent_tree
             self.grid = DynamicGrid(classes="right-pane")
             yield self.grid
@@ -242,6 +272,27 @@ class VibeFrontend(App):
         except Exception as e:
             self.print_log(f"❌ SSE Error for {agent_id}: {repr(e)}")
 
+    async def _sse_global_sync(self):
+        url = self.sync_url
+
+        try:
+            self.print_log(f"Starting Global Sync SSE on {url}")
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with aconnect_sse(client, "GET", url) as event_source:
+                    async for sse in event_source.aiter_sse():
+                        if sse.data:
+                            try:
+                                payload = json.loads(sse.data)
+                                if payload.get("event") == "sync":
+                                    agents_delta = payload.get("agents", [])
+                                    if agents_delta:
+                                        self.print_log(f"Received {len(agents_delta)} deltas")
+                                        self._update_and_render_tree(agents_delta)
+                            except json.JSONDecodeError:
+                                continue
+        except Exception as e:
+            self.print_log(f"❌ SSE Error: {repr(e)}")
+
     def sync_global(self):
         url = self.sync_url
         r = httpx.get(url)
@@ -253,11 +304,27 @@ class VibeFrontend(App):
     def on_mount(self):
         self.agent_tree.clear()
         self.agent_tree.show_root = False
-        agents_list = self.sync_global()
+
+        self.run_worker(
+            self._sse_global_sync(),
+            group="sse_workers",
+            name="global_sync_worker"
+        )
+
+    def _update_and_render_tree(self, incoming_agents: list):
+        for agent_update in incoming_agents:
+            agent_id = agent_update["id"]
+            if agent_id not in self.agent_data_store:
+                self.agent_data_store[agent_id] = agent_update
+            else:
+                self.agent_data_store[agent_id].update(agent_update)
+
+        self.agent_tree.clear()
+        self.agent_treenodes.clear()
+
+        agents_list = list(self.agent_data_store.values())
         if not agents_list:
             return
-
-        agent_map = {a["id"]: a for a in agents_list}
 
         all_child_ids = set()
         for a in agents_list:
@@ -266,7 +333,7 @@ class VibeFrontend(App):
         root_candidates = [a for a in agents_list if a["id"] not in all_child_ids]
 
         for root_data in root_candidates:
-            self._build_tree_recursive(self.agent_tree.root, root_data, agent_map)
+            self._build_tree_recursive(self.agent_tree.root, root_data, self.agent_data_store)
 
     def _build_tree_recursive(self, parent_node, current_agent_data, agent_map):
         agent_id = current_agent_data["id"]
