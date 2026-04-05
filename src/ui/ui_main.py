@@ -1,3 +1,4 @@
+import argparse
 import json
 import time
 from typing import Dict
@@ -197,13 +198,13 @@ class VibeFrontend(App):
 
     debug_mode = reactive("")
 
-    def __init__(self):
+    def __init__(self, sse_url, sync_url):
         super().__init__()
         self.agent_tree: AgentTree = None
         self.grid: DynamicGrid = None
         self.agents: Dict[int, AgentView] = {}
-        self.sse_url: str = "http://127.0.0.1:8000/message"
-        self.sync_url: str = "http://127.0.0.1:8000/sync"
+        self.sse_url: str = sse_url
+        self.sync_url: str = sync_url
         self.workspace: str = ""
         self.agent_treenodes: Dict[int, TreeNode] = {}
         self.agent_data_store: Dict[int, dict] = {}
@@ -372,5 +373,19 @@ class VibeFrontend(App):
 
 
 if __name__ == "__main__":
-    app = VibeFrontend()
+    parser = argparse.ArgumentParser(description="Vibe Frontend Textual App")
+
+    parser.add_argument(
+        "--sse",
+        default="http://127.0.0.1:8000/message",
+        help="SSE endpoint URL for agent messages"
+    )
+    parser.add_argument(
+        "--sync",
+        default="http://127.0.0.1:8000/sync",
+        help="SSE endpoint URL for global sync"
+    )
+
+    args = parser.parse_args()
+    app = VibeFrontend(sse_url=args.sse, sync_url=args.sync)
     app.run()
