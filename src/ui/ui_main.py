@@ -9,10 +9,6 @@ from textual.reactive import reactive
 from textual.widgets import Header, Footer, Tree, Static, Markdown, RichLog
 from textual.widgets._tree import TreeNode
 
-log_panel: RichLog = None
-
-def print_log(text):
-    log_panel.write(text)
 
 class ToolCallView(Static):
     def __init__(self, tool, args):
@@ -24,15 +20,11 @@ class ToolResultView(Static):
         super().__init__(f"📦 {result}")
 
 
-from textual.reactive import reactive
-
-
 class AgentView(VerticalScroll):
-
     content = reactive("")
 
     def __init__(self, agent_id):
-        super().__init__(classes="agent-view")
+        super().__init__()
         self.agent_id = agent_id
         self.border_title = f"Agent {agent_id}"
         self.styles.border = ("solid", "green")
@@ -41,19 +33,23 @@ class AgentView(VerticalScroll):
         yield Markdown(self.content)
 
     def on_mount(self):
-        print_log(f"on_mount {id(self)}: {True if self.query(Markdown) else False}")
+        self.styles.overflow_y = "auto"
+        self.styles.scrollbar_gutter = "stable"
 
     def watch_content(self, content: str) -> None:
+        pass
+
+    def append_token(self, token: str) -> None:
+        was_at_bottom = self.scroll_offset.y >= self.max_scroll_y
+
+        self.content += token
         md_widgets = self.query(Markdown)
 
         if md_widgets:
-            md_widgets.first().update(content)
-            self.scroll_end(animate=False)
-        else:
-            pass
+            md_widgets.first().append(token)
 
-    def append_token(self, token: str) -> None:
-        self.content += token
+            if was_at_bottom:
+                self.scroll_end(animate=False)
 
 
 class DynamicGrid(Grid):
@@ -61,7 +57,10 @@ class DynamicGrid(Grid):
         self.styles.layout = "grid"
 
     async def set_widgets(self, widgets):
-        await self.query("*").remove()
+        await self.query(".ellipsis").remove()
+
+        for w in self.query("AgentView"):
+            w.styles.display = "none"
 
         n = len(widgets)
         if n == 0: return
@@ -72,9 +71,13 @@ class DynamicGrid(Grid):
             self.styles.grid_columns = "1fr"
             self.styles.grid_rows = "1fr"
 
-            widgets[0].styles.row_span = 1
-            widgets[0].styles.column_span = 1
-            await self.mount(widgets[0])
+            widget = widgets[0]
+            if widget not in self.children:
+                await self.mount(widget)
+
+            widget.styles.display = "block"
+            widget.styles.row_span = 1
+            widget.styles.column_span = 1
 
         else:
             max_right_items = 3
@@ -84,33 +87,38 @@ class DynamicGrid(Grid):
             self.styles.grid_size_rows = actual_right_rows
 
             self.styles.grid_columns = "2fr 1fr"
-            # 动态生成行高，例如 "1fr 1fr 1fr"
             self.styles.grid_rows = " ".join(["1fr"] * actual_right_rows)
 
             left_widget = widgets[0]
+            if left_widget not in self.children:
+                await self.mount(left_widget)
+
+            left_widget.styles.display = "block"
             left_widget.styles.row_span = actual_right_rows
             left_widget.styles.column_span = 1
-            # 背景色用于调试，确认后可删除
-            left_widget.styles.background = "#1f3e1f"
-            await self.mount(left_widget)
 
             for i in range(1, actual_right_rows + 1):
                 if i == actual_right_rows and n - 1 > actual_right_rows:
                     remaining = n - actual_right_rows
                     widget = Static(f"+ {remaining} agents", classes="agent-view ellipsis")
+                    await self.mount(widget)
                 else:
                     widget = widgets[i]
+                    if widget not in self.children:
+                        await self.mount(widget)
+                    widget.styles.display = "block"
 
                 widget.styles.row_span = 1
                 widget.styles.column_span = 1
-                widget.styles.background = "#1f1f3e"  # 调试背景色
-                await self.mount(widget)
 
         self.refresh(layout=True)
 
-class VibeFrontend(App):
 
-    BINDINGS = [("d", "toggle_dark", "Toggle dark mode")]
+class VibeFrontend(App):
+    BINDINGS = [("d", "toggle_dark", "Toggle dark mode"),
+                ("f12", "toggle_debug", "Toggle debug mode"),
+                ("f5", "refresh_layout", "Refresh layout"),
+                ]
 
     CSS = """
         Screen {
@@ -118,7 +126,7 @@ class VibeFrontend(App):
         }
 
         Horizontal {
-            height: 1fr; /* 填满 Header 和 Footer 之间 */
+            height: 1fr;
         }
 
         .left-pane {
@@ -128,14 +136,23 @@ class VibeFrontend(App):
         }
 
         DynamicGrid {
-            layout: grid; /* 显式声明 */
+            layout: grid;
             grid-gutter: 1;
             width: 1fr;
             height: 100%;
-            min-width: 50; /* 确保有足够宽度开启两列布局 */
+            min-width: 50;
         }
         
         .agent-view {
+            border: panel $primary;
+            background: $surface;
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 1;
+        }
+        
+        AgentView {
             border: panel $primary;
             background: $surface;
             width: 100%;
@@ -149,6 +166,8 @@ class VibeFrontend(App):
         }
         """
 
+    debug_mode = reactive("")
+
     def __init__(self):
         super().__init__()
         self.agent_tree: Tree = None
@@ -158,6 +177,10 @@ class VibeFrontend(App):
         self.sync_url: str = "http://127.0.0.1:8000/sync"
         self.workspace: str = ""
         self.agent_treenodes: Dict[int, TreeNode] = {}
+        self.log_panel = RichLog()
+
+    def print_log(self, text):
+        self.log_panel.write(text)
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -166,9 +189,8 @@ class VibeFrontend(App):
             yield self.agent_tree
             self.grid = DynamicGrid(classes="right-pane")
             yield self.grid
-        global log_panel
-        log_panel = RichLog(id="log-panel")
-        yield log_panel
+        self.log_panel = RichLog(id="log-panel")
+        yield self.log_panel
         yield Footer()
 
     def action_toggle_dark(self) -> None:
@@ -176,12 +198,25 @@ class VibeFrontend(App):
             "textual-dark" if self.theme == "textual-light" else "textual-light"
         )
 
+    def action_toggle_debug(self) -> None:
+        self.debug_mode = "block" if self.debug_mode == "none" else "none"
+
+    def action_refresh_layout(self) -> None:
+        self.print_log("Refreshing layout ...")
+        self.refresh(layout=True)
+
+    def watch_debug_mode(self, debug_mode: bool):
+        if debug_mode:
+            self.log_panel.styles.display = "block"
+        else:
+            self.log_panel.styles.display = "none"
+
     async def handle_sse_event(self, event):
         action_type = event["type"]
         agent_id = int(event["agent_id"])
 
         if agent_id not in self.agents:
-            print_log(f"Temporary AgentView is created here for agent {agent_id}")
+            self.print_log(f"Temporary AgentView is created here for agent {agent_id}")
             self.agents[agent_id] = AgentView(agent_id)
 
         agent_view = self.agents[agent_id]
@@ -193,7 +228,7 @@ class VibeFrontend(App):
         url = f"{self.sse_url}?id={agent_id}"
 
         try:
-            print_log(f"Starting SSE for Agent {agent_id}: {url}")
+            self.print_log(f"Starting SSE for Agent {agent_id}: {url}")
             async with httpx.AsyncClient(timeout=None) as client:
                 async with aconnect_sse(client, "GET", url) as event_source:
                     async for sse in event_source.aiter_sse():
@@ -203,9 +238,9 @@ class VibeFrontend(App):
                                 await self.handle_sse_event(event)
                             except json.JSONDecodeError:
                                 continue
-            print_log(f"SSE for Agent {agent_id} completed.")
+            self.print_log(f"SSE for Agent {agent_id} completed.")
         except Exception as e:
-            print_log(f"❌ SSE Error for {agent_id}: {repr(e)}")
+            self.print_log(f"❌ SSE Error for {agent_id}: {repr(e)}")
 
     def sync_global(self):
         url = self.sync_url
@@ -253,20 +288,21 @@ class VibeFrontend(App):
         display_nodes = [node] + list(node.children)
         agent_views = []
         for n in display_nodes:
-            print_log(str(n.data))
+            self.print_log(str(n.data))
             agent_id = n.data["id"]
             if agent_id not in self.agents:
                 self.agents[agent_id] = AgentView(agent_id)
             agent_views.append(self.agents[agent_id])
-        print_log(f"self.agents: {self.agents}")
+        self.print_log(f"self.agents: {self.agents}")
         await self.grid.set_widgets(agent_views)
 
-        for view in agent_views[:4]: # 只为当前显示的启动
-             self.run_worker(
+        for view in agent_views[:4]:  # 只为当前显示的启动
+            self.run_worker(
                 self._sse_single_agent(view.agent_id),
                 group="sse_workers",
                 name=f"sse_{view.agent_id}"
             )
+
 
 if __name__ == "__main__":
     app = VibeFrontend()

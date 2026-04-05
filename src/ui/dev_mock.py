@@ -12,7 +12,7 @@ agents = ["1", "2", "3", "4", "5"]
 
 async def event_stream(agent_id):
     while True:
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.01)
 
         event = {
             "type": random.choice(["token", "tool_call", "tool_result"]),
