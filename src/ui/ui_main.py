@@ -1,5 +1,4 @@
 import argparse
-from difflib import unified_diff
 import json
 import time
 from typing import Dict
@@ -18,6 +17,7 @@ from difflib import unified_diff
 
 class ToolCallPanel(Container):
     def __init__(self, lang: str):
+        super().__init__()
         pass
 
 
@@ -50,7 +50,7 @@ class ToolCallPanelSyntax(Container):
                 diff_lines = unified_diff(
                         old_code,
                         new_code,
-                        fromfile=""
+                        fromfile="",
                         tofile=self.finished_diff_tofile,
                         lineterm='',
                         )
@@ -275,8 +275,8 @@ class VibeFrontend(App):
 
     def __init__(self, sse_url, sync_url):
         super().__init__()
-        self.agent_tree: AgentTree = None
-        self.grid: DynamicGrid = None
+        self.agent_tree: AgentTree = None # type: ignore
+        self.grid: DynamicGrid = None # type: ignore
         self.agents: Dict[int, AgentView] = {}
         self.sse_url: str = sse_url
         self.sync_url: str = sync_url
