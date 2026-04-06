@@ -1,4 +1,5 @@
 import argparse
+from difflib import unified_diff
 import json
 import time
 from typing import Dict
@@ -6,21 +7,95 @@ from typing import Dict
 import httpx
 from httpx_sse import aconnect_sse
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, VerticalScroll, Grid
+from textual.containers import Container, Horizontal, VerticalScroll, Grid
 from textual.reactive import reactive
 from textual.widgets import Header, Footer, Static, Markdown, RichLog
 from textual.widgets import Tree
 from textual.widgets._tree import TreeNode
+from rich.panel import Panel
+from rich.syntax import Syntax
+from difflib import unified_diff
+
+class ToolCallPanel(Container):
+    def __init__(self, lang: str):
+        pass
 
 
-class ToolCallView(Static):
-    def __init__(self, tool, args):
-        super().__init__(f"🔧 {tool}\n{args}")
+class ToolCallPanelSyntax(Container):
+    code = reactive("")
 
+    def __init__(self, title: str, lang: str, show_line_number: bool = False):
+        super().__init__()
+        self.lang = lang
+        self.title: str = title
+        self.code = ""
+        self.show_line_number = show_line_number
+        self.finished: bool = False
+        self.finished_success: bool = True
+        self.finished_result: str = ""
+        self.finished_show_line_number: bool = True
+        self.finished_show_diff: bool = False
+        self.finished_diff_origin: str = ""
+        self.finished_diff_tofile: str = ""
+        self.finished_line_number_range = None
 
-class ToolResultView(Static):
-    def __init__(self, result):
-        super().__init__(f"📦 {result}")
+    def append_code(self, content):
+        self.code= self.code + content
+
+    def render(self):
+        if self.finished:
+            if self.finished_show_diff:
+                old_code = self.finished_diff_origin.splitlines(keepends=True)
+                new_code = self.code.splitlines(keepends=True)
+                diff_lines = unified_diff(
+                        old_code,
+                        new_code,
+                        fromfile=""
+                        tofile=self.finished_diff_tofile,
+                        lineterm='',
+                        )
+                diff_out = "".join(diff_lines)
+                if diff_out == "":
+                    diff_out = "No diff"
+                syntax = Syntax(
+                        diff_out,
+                        "diff",
+                        theme="monokai",
+                        line_numbers=self.finished_show_line_number,
+                        line_range=self.finished_line_number_range
+                        )
+                return Panel(
+                        syntax,
+                        title=self.title + " " + self.finished_result,
+                        border_style="green" if self.finished_success else "red"
+                        )
+            syntax = Syntax(
+                    self.code,
+                    self.lang,
+                    theme="monokai",
+                    line_numbers=self.finished_show_line_number,
+                    line_range=self.finished_line_number_range
+                    )
+            return Panel(
+                    syntax,
+                    title=self.title + " " + self.finished_result,
+                    border_style="green" if self.finished_success else "red"
+                    )
+        syntax = Syntax(
+                self.code,
+                self.lang,
+                theme="monokai",
+                line_numbers=self.show_line_number
+                )
+        return Panel(
+                syntax,
+                title=self.title,
+                border_style="cyan"
+                )
+
+    def end(self, success: bool = True, show_line_number: bool = False):
+        self.finished = True
+        self.refresh(layout=True)
 
 
 class AgentView(VerticalScroll):
