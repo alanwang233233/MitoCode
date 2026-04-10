@@ -16,21 +16,21 @@ For full update:
 {
   "id": 1,
   "workspace": 1,
-  "event": "event_string",
+  "event": "sync",
   "agents": [
     {
       "id": 1,
       "name": "name_string",
       "description": "desc_string",
-      "subagent": [
+      "sub_agent": [
         2
       ]
     },
     {
       "id": 2,
-      "name": "name_string",
+      "name": "sync",
       "description": "desc_string",
-      "subagent": [
+      "sub_agent": [
       ]
     }
   ]
@@ -47,12 +47,8 @@ For incremental update:
   "agents": [
     {
       "id": 1,
-      // whose information will be overridden
       "name": "new_name_string"
-      // This will override the old value
-      // Other unspecified items will stay the same...
     }
-    // So does other agents...
   ]
 }
 ```
@@ -60,7 +56,7 @@ For incremental update:
 ### Get streaming responses of  a agent.
 
 ```plaintext
-/v1/messages
+/v1/message
 ```
 
 Method: `Get`
