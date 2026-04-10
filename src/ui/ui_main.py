@@ -369,14 +369,6 @@ class VibeFrontend(App):
         except Exception as e:
             self.print_log(f"❌ SSE Error: {repr(e)}")
 
-    def sync_global(self):
-        url = self.sync_url
-        r = httpx.get(url)
-        if r.status_code != 200:
-            return None
-        response = r.json()["agents"]
-        return response
-
     def on_mount(self):
         self.agent_tree.clear()
         self.agent_tree.show_root = False
