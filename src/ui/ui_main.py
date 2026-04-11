@@ -1,19 +1,20 @@
 import argparse
 import json
 import time
+from difflib import unified_diff
 from typing import Dict
 
 import httpx
 from httpx_sse import aconnect_sse
+from rich.panel import Panel
+from rich.syntax import Syntax
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, VerticalScroll, Grid
 from textual.reactive import reactive
 from textual.widgets import Header, Footer, Static, Markdown, RichLog
 from textual.widgets import Tree
 from textual.widgets._tree import TreeNode
-from rich.panel import Panel
-from rich.syntax import Syntax
-from difflib import unified_diff
+
 
 class ToolCallPanel(Container):
     def __init__(self, lang: str):
@@ -21,7 +22,7 @@ class ToolCallPanel(Container):
         pass
 
 
-class ToolCallPanelSyntax(Container):
+class ToolCallPanelSyntax(Static):
     code = reactive("")
 
     def __init__(self, title: str, lang: str, show_line_number: bool = False):
@@ -39,8 +40,11 @@ class ToolCallPanelSyntax(Container):
         self.finished_diff_tofile: str = ""
         self.finished_line_number_range = None
 
+    def watch_code(self, old_code: str, new_code: str) -> None:
+        self.refresh(layout=True)
+
     def append_code(self, content):
-        self.code= self.code + content
+        self.code = self.code + content
 
     def render(self):
         if self.finished:
@@ -48,50 +52,50 @@ class ToolCallPanelSyntax(Container):
                 old_code = self.finished_diff_origin.splitlines(keepends=True)
                 new_code = self.code.splitlines(keepends=True)
                 diff_lines = unified_diff(
-                        old_code,
-                        new_code,
-                        fromfile="",
-                        tofile=self.finished_diff_tofile,
-                        lineterm='',
-                        )
+                    old_code,
+                    new_code,
+                    fromfile="",
+                    tofile=self.finished_diff_tofile,
+                    lineterm='',
+                )
                 diff_out = "".join(diff_lines)
                 if diff_out == "":
                     diff_out = "No diff"
                 syntax = Syntax(
-                        diff_out,
-                        "diff",
-                        theme="monokai",
-                        line_numbers=self.finished_show_line_number,
-                        line_range=self.finished_line_number_range
-                        )
-                return Panel(
-                        syntax,
-                        title=self.title + " " + self.finished_result,
-                        border_style="green" if self.finished_success else "red"
-                        )
-            syntax = Syntax(
-                    self.code,
-                    self.lang,
+                    diff_out,
+                    "diff",
                     theme="monokai",
                     line_numbers=self.finished_show_line_number,
                     line_range=self.finished_line_number_range
-                    )
-            return Panel(
+                )
+                return Panel(
                     syntax,
                     title=self.title + " " + self.finished_result,
                     border_style="green" if self.finished_success else "red"
-                    )
-        syntax = Syntax(
+                )
+            syntax = Syntax(
                 self.code,
                 self.lang,
                 theme="monokai",
-                line_numbers=self.show_line_number
-                )
-        return Panel(
+                line_numbers=self.finished_show_line_number,
+                line_range=self.finished_line_number_range
+            )
+            return Panel(
                 syntax,
-                title=self.title,
-                border_style="cyan"
-                )
+                title=self.title + " " + self.finished_result,
+                border_style="green" if self.finished_success else "red"
+            )
+        syntax = Syntax(
+            self.code,
+            self.lang,
+            theme="monokai",
+            line_numbers=self.show_line_number
+        )
+        return Panel(
+            syntax,
+            title=self.title,
+            border_style="cyan"
+        )
 
     def end(self, success: bool = True, show_line_number: bool = False):
         self.finished = True
@@ -99,35 +103,78 @@ class ToolCallPanelSyntax(Container):
 
 
 class AgentView(VerticalScroll):
-    content = reactive("")
-
     def __init__(self, agent_id):
         super().__init__()
         self.agent_id = agent_id
         self.border_title = f"Agent {agent_id}"
         self.styles.border = ("solid", "green")
+        self._current_md_content = ""
 
     def compose(self) -> ComposeResult:
-        yield Markdown(self.content)
+        yield Markdown("")
 
     def on_mount(self):
         self.styles.overflow_y = "auto"
         self.styles.scrollbar_gutter = "stable"
 
-    def watch_content(self, content: str) -> None:
-        pass
-
-    def append_token(self, token: str) -> None:
+    async def append_token(self, token: str) -> None:
         was_at_bottom = self.scroll_offset.y >= self.max_scroll_y
 
-        self.content += token
+        self._current_md_content += token
         md_widgets = self.query(Markdown)
-
         if md_widgets:
-            md_widgets.first().append(token)
+            await md_widgets.last().update(self._current_md_content)
 
             if was_at_bottom:
-                self.scroll_end(animate=False)
+                self.call_after_refresh(self.scroll_end, animate=False)
+
+    async def start_tool_call(self, action: str, description: str, additional: str) -> None:
+        was_at_bottom = self.scroll_offset.y >= self.max_scroll_y
+
+        lang = "python"
+        if additional.endswith(".json"):
+            lang = "json"
+        elif additional.endswith(".sh"):
+            lang = "bash"
+        elif additional.endswith(".js"):
+            lang = "javascript"
+        elif additional.endswith(".md"):
+            lang = "markdown"
+
+        title = f"[{action}] {description} - {additional}"
+
+        tool_panel = ToolCallPanelSyntax(title=title, lang=lang)
+        await self.mount(tool_panel)
+
+        self._current_md_content = ""
+        await self.mount(Markdown(""))
+
+        if was_at_bottom:
+            self.scroll_end(animate=False)
+
+    async def append_tool_content(self, content: str) -> None:
+        was_at_bottom = self.scroll_offset.y >= self.max_scroll_y
+
+        tool_panels = self.query(ToolCallPanelSyntax)
+        if tool_panels:
+            last_panel = tool_panels.last()
+            last_panel.append_code(content)
+
+            if was_at_bottom:
+                self.call_after_refresh(self.scroll_end, animate=False)
+
+    async def finish_tool_call(self, result: str) -> None:
+        was_at_bottom = self.scroll_offset.y >= self.max_scroll_y
+
+        tool_panels = self.query(ToolCallPanelSyntax)
+        if tool_panels:
+            last_panel = tool_panels.last()
+            last_panel.finished_result = result
+            last_panel.finished_success = "error" not in result.lower() and "fail" not in result.lower()
+            last_panel.end()
+
+        if was_at_bottom:
+            self.scroll_end(animate=False)
 
 
 class DynamicGrid(Grid):
@@ -247,7 +294,7 @@ class VibeFrontend(App):
             height: 100%;
             min-width: 50;
         }
-        
+
         .agent-view {
             border: panel $primary;
             background: $surface;
@@ -256,7 +303,7 @@ class VibeFrontend(App):
             margin: 0;
             padding: 1;
         }
-        
+
         AgentView {
             border: panel $primary;
             background: $surface;
@@ -265,9 +312,22 @@ class VibeFrontend(App):
             margin: 0;
             padding: 1;
         }
-        
+
         #log-panel {
             height: 30%;
+        }
+
+        ToolCallPanelSyntax {
+            height: auto;
+            width: 100%;
+            margin-bottom: 1;
+        }
+
+        /* Markdown 也需要 auto */
+        AgentView > Markdown {
+            height: auto;
+            width: 100%;
+            margin-bottom: 1;
         }
         """
 
@@ -275,8 +335,8 @@ class VibeFrontend(App):
 
     def __init__(self, sse_url, sync_url):
         super().__init__()
-        self.agent_tree: AgentTree = None # type: ignore
-        self.grid: DynamicGrid = None # type: ignore
+        self.agent_tree: AgentTree = None  # type: ignore
+        self.grid: DynamicGrid = None  # type: ignore
         self.agents: Dict[int, AgentView] = {}
         self.sse_url: str = sse_url
         self.sync_url: str = sync_url
@@ -318,7 +378,7 @@ class VibeFrontend(App):
             self.log_panel.styles.display = "none"
 
     async def handle_sse_event(self, event):
-        action_type = event["type"]
+        action_type = event.get("type")
         agent_id = int(event["agent_id"])
 
         if agent_id not in self.agents:
@@ -328,7 +388,20 @@ class VibeFrontend(App):
         agent_view = self.agents[agent_id]
 
         if action_type == "token":
-            agent_view.append_token(event["content"])
+            await agent_view.append_token(event.get("content", ""))
+
+        elif action_type == "tool_call":
+            if "action" in event:
+                action = event.get("action", "Unknown")
+                description = event.get("description", "Tool Call")
+                additional = event.get("additional", "")
+                await agent_view.start_tool_call(action, description, additional)
+            elif "content" in event:
+                await agent_view.append_tool_content(event.get("content", ""))
+
+        elif action_type == "tool_result":
+            result = event.get("result", "")
+            await agent_view.finish_tool_call(result)
 
     async def _sse_single_agent(self, agent_id):
         url = f"{self.sse_url}?id={agent_id}"

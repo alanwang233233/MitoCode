@@ -1,3 +1,5 @@
+uvicorn
+sse-starlette
 rich
 openai
 mcp
