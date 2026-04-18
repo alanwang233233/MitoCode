@@ -238,6 +238,11 @@ class _SingleAgent:
                     for tool_call_chunk in delta.tool_calls:
                         index = tool_call_chunk.index
 
+                        if index not in active_tool_blocks:
+                            block = _ToolCallMessageBlock()
+                            self.messages.append(block)
+                            active_tool_blocks[index] = block
+
                         if index not in tool_calls_dict:
                             tool_calls_dict[index] = {"id": "", "name": ""}
 
@@ -292,10 +297,11 @@ class _SingleAgent:
                     elif func_name in self.tools_map:
                         tool_func = self.tools_map[func_name]
                         try:
-                            if asyncio.iscoroutinefunction(tool_func):
-                                result = await tool_func(**func_args)
+                            result_raw = tool_func(**func_args)
+                            if asyncio.asyncio.iscoroutine(result_raw):
+                                result = await result_raw
                             else:
-                                result = tool_func(**func_args)
+                                result = result_raw
                             result_str = str(result)
                             success = True
                         except TypeError as e:
@@ -314,10 +320,9 @@ class _SingleAgent:
             # Standard Stops
             if stream_finished_reason in ["stop", "length", "content_filter"]:
                 if self.on_end:
-                    if asyncio.iscoroutinefunction(self.on_end):
-                        await self.on_end(self, self.messages)
-                    else:
-                        self.on_end(self, self.messages)
+                    ret = self.on_end(self, self.messages)
+                    if ret and asyncio.iscoroutine(ret):
+                        await ret
                 
                 yield {"event": "system.finished.standard", "reason": stream_finished_reason}
                 break
