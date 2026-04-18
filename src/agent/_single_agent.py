@@ -238,11 +238,6 @@ class _SingleAgent:
                     for tool_call_chunk in delta.tool_calls:
                         index = tool_call_chunk.index
 
-                        if index not in active_tool_blocks:
-                            block = _ToolCallMessageBlock()
-                            self.messages.append(block)
-                            active_tool_blocks[index] = block
-
                         if index not in tool_calls_dict:
                             tool_calls_dict[index] = {"id": "", "name": ""}
 
@@ -298,7 +293,7 @@ class _SingleAgent:
                         tool_func = self.tools_map[func_name]
                         try:
                             result_raw = tool_func(**func_args)
-                            if asyncio.asyncio.iscoroutine(result_raw):
+                            if asyncio.iscoroutine(result_raw):
                                 result = await result_raw
                             else:
                                 result = result_raw
