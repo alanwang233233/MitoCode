@@ -75,7 +75,7 @@ class _ToolResultMessageBlock(_MessageBlock):
         self.finished = True
 
 
-class _SingleAgent:
+class Agent:
     """An asynchronous LLM agent capable of handling streaming text and tool execution."""
     def __init__(self, **settings):
         provider = settings.get("provider", None)
