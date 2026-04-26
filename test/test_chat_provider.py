@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from backend.agent._single_agent import _SingleAgent
 from backend.chat_provider._sample_chat_provider import _SampleChatProvider
-from backend.chat_provider.chat_provider_openai import OpenAISubAgent
+from backend.chat_provider.chat_provider_openai import ChatProviderOpenAI
 
 
 @pytest.mark.asyncio
