@@ -27,9 +27,9 @@ async def test_mock_provider_works_with_single_agent_stream():
 
 
 def test_openai_subagent_settings_schema_validation():
-    assert OpenAISubAgent.check_settings_schema({"api_key": "sk-test"}) is True
-    assert OpenAISubAgent.check_settings_schema({}) is False
-    assert OpenAISubAgent.check_settings_schema([]) is False
+    assert ChatProviderOpenAI.check_settings_schema({"api_key": "sk-test"}) is True
+    assert ChatProviderOpenAI.check_settings_schema({}) is False
+    assert ChatProviderOpenAI.check_settings_schema([]) is False
 
 
 def test_openai_subagent_schema_declares_required_api_key():
