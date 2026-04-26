@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: read
-      contents: write
+      contents: read
       security-events: write
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +40,7 @@ jobs:
           upload: never
           output: sarif-results
 
-      - name: Generate CodeQL HTML report and index
+      - name: Generate CodeQL HTML report
         if: always()
         env:
           GH_SHA: ${{ github.sha }}
@@ -130,188 +130,22 @@ jobs:
               "        </tbody>\n"
               "      </table>\n"
               "    </div>\n"
-              "    <p class='mt-6 text-xs text-gray-400'>"
-              "<a href='index.html' class='underline'>All reports</a></p>\n"
               "  </div>\n"
               "</body>\n"
               "</html>"
           )
 
-          index_html = (
-              "<!DOCTYPE html>\n"
-              "<html lang='en'>\n"
-              "<head>\n"
-              "  <meta charset='UTF-8'>\n"
-              "  <meta name='viewport' content='width=device-width, initial-scale=1.0'>\n"
-              "  <title>CI Reports</title>\n"
-              "  <script src='https://cdn.tailwindcss.com'></script>\n"
-              "</head>\n"
-              "<body class='bg-white text-gray-800 font-sans antialiased'>\n"
-              "  <div class='max-w-5xl mx-auto px-6 py-12'>\n"
-              "    <h1 class='text-2xl font-semibold text-gray-900 mb-2'>CI Reports</h1>\n"
-              "    <p class='text-sm text-gray-500 mb-8'>Last 10 runs, newest first.</p>\n"
-              "    <div id='wrap' class='overflow-x-auto rounded border border-gray-200'>\n"
-              "      <table class='w-full text-sm'>\n"
-              "        <thead>\n"
-              "          <tr class='bg-gray-50 text-left text-gray-600 font-medium'>\n"
-              "            <th class='p-3 border-b border-gray-200'>Run time</th>\n"
-              "            <th class='p-3 border-b border-gray-200'>Commit</th>\n"
-              "            <th class='p-3 border-b border-gray-200'>Pytest</th>\n"
-              "            <th class='p-3 border-b border-gray-200'>Findings</th>\n"
-              "            <th class='p-3 border-b border-gray-200'>Report</th>\n"
-              "            <th class='p-3 border-b border-gray-200'>Pull request</th>\n"
-              "          </tr>\n"
-              "        </thead>\n"
-              "        <tbody id='tbody'></tbody>\n"
-              "      </table>\n"
-              "    </div>\n"
-              "    <p id='empty' class='hidden text-center text-gray-400 mt-8 text-sm'>No data.</p>\n"
-              "  </div>\n"
-              "  <script>\n"
-              "    fetch('result.json')\n"
-              "      .then(r => r.json())\n"
-              "      .then(data => {\n"
-              "        const rows = [...data].reverse();\n"
-              "        const tbody = document.getElementById('tbody');\n"
-              "        if (!rows.length) {\n"
-              "          document.getElementById('empty').classList.remove('hidden');\n"
-              "          document.getElementById('wrap').classList.add('hidden');\n"
-              "          return;\n"
-              "        }\n"
-              "        rows.forEach(r => {\n"
-              "          const pytest = r.pytest_passed\n"
-              "            ? '<span class=\"text-green-700 font-medium\">passed</span>'\n"
-              "            : '<span class=\"text-red-600 font-medium\">failed</span>';\n"
-              "          const pr = r.pr_url\n"
-              "            ? `<a href=\"${r.pr_url}\" class=\"underline text-gray-700 hover:text-gray-900\">${r.pr_title || r.pr_url}</a>`\n"
-              "            : '<span class=\"text-gray-400\">-</span>';\n"
-              "          tbody.insertAdjacentHTML('beforeend', `\n"
-              "            <tr class=\"hover:bg-gray-50 transition-colors\">\n"
-              "              <td class=\"p-3 border-b border-gray-100 text-gray-600 whitespace-nowrap\">${r.run_time}</td>\n"
-              "              <td class=\"p-3 border-b border-gray-100 font-mono\">${r.hash}</td>\n"
-              "              <td class=\"p-3 border-b border-gray-100\">${pytest}</td>\n"
-              "              <td class=\"p-3 border-b border-gray-100\">${r.findings_count ?? '-'}</td>\n"
-              "              <td class=\"p-3 border-b border-gray-100\">\n"
-              "                <a href=\"${r.report_file}\" class=\"underline text-gray-700 hover:text-gray-900\">view</a>\n"
-              "              </td>\n"
-              "              <td class=\"p-3 border-b border-gray-100\">${pr}</td>\n"
-              "            </tr>`);\n"
-              "        });\n"
-              "      })\n"
-              "      .catch(() => {\n"
-              "        document.getElementById('empty').classList.remove('hidden');\n"
-              "        document.getElementById('wrap').classList.add('hidden');\n"
-              "      });\n"
-              "  </script>\n"
-              "</body>\n"
-              "</html>"
-          )
-
-          os.makedirs("/tmp/ci-report", exist_ok=True)
-          with open(f"/tmp/ci-report/{report_filename}", "w") as f:
+          os.makedirs("codeql-report", exist_ok=True)
+          with open(f"codeql-report/{report_filename}", "w") as f:
               f.write(report_html)
-          with open("/tmp/ci-index.html", "w") as f:
-              f.write(index_html)
-          with open("/tmp/ci-meta.json", "w") as f:
-              json.dump({
-                  "run_time": run_time_iso,
-                  "report_filename": report_filename,
-                  "short_sha": short_sha,
-                  "findings_count": len(findings),
-              }, f)
           print(f"Report: {report_filename}, findings: {len(findings)}")
           PYEOF
 
-      - name: Publish to codeql branch
+      - name: Upload CodeQL artifacts
         if: always()
-        env:
-          PYTEST_PASSED: ${{ steps.pytest.outcome == 'success' && 'true' || 'false' }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          if git ls-remote --heads origin codeql | grep -q codeql; then
-            git add sarif-results/*.sarif
-            git commit -m "Add SARIF results"
-            git fetch origin codeql
-            git reset --hard HEAD
-            git clean -fdx
-            git checkout codeql
-          else
-            git checkout --orphan codeql
-            git rm -rf . --ignore-unmatch
-            git clean -fdx
-          fi
-
-          mkdir -p report
-
-          python - <<'PYEOF'
-          import json, os, shutil
-
-          meta = json.load(open("/tmp/ci-meta.json"))
-          run_time = meta["run_time"]
-          report_filename = meta["report_filename"]
-          short_sha = meta["short_sha"]
-          findings_count = meta["findings_count"]
-          pytest_passed = os.environ.get("PYTEST_PASSED", "true") == "true"
-          pr_url = os.environ.get("PR_URL", "")
-          pr_title = os.environ.get("PR_TITLE", "")
-
-          results = []
-          if os.path.exists("result.json"):
-              with open("result.json") as f:
-                  results = json.load(f)
-
-          dst = f"report/{report_filename}"
-          if not os.path.exists(dst):
-              shutil.copy(f"/tmp/ci-report/{report_filename}", dst)
-
-          results.append({
-              "run_time": run_time,
-              "hash": short_sha,
-              "report_file": f"report/{report_filename}",
-              "pytest_passed": pytest_passed,
-              "findings_count": findings_count,
-              "pr_url": pr_url,
-              "pr_title": pr_title,
-          })
-
-          if len(results) > 10:
-              for old in results[:-10]:
-                  orphan = old.get("report_file", "")
-                  if orphan and os.path.exists(orphan):
-                      os.remove(orphan)
-              results = results[-10:]
-
-          with open("result.json", "w") as f:
-              json.dump(results, f, indent=2)
-
-          shutil.copy("/tmp/ci-index.html", "index.html")
-
-          latest = results[-1]
-          pytest_status = "passed" if latest["pytest_passed"] else "FAILED"
-          pr_line = (
-              f"\n- Pull request: [{latest['pr_title']}]({latest['pr_url']})"
-              if latest.get("pr_url") else ""
-          )
-          readme = (
-              "# CI Reports\n\n"
-              "## Latest run\n\n"
-              f"- Time: {latest['run_time']}\n"
-              f"- Commit: `{latest['hash']}`\n"
-              f"- Pytest: {pytest_status}\n"
-              f"- CodeQL findings: {latest['findings_count']}\n"
-              f"- Report: [{latest['report_file']}]({latest['report_file']})"
-              f"{pr_line}\n\n"
-              "[All reports](index.html)\n"
-          )
-          with open("README.md", "w") as f:
-              f.write(readme)
-
-          print(f"Published: {report_filename}")
-          PYEOF
-
-          git add -A
-          git diff --cached --quiet || git commit -m "ci: update reports [skip ci]"
-          git push origin codeql
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-results
+          path: |
+            sarif-results/
+            codeql-report/
