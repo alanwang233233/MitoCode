@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from backend.agent.agent import Agent
 from backend.chat_provider._sample_chat_provider import _SampleChatProvider
-from backend.chat_provider.chat_provider_openai import OpenAISubAgent
+from backend.chat_provider.chat_provider_openai import ChatProviderOpenAI
 
 
 @pytest.mark.asyncio
@@ -27,12 +27,12 @@ async def test_mock_provider_works_with_single_agent_stream():
 
 
 def test_openai_subagent_settings_schema_validation():
-    assert OpenAISubAgent.check_settings_schema({"api_key": "sk-test"}) is True
-    assert OpenAISubAgent.check_settings_schema({}) is False
-    assert OpenAISubAgent.check_settings_schema([]) is False
+    assert ChatProviderOpenAI.check_settings_schema({"api_key": "sk-test"}) is True
+    assert ChatProviderOpenAI.check_settings_schema({}) is False
+    assert ChatProviderOpenAI.check_settings_schema([]) is False
 
 
 def test_openai_subagent_schema_declares_required_api_key():
-    schema = OpenAISubAgent.get_settings_schema()
+    schema = ChatProviderOpenAI.get_settings_schema()
     assert "api_key" in schema["required"]
 
