@@ -2,13 +2,10 @@ from typing import Any, Dict, List, Optional
 
 from ._sample_chat_provider import _SampleChatProvider
 
-try:
-    from openai import AsyncOpenAI
-except ImportError:  # pragma: no cover
-    AsyncOpenAI = None
+from openai import AsyncOpenAI
 
 
-class ProviderOpenAI(_SampleChatProvider):
+class ChatProviderOpenAI(_SampleChatProvider):
     """Provider subclass backed by OpenAI Chat Completions streaming API."""
 
     @staticmethod
@@ -42,9 +39,6 @@ class ProviderOpenAI(_SampleChatProvider):
         return isinstance(api_key, str) and len(api_key.strip()) > 0
 
     def init(self) -> None:
-        if AsyncOpenAI is None:
-            raise ImportError("openai package is required to use OpenAISubAgent")
-
         self.client = AsyncOpenAI(
             api_key=self.settings.get("api_key", ""),
             base_url=self.settings.get("base_url", None),
