@@ -1,7 +1,7 @@
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from agent.agent import Agent
-from agent import mcp_manager
+from backend.agent.agent import Agent
+from backend.agent import mcp_manager
 
 executor = ThreadPoolExecutor(max_workers=4)
 agents: dict[int, Agent] = {}

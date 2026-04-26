@@ -1,12 +1,11 @@
 import sys
 import os
-import asyncio
 import pytest
 import unittest.mock as mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from agent._single_agent import (
+from backend.agent._single_agent import (
     _MessageBlock,
     _PlainTextMessageBlock,
     _ToolCallMessageBlock,
