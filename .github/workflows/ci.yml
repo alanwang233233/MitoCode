@@ -10,7 +10,7 @@ jobs:
     name: Test and Analyze
     runs-on: ubuntu-latest
     permissions:
-      actions: read
+      actions: write
       contents: read
       security-events: write
     steps:
