@@ -58,8 +58,7 @@ class ChatProviderOpenAI(_SampleChatProvider):
         on_tool_call=lambda _, __: None,
         on_stop=lambda _, __: None,
     ):
-        # TODO: Add tool call "回调函数"（idk how2 translate it )
-        del tool_call, on_tool_call
+        # TODO: Add tool call callback function
 
         current_model = model or self.default_model
         if current_model not in self.model_list:
