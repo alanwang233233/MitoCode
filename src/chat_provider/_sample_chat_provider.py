@@ -60,7 +60,7 @@ class _SampleChatProvider:
 
     @staticmethod
     def get_model_list() -> List[str]:
-        return ["mock-gpt"]
+        return ["mock-model"]
 
     def init(self) -> None:
         return None
@@ -128,6 +128,7 @@ class _SampleChatProvider:
         on_tool_call=lambda _, __: None,
         on_stop=lambda _, __: None,
     ):
+        # TODO: Add tool call mock
         del tools, tool_call, on_tool_call
 
         current_model = model or self.default_model
