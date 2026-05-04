@@ -34,6 +34,27 @@ class AsyncIterator:
         raise StopAsyncIteration
 
 
+class CancelOnSecondChunkIterator:
+    """Async iterator that cancels *session* just before the second chunk is
+    delivered to the loop body (so the cancel-check inside the loop fires)."""
+
+    def __init__(self, items, session):
+        self.items = list(items)
+        self.session = session
+        self.count = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.items:
+            raise StopAsyncIteration
+        self.count += 1
+        if self.count == 2:
+            self.session.cancel()
+        return self.items.pop(0)
+
+
 def make_chunk(content=None, tool_calls=None, finish_reason=None):
     """Build a minimal mock stream chunk."""
     chunk = mock.MagicMock()
@@ -42,6 +63,18 @@ def make_chunk(content=None, tool_calls=None, finish_reason=None):
     choice.delta.tool_calls = tool_calls
     choice.finish_reason = finish_reason
     chunk.choices = [choice]
+    return chunk
+
+
+def make_tool_chunk(index, call_id, name, arguments):
+    """Build a mock stream chunk that carries a single tool-call fragment."""
+    tc = mock.MagicMock()
+    tc.index = index
+    tc.id = call_id
+    tc.function.name = name
+    tc.function.arguments = arguments
+    chunk = make_chunk(tool_calls=[tc], finish_reason=None)
+    chunk.choices[0].delta.content = None
     return chunk
 
 
@@ -491,3 +524,501 @@ class TestSessionFactory:
         factory = SessionFactory(provider=provider, tool_schemas=schemas)
         session = factory.create_session()
         assert session.tool_schemas is schemas
+
+
+# ===========================================================================
+# AgentSession — edge-case tests
+# ===========================================================================
+
+class TestAgentSessionEdgeCases:
+    """Additional edge cases not covered by the baseline suite."""
+
+    # ------------------------------------------------------------------
+    # append_user_prompt
+    # ------------------------------------------------------------------
+
+    def test_append_empty_string_prompt(self):
+        """An empty string is a valid prompt and must still create a message block."""
+        session = AgentSession(provider=mock.MagicMock())
+        session.append_user_prompt("")
+        assert len(session.messages) == 1
+        assert session.messages[0].message == ""
+
+    def test_multiple_user_prompts_accumulate(self):
+        """Each call adds a distinct block; messages are never merged."""
+        session = AgentSession(provider=mock.MagicMock())
+        session.append_user_prompt("first")
+        session.append_user_prompt("second")
+        assert len(session.messages) == 2
+        assert session.messages[0].message == "first"
+        assert session.messages[1].message == "second"
+
+    # ------------------------------------------------------------------
+    # cancel
+    # ------------------------------------------------------------------
+
+    def test_cancel_is_idempotent(self):
+        """Calling cancel() twice must not raise and the event remains set."""
+        session = AgentSession(provider=mock.MagicMock())
+        session.cancel()
+        session.cancel()  # second call must not raise
+        assert session._cancel_event.is_set()
+
+    # ------------------------------------------------------------------
+    # append_assistant_delta
+    # ------------------------------------------------------------------
+
+    def test_append_assistant_delta_after_tool_result_creates_new_block(self):
+        """A delta following a tool-result block must open a fresh assistant block."""
+        session = AgentSession(provider=mock.MagicMock())
+        session.messages.append(_ToolResultMessageBlock("call_1", "result"))
+        session.append_assistant_delta("text")
+        # Two blocks: the tool result and the new assistant block
+        assert len(session.messages) == 2
+        assert isinstance(session.messages[1], _PlainTextMessageBlock)
+        assert session.messages[1].role == "assistant"
+        assert session.messages[1].message == "text"
+
+    def test_append_assistant_delta_empty_string_creates_block(self):
+        """An empty delta still creates an assistant block when there is none."""
+        session = AgentSession(provider=mock.MagicMock())
+        session.append_assistant_delta("")
+        assert len(session.messages) == 1
+        assert session.messages[0].role == "assistant"
+
+    # ------------------------------------------------------------------
+    # build_standard_context
+    # ------------------------------------------------------------------
+
+    def test_build_context_multiple_tool_calls_grouped_into_one_assistant_turn(self):
+        """Multiple finished tool-call blocks without an intervening text block are
+        all bundled into a single assistant message with a tool_calls list."""
+        session = AgentSession(provider=mock.MagicMock())
+        session.append_user_prompt("q")
+
+        for i in range(3):
+            tc = _ToolCallMessageBlock(f"tool_{i}", f"call_{i}")
+            tc.append_argument_chunk("{}")
+            tc.finish()
+            session.messages.append(tc)
+            session.messages.append(_ToolResultMessageBlock(f"call_{i}", f"result_{i}"))
+
+        ctx = session.build_standard_context()
+        # Each pair (tool_call + tool_result) produces one assistant + one tool entry
+        assistant_messages = [c for c in ctx if c["role"] == "assistant"]
+        tool_messages = [c for c in ctx if c["role"] == "tool"]
+        assert len(tool_messages) == 3
+        # All tool calls should end up in assistant messages
+        total_tool_calls = sum(len(m.get("tool_calls", [])) for m in assistant_messages)
+        assert total_tool_calls == 3
+
+    def test_build_context_interleaved_turns(self):
+        """A full multi-turn conversation serialises in correct order."""
+        session = AgentSession(provider=mock.MagicMock())
+        session.append_user_prompt("turn 1")
+        session.append_assistant_delta("response 1")
+        session.append_user_prompt("turn 2")
+        session.append_assistant_delta("response 2")
+
+        ctx = session.build_standard_context()
+        assert len(ctx) == 4
+        assert ctx[0] == {"role": "user", "content": "turn 1"}
+        assert ctx[1] == {"role": "assistant", "content": "response 1"}
+        assert ctx[2] == {"role": "user", "content": "turn 2"}
+        assert ctx[3] == {"role": "assistant", "content": "response 2"}
+
+    def test_build_context_only_tool_result_does_not_crash(self):
+        """A dangling tool-result without a preceding tool-call must not raise."""
+        session = AgentSession(provider=mock.MagicMock())
+        session.messages.append(_ToolResultMessageBlock("call_orphan", "ok"))
+        ctx = session.build_standard_context()
+        assert any(c["role"] == "tool" for c in ctx)
+
+
+# ===========================================================================
+# AgentRuntime — edge-case tests
+# ===========================================================================
+
+class TestAgentRuntimeEdgeCases:
+    """Additional edge cases not covered by the baseline suite."""
+
+    @pytest.fixture
+    def provider(self):
+        return mock.MagicMock()
+
+    @pytest.fixture
+    def session(self, provider):
+        return AgentSession(provider=provider)
+
+    @pytest.fixture
+    def runtime(self):
+        return AgentRuntime.get_instance()
+
+    # ------------------------------------------------------------------
+    # Cancellation during streaming
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_run_cancels_mid_stream(self, session, provider, runtime):
+        """Cancel event set just before the second chunk is processed stops the run."""
+        chunk1 = make_chunk(content="first", finish_reason=None)
+        chunk2 = make_chunk(content="second", finish_reason="stop")
+
+        provider.chat = mock.AsyncMock(
+            return_value=CancelOnSecondChunkIterator([chunk1, chunk2], session)
+        )
+
+        events = []
+        async for event in runtime.run(session):
+            events.append(event)
+
+        # The cancellation must be reported
+        assert any(e["event"] == "system.cancelled" for e in events)
+        # Only the first delta (processed before cancel) may appear, not the second
+        text_deltas = [e["delta"] for e in events if e["event"] == "agent.text"]
+        assert "second" not in text_deltas
+
+    # ------------------------------------------------------------------
+    # Tool error variants
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_run_tool_type_error_reported_as_invalid_argument(
+        self, session, provider, runtime
+    ):
+        """A tool that raises TypeError (e.g. wrong keyword args) reports
+        'Invalid argument.' without surfacing the raw exception."""
+        chunk1 = make_tool_chunk(0, "call_t", "strict_fn", "{}")
+        term_chunk = make_chunk(finish_reason="tool_calls")
+        term_chunk.choices[0].delta.content = None
+        term_chunk.choices[0].delta.tool_calls = None
+        chunk_stop = make_chunk(content="ok", finish_reason="stop")
+
+        call_count = 0
+
+        async def mock_chat(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return AsyncIterator([chunk1, term_chunk])
+            return AsyncIterator([chunk_stop])
+
+        provider.chat = mock_chat
+
+        def strict_fn(required_arg: str):
+            """Expects 'required_arg' but receives nothing → TypeError."""
+            return required_arg
+
+        session.tools_map = {"strict_fn": strict_fn}
+
+        events = []
+        async for event in runtime.run(session):
+            events.append(event)
+
+        result_events = [e for e in events if e["event"] == "agent.tool_call.result"]
+        assert len(result_events) == 1
+        assert result_events[0]["success"] is False
+        assert "Invalid argument" in result_events[0]["result"]
+
+    @pytest.mark.asyncio
+    async def test_run_tool_invalid_json_arguments(
+        self, session, provider, runtime
+    ):
+        """A tool call whose argument string is not valid JSON reports
+        'Invalid JSON Format.' and is not dispatched to the Python function."""
+        tc = mock.MagicMock()
+        tc.index = 0
+        tc.id = "call_bad_json"
+        tc.function.name = "my_fn"
+        tc.function.arguments = "{invalid json!}"
+
+        chunk1 = make_chunk(tool_calls=[tc], finish_reason="tool_calls")
+        chunk1.choices[0].delta.content = None
+        chunk_stop = make_chunk(content="ok", finish_reason="stop")
+
+        call_count = 0
+
+        async def mock_chat(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return AsyncIterator([chunk1] if call_count == 1 else [chunk_stop])
+
+        provider.chat = mock_chat
+        my_fn = mock.MagicMock(return_value="should not be called")
+        session.tools_map = {"my_fn": my_fn}
+
+        events = []
+        async for event in runtime.run(session):
+            events.append(event)
+
+        result_events = [e for e in events if e["event"] == "agent.tool_call.result"]
+        assert len(result_events) == 1
+        assert result_events[0]["success"] is False
+        assert "Invalid JSON Format" in result_events[0]["result"]
+        my_fn.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # content_filter finish reason
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_run_content_filter_reason_treated_as_standard_stop(
+        self, session, provider, runtime
+    ):
+        """'content_filter' finish reason must emit system.finished.standard."""
+        provider.chat = mock.AsyncMock(
+            return_value=AsyncIterator([
+                make_chunk(content="filtered", finish_reason="content_filter"),
+            ])
+        )
+
+        events = []
+        async for event in runtime.run(session):
+            events.append(event)
+
+        finish_events = [e for e in events if e["event"] == "system.finished.standard"]
+        assert len(finish_events) == 1
+        assert finish_events[0]["reason"] == "content_filter"
+
+    # ------------------------------------------------------------------
+    # Multiple parallel tool calls
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_run_multiple_parallel_tool_calls_all_executed(
+        self, session, provider, runtime
+    ):
+        """When the LLM proposes two tool calls in a single turn, both are
+        executed and both results are appended to the session."""
+        tc0 = mock.MagicMock()
+        tc0.index = 0
+        tc0.id = "call_a"
+        tc0.function.name = "add"
+        tc0.function.arguments = '{"x": 1, "y": 2}'
+
+        tc1 = mock.MagicMock()
+        tc1.index = 1
+        tc1.id = "call_b"
+        tc1.function.name = "mul"
+        tc1.function.arguments = '{"x": 3, "y": 4}'
+
+        chunk1 = make_chunk(tool_calls=[tc0, tc1], finish_reason="tool_calls")
+        chunk1.choices[0].delta.content = None
+        chunk_stop = make_chunk(content="done", finish_reason="stop")
+
+        call_count = 0
+
+        async def mock_chat(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return AsyncIterator([chunk1] if call_count == 1 else [chunk_stop])
+
+        provider.chat = mock_chat
+        session.tools_map = {
+            "add": lambda x, y: x + y,
+            "mul": lambda x, y: x * y,
+        }
+
+        events = []
+        async for event in runtime.run(session):
+            events.append(event)
+
+        result_events = [e for e in events if e["event"] == "agent.tool_call.result"]
+        assert len(result_events) == 2
+        assert all(e["success"] for e in result_events)
+        results = {e["id"]: e["result"] for e in result_events}
+        assert results["call_a"] == "3"
+        assert results["call_b"] == "12"
+
+    # ------------------------------------------------------------------
+    # Async on_end callback
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_run_async_on_end_is_awaited(self, session, provider, runtime):
+        """An async on_end callback must be awaited (not just called)."""
+        awaited = []
+
+        async def async_on_end(sess, messages):
+            awaited.append(True)
+
+        session.on_end = async_on_end
+        provider.chat = mock.AsyncMock(
+            return_value=AsyncIterator([make_chunk(content="hi", finish_reason="stop")])
+        )
+
+        async for _ in runtime.run(session):
+            pass
+
+        assert awaited == [True]
+
+    # ------------------------------------------------------------------
+    # Tool results persisted in session
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_run_tool_result_persisted_in_session_messages(
+        self, session, provider, runtime
+    ):
+        """After a tool call round-trip, both the tool-call block and its result
+        block must appear in session.messages."""
+        tc = mock.MagicMock()
+        tc.index = 0
+        tc.id = "call_p"
+        tc.function.name = "ping"
+        tc.function.arguments = "{}"
+
+        chunk1 = make_chunk(tool_calls=[tc], finish_reason="tool_calls")
+        chunk1.choices[0].delta.content = None
+        chunk_stop = make_chunk(content="ok", finish_reason="stop")
+
+        call_count = 0
+
+        async def mock_chat(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return AsyncIterator([chunk1] if call_count == 1 else [chunk_stop])
+
+        provider.chat = mock_chat
+        session.tools_map = {"ping": lambda: "pong"}
+
+        async for _ in runtime.run(session):
+            pass
+
+        types = [type(m).__name__ for m in session.messages]
+        assert "_ToolCallMessageBlock" in types
+        assert "_ToolResultMessageBlock" in types
+        result_block = next(
+            m for m in session.messages
+            if isinstance(m, _ToolResultMessageBlock)
+        )
+        assert result_block.content == "pong"
+
+    # ------------------------------------------------------------------
+    # Argument chunks streamed across multiple stream packets
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_run_tool_arguments_streamed_in_chunks(
+        self, session, provider, runtime
+    ):
+        """Tool argument JSON arriving in fragments must be concatenated and
+        parsed correctly before execution."""
+        # First chunk: header (id + name)
+        tc_header = mock.MagicMock()
+        tc_header.index = 0
+        tc_header.id = "call_stream"
+        tc_header.function.name = "echo"
+        tc_header.function.arguments = None
+
+        # Second chunk: first half of the argument string
+        tc_arg1 = mock.MagicMock()
+        tc_arg1.index = 0
+        tc_arg1.id = None
+        tc_arg1.function.name = None
+        tc_arg1.function.arguments = '{"msg":'
+
+        # Third chunk: second half, plus the finish reason
+        tc_arg2 = mock.MagicMock()
+        tc_arg2.index = 0
+        tc_arg2.id = None
+        tc_arg2.function.name = None
+        tc_arg2.function.arguments = ' "hello"}'
+
+        chunk_header = make_chunk(tool_calls=[tc_header], finish_reason=None)
+        chunk_header.choices[0].delta.content = None
+        chunk_arg1 = make_chunk(tool_calls=[tc_arg1], finish_reason=None)
+        chunk_arg1.choices[0].delta.content = None
+        chunk_arg2 = make_chunk(tool_calls=[tc_arg2], finish_reason="tool_calls")
+        chunk_arg2.choices[0].delta.content = None
+        chunk_stop = make_chunk(content="ok", finish_reason="stop")
+
+        call_count = 0
+
+        async def mock_chat(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return AsyncIterator([chunk_header, chunk_arg1, chunk_arg2])
+            return AsyncIterator([chunk_stop])
+
+        provider.chat = mock_chat
+        session.tools_map = {"echo": lambda msg: msg}
+
+        events = []
+        async for event in runtime.run(session):
+            events.append(event)
+
+        result_events = [e for e in events if e["event"] == "agent.tool_call.result"]
+        assert len(result_events) == 1
+        assert result_events[0]["success"] is True
+        assert result_events[0]["result"] == "hello"
+
+    # ------------------------------------------------------------------
+    # Empty choices list (not None) should not crash
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_run_empty_choices_list_skipped(self, session, provider, runtime):
+        """A chunk with an empty choices list (not None) must be silently skipped."""
+        empty_choices = mock.MagicMock()
+        empty_choices.choices = []
+        provider.chat = mock.AsyncMock(
+            return_value=AsyncIterator([
+                empty_choices,
+                make_chunk(content="ok", finish_reason="stop"),
+            ])
+        )
+
+        events = []
+        async for event in runtime.run(session):
+            events.append(event)
+
+        text_events = [e for e in events if e["event"] == "agent.text"]
+        assert len(text_events) == 1
+
+
+# ===========================================================================
+# SessionFactory — edge-case tests
+# ===========================================================================
+
+class TestSessionFactoryEdgeCases:
+    """Additional edge cases not covered by the baseline suite."""
+
+    def test_defaults_not_mutated_by_per_call_override(self):
+        """Providing an override at call-time must not change the factory defaults."""
+        provider_default = mock.MagicMock()
+        provider_override = mock.MagicMock()
+        factory = SessionFactory(provider=provider_default)
+
+        factory.create_session(provider=provider_override)
+
+        # A subsequent call with no override must still use the original default.
+        session = factory.create_session()
+        assert session.provider is provider_default
+
+    def test_tools_map_default_is_independent_per_session(self):
+        """Mutations to one session's tools_map must not affect the factory default
+        or sibling sessions that share the reference."""
+        provider = mock.MagicMock()
+        shared_tools = {}
+        factory = SessionFactory(provider=provider, tools_map=shared_tools)
+
+        s1 = factory.create_session()
+        s2 = factory.create_session()
+
+        # Both sessions reference the same tools_map dict as specified
+        assert s1.tools_map is shared_tools
+        assert s2.tools_map is shared_tools
+
+    def test_create_session_call_only_override_does_not_affect_next_call(self):
+        """A one-off override must be scoped to that single create_session call."""
+        provider = mock.MagicMock()
+        extra_schemas = [{"name": "x"}]
+        factory = SessionFactory(provider=provider)
+
+        factory.create_session(tool_schemas=extra_schemas)
+        next_session = factory.create_session()
+
+        # The next session must fall back to the factory default (empty list)
+        assert next_session.tool_schemas == []
