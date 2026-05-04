@@ -284,11 +284,12 @@ class TestAgentRuntimeRun:
         chunk1.choices[0].delta.content = None
         chunk2 = make_chunk(content="Done", finish_reason="stop")
 
-        call_count = [0]
+        call_count = 0
 
         async def mock_chat(**kwargs):
-            call_count[0] += 1
-            return AsyncIterator([chunk1] if call_count[0] == 1 else [chunk2])
+            nonlocal call_count
+            call_count += 1
+            return AsyncIterator([chunk1] if call_count == 1 else [chunk2])
 
         provider.chat = mock_chat
         session.tools_map = {"greet": lambda name: f"Hello, {name}!"}
@@ -315,11 +316,12 @@ class TestAgentRuntimeRun:
         chunk1.choices[0].delta.content = None
         chunk2 = make_chunk(content="ok", finish_reason="stop")
 
-        call_count = [0]
+        call_count = 0
 
         async def mock_chat(**kwargs):
-            call_count[0] += 1
-            return AsyncIterator([chunk1] if call_count[0] == 1 else [chunk2])
+            nonlocal call_count
+            call_count += 1
+            return AsyncIterator([chunk1] if call_count == 1 else [chunk2])
 
         provider.chat = mock_chat
 
@@ -344,11 +346,12 @@ class TestAgentRuntimeRun:
         chunk1.choices[0].delta.content = None
         chunk2 = make_chunk(content="ok", finish_reason="stop")
 
-        call_count = [0]
+        call_count = 0
 
         async def mock_chat(**kwargs):
-            call_count[0] += 1
-            return AsyncIterator([chunk1] if call_count[0] == 1 else [chunk2])
+            nonlocal call_count
+            call_count += 1
+            return AsyncIterator([chunk1] if call_count == 1 else [chunk2])
 
         provider.chat = mock_chat
 
@@ -378,11 +381,12 @@ class TestAgentRuntimeRun:
         chunk1.choices[0].delta.content = None
         chunk2 = make_chunk(content="done", finish_reason="stop")
 
-        call_count = [0]
+        call_count = 0
 
         async def mock_chat(**kwargs):
-            call_count[0] += 1
-            return AsyncIterator([chunk1] if call_count[0] == 1 else [chunk2])
+            nonlocal call_count
+            call_count += 1
+            return AsyncIterator([chunk1] if call_count == 1 else [chunk2])
 
         provider.chat = mock_chat
 
