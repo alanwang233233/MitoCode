@@ -75,8 +75,27 @@ class Agent:
         Delegates to :class:`AgentRuntime` while passing the underlying
         :class:`AgentSession` as the state container.  Refer to
         :meth:`AgentRuntime.run` for a full description of yielded events.
+
+        The ``on_end`` callback (if any) receives *this* ``Agent`` wrapper as its
+        first argument to preserve backward compatibility with callers that relied
+        on ``agent.run()`` being available from within the callback.
         """
         session = object.__getattribute__(self, "_session")
         runtime = object.__getattribute__(self, "_runtime")
-        async for event in runtime.run(session):
-            yield event
+
+        # Wrap on_end so callers receive the Agent wrapper (which exposes the
+        # full public API including run()) rather than the bare AgentSession.
+        original_on_end = session.on_end
+        if original_on_end is not None:
+            agent_self = self
+            def _wrap(orig):
+                def _agent_on_end(sess, messages):
+                    return orig(agent_self, messages)
+                return _agent_on_end
+            session.on_end = _wrap(original_on_end)
+
+        try:
+            async for event in runtime.run(session):
+                yield event
+        finally:
+            session.on_end = original_on_end

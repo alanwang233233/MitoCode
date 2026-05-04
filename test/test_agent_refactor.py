@@ -14,6 +14,7 @@ from backend.agent.agent_session import (
 )
 from backend.agent.agent_runtime import AgentRuntime
 from backend.agent.session_factory import SessionFactory
+from backend.agent.agent import Agent
 
 
 # ---------------------------------------------------------------------------
@@ -1022,3 +1023,231 @@ class TestSessionFactoryEdgeCases:
 
         # The next session must fall back to the factory default (empty list)
         assert next_session.tool_schemas == []
+
+
+# ===========================================================================
+# Regression tests for gemini-code-assist issues
+# ===========================================================================
+
+class TestAgentRuntimeStreamingIdNameRegression:
+    """Regression tests covering the streamed tool-call ID/name fixes."""
+
+    @pytest.fixture
+    def provider(self):
+        return mock.MagicMock()
+
+    @pytest.fixture
+    def session(self, provider):
+        return AgentSession(provider=provider)
+
+    @pytest.fixture
+    def runtime(self):
+        return AgentRuntime.get_instance()
+
+    @pytest.mark.asyncio
+    async def test_tool_call_id_streamed_in_second_chunk_is_updated_on_block(
+        self, session, provider, runtime
+    ):
+        """If the tool call ID arrives across two chunks (first empty, second
+        with the real value), the _ToolCallMessageBlock and the final result
+        event must carry the complete ID, not the partial one."""
+
+        # Chunk 1: name arrives (no id yet → block created with empty id)
+        tc_name = mock.MagicMock()
+        tc_name.index = 0
+        tc_name.id = None
+        tc_name.function.name = "echo"
+        tc_name.function.arguments = None
+
+        # Chunk 2: id arrives (no name)
+        tc_id = mock.MagicMock()
+        tc_id.index = 0
+        tc_id.id = "call_real"
+        tc_id.function.name = None
+        tc_id.function.arguments = None
+
+        # Chunk 3: arguments + finish
+        tc_args = mock.MagicMock()
+        tc_args.index = 0
+        tc_args.id = None
+        tc_args.function.name = None
+        tc_args.function.arguments = '{"msg": "hi"}'
+
+        chunk1 = make_chunk(tool_calls=[tc_name], finish_reason=None)
+        chunk1.choices[0].delta.content = None
+        chunk2 = make_chunk(tool_calls=[tc_id], finish_reason=None)
+        chunk2.choices[0].delta.content = None
+        chunk3 = make_chunk(tool_calls=[tc_args], finish_reason="tool_calls")
+        chunk3.choices[0].delta.content = None
+        chunk_stop = make_chunk(content="done", finish_reason="stop")
+
+        call_count = 0
+
+        async def mock_chat(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return AsyncIterator([chunk1, chunk2, chunk3])
+            return AsyncIterator([chunk_stop])
+
+        provider.chat = mock_chat
+        session.tools_map = {"echo": lambda msg: msg}
+
+        events = []
+        async for event in runtime.run(session):
+            events.append(event)
+
+        result_events = [e for e in events if e["event"] == "agent.tool_call.result"]
+        assert len(result_events) == 1
+        # The result event must carry the complete, final ID — not an empty string.
+        assert result_events[0]["id"] == "call_real"
+        assert result_events[0]["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_tool_call_name_streamed_in_second_chunk_is_updated_on_block(
+        self, session, provider, runtime
+    ):
+        """If the function name arrives across two chunks (first half in chunk 1,
+        second half in chunk 2), the block must end up with the full name so the
+        tool can be dispatched correctly."""
+
+        # Chunk 1: id + first half of name
+        tc_part1 = mock.MagicMock()
+        tc_part1.index = 0
+        tc_part1.id = "call_n"
+        tc_part1.function.name = "ec"   # partial name
+        tc_part1.function.arguments = None
+
+        # Chunk 2: second half of name
+        tc_part2 = mock.MagicMock()
+        tc_part2.index = 0
+        tc_part2.id = None
+        tc_part2.function.name = "ho"   # completes "echo"
+        tc_part2.function.arguments = None
+
+        # Chunk 3: arguments + finish reason
+        tc_args = mock.MagicMock()
+        tc_args.index = 0
+        tc_args.id = None
+        tc_args.function.name = None
+        tc_args.function.arguments = '{"msg": "world"}'
+
+        chunk1 = make_chunk(tool_calls=[tc_part1], finish_reason=None)
+        chunk1.choices[0].delta.content = None
+        chunk2 = make_chunk(tool_calls=[tc_part2], finish_reason=None)
+        chunk2.choices[0].delta.content = None
+        chunk3 = make_chunk(tool_calls=[tc_args], finish_reason="tool_calls")
+        chunk3.choices[0].delta.content = None
+        chunk_stop = make_chunk(content="done", finish_reason="stop")
+
+        call_count = 0
+
+        async def mock_chat(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return AsyncIterator([chunk1, chunk2, chunk3])
+            return AsyncIterator([chunk_stop])
+
+        provider.chat = mock_chat
+        session.tools_map = {"echo": lambda msg: msg}
+
+        events = []
+        async for event in runtime.run(session):
+            events.append(event)
+
+        result_events = [e for e in events if e["event"] == "agent.tool_call.result"]
+        assert len(result_events) == 1
+        # The tool must have been dispatched by the FULL name "echo", not "ec".
+        assert result_events[0]["success"] is True
+        assert result_events[0]["result"] == "world"
+
+
+class TestAgentOnEndBackwardCompatibility:
+    """Regression tests for the on_end backward-compat fix in Agent.run()."""
+
+    @pytest.mark.asyncio
+    async def test_on_end_receives_agent_wrapper_not_session(self):
+        """When using the Agent wrapper, on_end must receive the Agent instance
+        (with .run(), .cancel(), etc.) not the bare AgentSession."""
+        provider = mock.MagicMock()
+        provider.chat = mock.AsyncMock(
+            return_value=AsyncIterator([make_chunk(content="hi", finish_reason="stop")])
+        )
+
+        received_first_arg = []
+
+        def on_end(obj, messages):
+            received_first_arg.append(obj)
+
+        agent = Agent(provider=provider, on_end=on_end)
+        async for _ in agent.run():
+            pass
+
+        assert len(received_first_arg) == 1
+        # Must be the Agent wrapper, not the underlying AgentSession
+        assert isinstance(received_first_arg[0], Agent)
+        assert hasattr(received_first_arg[0], "run")
+
+    @pytest.mark.asyncio
+    async def test_on_end_session_attribute_restored_after_run(self):
+        """The session's on_end must be restored to the original callable after
+        Agent.run() completes, even if the generator is not fully exhausted."""
+        provider = mock.MagicMock()
+        provider.chat = mock.AsyncMock(
+            return_value=AsyncIterator([make_chunk(content="hi", finish_reason="stop")])
+        )
+
+        original_on_end = mock.MagicMock()
+        agent = Agent(provider=provider, on_end=original_on_end)
+        session = object.__getattribute__(agent, "_session")
+
+        async for _ in agent.run():
+            pass
+
+        # After the run the session's on_end must be the original callable.
+        assert session.on_end is original_on_end
+
+    @pytest.mark.asyncio
+    async def test_async_on_end_receives_agent_wrapper(self):
+        """An async on_end callback is also given the Agent wrapper."""
+        provider = mock.MagicMock()
+        provider.chat = mock.AsyncMock(
+            return_value=AsyncIterator([make_chunk(content="hi", finish_reason="stop")])
+        )
+
+        received = []
+
+        async def async_on_end(obj, messages):
+            received.append(obj)
+
+        agent = Agent(provider=provider, on_end=async_on_end)
+        async for _ in agent.run():
+            pass
+
+        assert len(received) == 1
+        assert isinstance(received[0], Agent)
+
+    @pytest.mark.asyncio
+    async def test_direct_session_on_end_still_receives_session(self):
+        """When on_end is registered directly on AgentSession (not via Agent),
+        it must still receive the AgentSession instance (no wrapping)."""
+        provider = mock.MagicMock()
+        provider.chat = mock.AsyncMock(
+            return_value=AsyncIterator([make_chunk(content="hi", finish_reason="stop")])
+        )
+
+        received = []
+
+        def on_end(obj, messages):
+            received.append(obj)
+
+        session = AgentSession(provider=provider, on_end=on_end)
+        runtime = AgentRuntime.get_instance()
+
+        async for _ in runtime.run(session):
+            pass
+
+        assert len(received) == 1
+        assert isinstance(received[0], AgentSession)
+        assert not isinstance(received[0], Agent)

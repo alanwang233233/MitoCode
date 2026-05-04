@@ -128,6 +128,10 @@ class AgentRuntime:
 
                         if getattr(tool_call_chunk, 'id', None):
                             tool_calls_dict[index]["id"] += tool_call_chunk.id
+                            # Keep the block in sync if it was already created with a
+                            # partial ID (ID can be spread across multiple chunks).
+                            if index in active_tool_blocks:
+                                active_tool_blocks[index].id = tool_calls_dict[index]["id"]
 
                         if (getattr(tool_call_chunk, 'function', None) and
                                 getattr(tool_call_chunk.function, 'name', None)):
@@ -140,6 +144,9 @@ class AgentRuntime:
                                 session.messages.append(block)
                                 active_tool_blocks[index] = block
                                 yield {"event": "agent.tool_call.header", "id": call_id, "name": call_name}
+                            else:
+                                # Name can also be spread across multiple chunks.
+                                active_tool_blocks[index].name = tool_calls_dict[index]["name"]
 
                         if (getattr(tool_call_chunk, 'function', None) and
                                 getattr(tool_call_chunk.function, 'arguments', None)):
