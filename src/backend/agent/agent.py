@@ -43,7 +43,7 @@ class Agent:
         return getattr(object.__getattribute__(self, "_session"), name)
 
     def __setattr__(self, name: str, value):
-        if name in Agent._OWN_ATTRS:
+        if name in type(self)._OWN_ATTRS:
             object.__setattr__(self, name, value)
         else:
             setattr(object.__getattribute__(self, "_session"), name, value)
