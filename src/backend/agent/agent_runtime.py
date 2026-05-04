@@ -29,6 +29,11 @@ class AgentRuntime:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
+    
+    @classmethod
+    def force_new_instance(cls) -> "AgentRuntime":
+        cls._instance = super().__new__(cls)
+        return cls._instance
 
     @classmethod
     def get_instance(cls) -> "AgentRuntime":
@@ -211,3 +216,5 @@ class AgentRuntime:
 
                 yield {"event": "system.finished.standard", "reason": stream_finished_reason}
                 break
+
+runtime = AgentRuntime.get_instance()
