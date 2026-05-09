@@ -1,13 +1,13 @@
 # Re-export message block primitives so existing importers keep working.
-from .agent_session import (
+from agent_session import (
     _MessageBlock,
     _PlainTextMessageBlock,
     _ToolCallMessageBlock,
     _ToolResultMessageBlock,
     AgentSession,
 )
-from .agent_runtime import AgentRuntime
-from .session_factory import SessionFactory
+from agent_runtime import AgentRuntime
+from session_factory import SessionFactory
 
 
 class Agent:
