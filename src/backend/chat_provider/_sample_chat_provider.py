@@ -38,7 +38,7 @@ class _SampleChatProvider:
 
     def __init__(
         self,
-        default_model: str = "mock-gpt",
+        default_model: str = "mock-model",
         default_messages: Optional[List[Dict[str, Any]]] = None,
         settings: Optional[Dict[str, Any]] = None,
     ):
