@@ -216,21 +216,6 @@ class TestAgentSessionBuildStandardContext:
 # AgentRuntime tests
 # ===========================================================================
 
-class TestAgentRuntimeSingleton:
-    def test_get_instance_returns_same_object(self):
-        a = AgentRuntime.get_instance()
-        b = AgentRuntime.get_instance()
-        assert a is b
-
-    def test_constructor_returns_same_object(self):
-        a = AgentRuntime()
-        b = AgentRuntime()
-        assert a is b
-
-    def test_get_instance_equals_constructor(self):
-        assert AgentRuntime.get_instance() is AgentRuntime()
-
-
 class TestAgentRuntimeRun:
     @pytest.fixture
     def provider(self):
@@ -242,7 +227,7 @@ class TestAgentRuntimeRun:
 
     @pytest.fixture
     def runtime(self):
-        return AgentRuntime.get_instance()
+        return AgentRuntime
 
     @pytest.mark.asyncio
     async def test_run_yields_cancelled_when_pre_cancelled(self, session, runtime):
@@ -653,7 +638,7 @@ class TestAgentRuntimeEdgeCases:
 
     @pytest.fixture
     def runtime(self):
-        return AgentRuntime.get_instance()
+        return AgentRuntime
 
     # ------------------------------------------------------------------
     # Cancellation during streaming
@@ -1042,7 +1027,7 @@ class TestAgentRuntimeStreamingIdNameRegression:
 
     @pytest.fixture
     def runtime(self):
-        return AgentRuntime.get_instance()
+        return AgentRuntime
 
     @pytest.mark.asyncio
     async def test_tool_call_id_streamed_in_second_chunk_is_updated_on_block(
@@ -1243,7 +1228,7 @@ class TestAgentOnEndBackwardCompatibility:
             received.append(obj)
 
         session = AgentSession(provider=provider, on_end=on_end)
-        runtime = AgentRuntime.get_instance()
+        runtime = AgentRuntime
 
         async for _ in runtime.run(session):
             pass
