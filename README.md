@@ -1,3 +1,3 @@
-# vibe_coding_test
+# MitoCode
 
 Coming soon
