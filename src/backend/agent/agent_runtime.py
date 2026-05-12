@@ -196,4 +196,3 @@ class AgentRuntime:
                 yield {"event": "system.finished.standard", "reason": stream_finished_reason}
                 break
 
-runtime = AgentRuntime.get_instance()
