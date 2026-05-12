@@ -12,37 +12,9 @@ logger = logging.getLogger(__name__)
 
 
 class AgentRuntime:
-    """
-    Weak-state singleton responsible for executing an ``AgentSession``.
 
-    ``AgentRuntime`` contains no conversation state of its own; all mutable
-    data lives in the ``AgentSession`` passed to :meth:`run`.  Because it is
-    a singleton a single runtime instance can serve many sessions concurrently.
-
-    Obtain the singleton via :meth:`get_instance` rather than calling the
-    constructor directly.
-    """
-
-    _instance: "AgentRuntime | None" = None
-
-    def __new__(cls) -> "AgentRuntime":
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-    
-    @classmethod
-    def force_new_instance(cls) -> "AgentRuntime":
-        cls._instance = super().__new__(cls)
-        return cls._instance
-
-    @classmethod
-    def get_instance(cls) -> "AgentRuntime":
-        """Return (and create if necessary) the singleton ``AgentRuntime``."""
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
-
-    async def run(self, session: AgentSession) -> AsyncGenerator[Dict[str, Any], None]:
+    @staticmethod
+    async def run(session: AgentSession) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Main interaction loop for *session*: streams responses, handles tool
         calls, and yields events.
@@ -224,4 +196,3 @@ class AgentRuntime:
                 yield {"event": "system.finished.standard", "reason": stream_finished_reason}
                 break
 
-runtime = AgentRuntime.get_instance()

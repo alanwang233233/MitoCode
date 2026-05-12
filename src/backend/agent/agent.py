@@ -26,12 +26,13 @@ class Agent:
 
     # Attributes that belong to Agent itself and must NOT be forwarded to the
     # session.
-    _OWN_ATTRS = frozenset({"_session", "_runtime"})
+    # _OWN_ATTRS = frozenset({"_session", "_runtime"})
+    _OWN_ATTRS = frozenset({"_session"})
 
     def __init__(self, **settings):
         # Use object.__setattr__ to bypass our custom __setattr__.
         object.__setattr__(self, "_session", AgentSession(**settings))
-        object.__setattr__(self, "_runtime", AgentRuntime.get_instance())
+        # object.__setattr__(self, "_runtime", AgentRuntime.get_instance())
 
     # ------------------------------------------------------------------
     # Transparent attribute forwarding to the session
@@ -81,7 +82,7 @@ class Agent:
         on ``agent.run()`` being available from within the callback.
         """
         session = object.__getattribute__(self, "_session")
-        runtime = object.__getattribute__(self, "_runtime")
+        runtime = AgentRuntime
 
         # Wrap on_end so callers receive the Agent wrapper (which exposes the
         # full public API including run()) rather than the bare AgentSession.
