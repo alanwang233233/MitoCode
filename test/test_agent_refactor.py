@@ -5,16 +5,16 @@ import unittest.mock as mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from backend.agent.agent_session import (
+from mitocode_backend.agent.agent_session import (
     AgentSession,
     _MessageBlock,
     _PlainTextMessageBlock,
     _ToolCallMessageBlock,
     _ToolResultMessageBlock,
 )
-from backend.agent.agent_runtime import AgentRuntime
-from backend.agent.session_factory import SessionFactory
-from backend.agent.agent import Agent
+from mitocode_backend.agent.agent_runtime import AgentRuntime
+from mitocode_backend.agent.session_factory import SessionFactory
+from mitocode_backend.agent.agent import Agent
 
 
 # ---------------------------------------------------------------------------
