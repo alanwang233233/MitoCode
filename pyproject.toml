@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vibe-coding-test"
+name = "mitocode"
 version = "0.1.0"
 description = "vibe_coding_test"
 readme = "README.md"

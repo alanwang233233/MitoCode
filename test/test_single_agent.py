@@ -5,7 +5,7 @@ import unittest.mock as mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from backend.agent.agent import (
+from mitocode_backend.agent.agent import (
     _MessageBlock,
     _PlainTextMessageBlock,
     _ToolCallMessageBlock,
