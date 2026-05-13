@@ -1,9 +1,10 @@
 import asyncio
 import json
-import logging
 from typing import List, Any, Dict, Callable
 
-logger = logging.getLogger(__name__)
+from loguru import logger as loguru_logger
+
+logger = loguru_logger.bind(name=__name__)
 
 
 class _MessageBlock:
