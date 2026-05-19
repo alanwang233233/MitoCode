@@ -5,9 +5,9 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mitocode_backend.agent.agent import Agent
-from mitocode_backend.chat_provider._sample_chat_provider import _SampleChatProvider
-from mitocode_backend.chat_provider.chat_provider_openai import ChatProviderOpenAI
+from mitocode.backend import Agent
+from mitocode.backend.chat_provider._sample_chat_provider import _SampleChatProvider
+from mitocode.backend import ChatProviderOpenAI
 
 
 @pytest.mark.asyncio
