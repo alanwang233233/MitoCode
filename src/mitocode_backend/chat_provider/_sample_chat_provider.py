@@ -37,10 +37,10 @@ class _SampleChatProvider:
     """Default provider: offline mock server, overridable for real API backends."""
 
     def __init__(
-        self,
-        default_model: str = "mock-model",
-        default_messages: Optional[List[Dict[str, Any]]] = None,
-        settings: Optional[Dict[str, Any]] = None,
+            self,
+            default_model: str = "mock-model",
+            default_messages: Optional[List[Dict[str, Any]]] = None,
+            settings: Optional[Dict[str, Any]] = None,
     ):
         if default_messages is None:
             default_messages = [{"role": "system", "content": "You are a helpful assistant."}]
@@ -82,9 +82,9 @@ class _SampleChatProvider:
 
     @staticmethod
     def _merge_messages(
-        default_messages: List[Dict[str, Any]],
-        messages: Optional[List[Dict[str, Any]]],
-        user_messages: str,
+            default_messages: List[Dict[str, Any]],
+            messages: Optional[List[Dict[str, Any]]],
+            user_messages: str,
     ) -> List[Dict[str, Any]]:
         current_messages: List[Dict[str, Any]] = list(default_messages)
         if messages:
@@ -94,11 +94,11 @@ class _SampleChatProvider:
         return current_messages
 
     async def _wrap_stream(
-        self,
-        stream,
-        current_messages: List[Dict[str, Any]],
-        on_token,
-        on_stop,
+            self,
+            stream,
+            current_messages: List[Dict[str, Any]],
+            on_token,
+            on_stop,
     ):
         finish_reason = "unknown"
         try:
@@ -117,16 +117,16 @@ class _SampleChatProvider:
             raise
 
     async def chat(
-        self,
-        user_messages: str = "",
-        model: str = "",
-        tools: Optional[list] = None,
-        messages: Optional[List[Dict[str, Any]]] = None,
-        on_start=lambda _, __: None,
-        on_token=lambda _, __: None,
-        tool_call=lambda _, __: None,
-        on_tool_call=lambda _, __: None,
-        on_stop=lambda _, __: None,
+            self,
+            user_messages: str = "",
+            model: str = "",
+            tools: Optional[list] = None,
+            messages: Optional[List[Dict[str, Any]]] = None,
+            on_start=lambda _, __: None,
+            on_token=lambda _, __: None,
+            tool_call=lambda _, __: None,
+            on_tool_call=lambda _, __: None,
+            on_stop=lambda _, __: None,
     ):
         # TODO: Add tool call mock
         del tools, tool_call, on_tool_call
@@ -152,7 +152,7 @@ class _SampleChatProvider:
 
         async def _mock_stream():
             for i in range(0, len(full_text), chunk_size):
-                delta_text = full_text[i : i + chunk_size]
+                delta_text = full_text[i: i + chunk_size]
                 on_token(delta_text, current_messages)
                 yield _MockChunk(delta=_MockDelta(content=delta_text), finish_reason=None)
                 await asyncio.sleep(0)

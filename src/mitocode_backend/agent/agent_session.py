@@ -8,12 +8,14 @@ logger = logging.getLogger(__name__)
 
 class _MessageBlock:
     """Base class for all message elements in the conversation history."""
+
     def __init__(self):
         self.finished = False
 
 
 class _PlainTextMessageBlock(_MessageBlock):
     """Represents standard text messages from the user or the assistant."""
+
     def __init__(self, role: str, message: str = ""):
         super().__init__()
         self.role = role
@@ -27,6 +29,7 @@ class _PlainTextMessageBlock(_MessageBlock):
 
 class _ToolCallMessageBlock(_MessageBlock):
     """Represents an assistant's request to call a tool/function."""
+
     def __init__(self, name: str, call_id: str):
         super().__init__()
         self.name = name
@@ -68,6 +71,7 @@ class _ToolCallMessageBlock(_MessageBlock):
 
 class _ToolResultMessageBlock(_MessageBlock):
     """Stores the execution results returned from local tools."""
+
     def __init__(self, tool_call_id: str, result: str):
         super().__init__()
         self.role = "tool"

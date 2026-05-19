@@ -89,10 +89,13 @@ class Agent:
         original_on_end = session.on_end
         if original_on_end is not None:
             agent_self = self
+
             def _wrap(orig):
                 def _agent_on_end(sess, messages):
                     return orig(agent_self, messages)
+
                 return _agent_on_end
+
             session.on_end = _wrap(original_on_end)
 
         try:
