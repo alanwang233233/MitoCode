@@ -34,7 +34,7 @@ class Workspace:
         mkdir(Path(workspace_path) / MITOCODE_CONFIG_PATH)
         new_workspace = cls(workspace_path, name, description)
         new_workspace.dump()
-        return None
+        return new_workspace
 
     @classmethod
     def init_from_path(cls, path: Union[str, Path]) -> 'Workspace | None':
