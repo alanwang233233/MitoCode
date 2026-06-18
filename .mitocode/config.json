@@ -1,0 +1,14 @@
+{
+  "name": "MitoCode",
+  "description": "An AI Agent app",
+  "dir_map": {
+    "agent": "/agent",
+    "context": "/context"
+  },
+  "file_map": {
+    "mcpServers": "mcpServers.json",
+    "config": "config.json",
+    "skills": "skills.json",
+    "allow_commands": "allow_command.json"
+  }
+}
