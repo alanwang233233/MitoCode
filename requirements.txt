@@ -9,3 +9,5 @@ httpx
 httpx-sse
 textual
 fastapi
+
+jsonschema

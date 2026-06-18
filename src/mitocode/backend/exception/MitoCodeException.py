@@ -10,3 +10,9 @@ class MitoCodePathConvertError(MitoCodeBaseError):
 
 class MitoCodeWorkspaceInitError(MitoCodeBaseError):
     pass
+
+class MitoCodeWorkspaceCreateError(MitoCodeBaseError):
+    pass
+
+class MitoCodeWorkspaceDumpError(MitoCodeBaseError):
+    pass

@@ -1,7 +1,7 @@
 from os import mkdir
 from pathlib import Path
 from typing import Union
-from mitocode.backend.exception.MitoCodeException import MitoCodePathConvertError, MitoCodeWorkspaceInitError
+from mitocode.backend.exception.MitoCodeException import MitoCodePathConvertError, MitoCodeWorkspaceInitError, MitoCodeWorkspaceDumpError
 import json
 from jsonschema import validate, ValidationError
 import shutil
@@ -33,7 +33,7 @@ class Workspace:
 
         mkdir(Path(workspace_path) / MITOCODE_CONFIG_PATH)
         new_workspace = cls(workspace_path, name, description)
-        # dump to file system
+        new_workspace.dump()
         return None
 
     @classmethod
@@ -54,8 +54,15 @@ class Workspace:
             raise MitoCodeWorkspaceInitError(str(e))
 
     def dump(self) -> bool:
-        with open(Path(self.path) / MITOCODE_CONFIG_PATH / "config.json", "rw") as f:
-            config = json.load(f)
+        if self.config_path.is_dir() and self.path.is_dir() and self.config_file.is_file():
+            try:
+                with open(str(self.config_path / "config.json"), "w") as f:
+                    json.dump(self.config, f)
+                return True
+            except Exception as e:
+                raise MitoCodeWorkspaceDumpError(str(e))
+        return False
+
 
     @staticmethod
     def _convert_to_path(str_path: Union[str, Path]) -> Path:
@@ -64,22 +71,3 @@ class Workspace:
                 return Path(str_path)
             return str_path
         raise MitoCodePathConvertError("Fail :" + str(str_path))
-
-    def get_workspace_path(self) -> Path:
-        return self.path
-
-    def set_workspace_path(self, workspace_path: Union[Path, str]) -> bool:
-        if isinstance(workspace_path, str):
-            workspace_path: Path = Path(workspace_path)
-        if workspace_path.exists():
-            if not (workspace_path / MITOCODE_CONFIG_PATH).exists():
-                mkdir(Path(workspace_path) / MITOCODE_CONFIG_PATH)
-                self.path = workspace_path
-                return True
-        return False
-
-    def get_workspace_name(self) -> str:
-        return self.name
-
-    def set_workspace_name(self, name: str) -> None:
-        pass
