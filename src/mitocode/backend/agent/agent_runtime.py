@@ -1,5 +1,4 @@
 import asyncio
-import logging
 from typing import AsyncGenerator, Dict, Any
 
 from .agent_session import (
@@ -7,9 +6,6 @@ from .agent_session import (
     _ToolCallMessageBlock,
     _ToolResultMessageBlock,
 )
-
-logger = logging.getLogger(__name__)
-
 
 class AgentRuntime:
 
