@@ -22,11 +22,10 @@ jobs:
           python-version: "3.14"
 
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Run pytest
         id: pytest
-        continue-on-error: true
         run: pytest test/ --tb=short
 
       - name: Initialize CodeQL
