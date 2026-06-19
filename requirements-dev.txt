@@ -6,3 +6,4 @@ httpx
 httpx-sse
 textual
 fastapi
+pytest-asyncio
