@@ -1,17 +1,13 @@
-import sys
 import os
-import pytest
+import sys
 import unittest.mock as mock
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mitocode.backend import (
-    _MessageBlock,
-    _PlainTextMessageBlock,
-    _ToolCallMessageBlock,
-    _ToolResultMessageBlock,
-    Agent,
-)
+from mitocode.backend.agent.agent import Agent
+from mitocode.backend.agent.agent_session import _PlainTextMessageBlock, _ToolResultMessageBlock, _ToolCallMessageBlock, _MessageBlock
 
 
 # ---------------------------------------------------------------------------
