@@ -34,6 +34,7 @@ The dir_map defines logical directory names to actual paths, while file_map
 defines logical file names to actual file paths within the workspace.
 """
 
+
 class Workspace:
     """Manages MitoCode workspace configurations and file operations.
 
@@ -48,7 +49,8 @@ class Workspace:
             description, dir_map, and file_map.
     """
 
-    def __init__(self, workspace_path: Union[str, Path], name: str, description: str = "", dir_map: dict = None, file_map: dict = None) -> None:
+    def __init__(self, workspace_path: Union[str, Path], name: str, description: str = "", dir_map: dict = None,
+                 file_map: dict = None) -> None:
         """Initialize a Workspace instance.
 
         Args:
@@ -72,7 +74,8 @@ class Workspace:
         }
 
     @classmethod
-    def new_workspace(cls, workspace_path: Union[str, Path], name: str, description: str = "", dir_map: dict = None, file_map: dict = None, override = True) -> 'Workspace | None':
+    def new_workspace(cls, workspace_path: Union[str, Path], name: str, description: str = "", dir_map: dict = None,
+                      file_map: dict = None, override=True) -> 'Workspace | None':
         """Create a new workspace at the specified path.
 
         This class method initializes a new MitoCode workspace by creating the configuration
@@ -101,7 +104,7 @@ class Workspace:
         if not workspace_path.exists():
             raise MitoCodeWorkspaceInitError("Workspace path does not exist: " + str(workspace_path))
 
-        if (workspace_path / MITOCODE_CONFIG_PATH).exists() :
+        if (workspace_path / MITOCODE_CONFIG_PATH).exists():
             if not override:
                 return cls.init_from_path(workspace_path)
             else:
@@ -139,7 +142,8 @@ class Workspace:
                     config: dict = json.load(f)
                     if config:
                         if config.get('name') and config.get('dir_map') and config.get('file_map'):
-                            return Workspace(path, config["name"], config.get("description", ""), config["dir_map"], config["file_map"])
+                            return Workspace(path, config["name"], config.get("description", ""), config["dir_map"],
+                                             config["file_map"])
                         else:
                             raise MitoCodeWorkspaceInitError("config invalid")
                     else:
@@ -173,7 +177,6 @@ class Workspace:
                 raise MitoCodeWorkspaceDumpError(str(e))
         return False
 
-
     @staticmethod
     def _convert_to_path(str_path: Union[str, Path]) -> Path:
         """Convert a string or Path object to a Path.
@@ -195,7 +198,8 @@ class Workspace:
             return str_path
         raise MitoCodePathConvertError("Fail :" + str(str_path))
 
-    def open(self, file_path, *args, **kwargs) -> TextIOWrapper | FileIO | BufferedRandom | BufferedWriter | BufferedReader | BinaryIO | IO:
+    def open(self, file_path, *args,
+             **kwargs) -> TextIOWrapper | FileIO | BufferedRandom | BufferedWriter | BufferedReader | BinaryIO | IO:
         """Open a file within the workspace using mapped paths.
 
         Resolves the file path using the workspace's directory and file mappings,
