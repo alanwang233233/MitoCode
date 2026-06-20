@@ -8,7 +8,15 @@ from typing import Union, BinaryIO, IO
 from mitocode.backend.exception.MitoCodeException import MitoCodePathConvertError, MitoCodeWorkspaceInitError, \
     MitoCodeWorkspaceDumpError
 
+"""Workspace manager module for MitoCode.
+
+This module provides the Workspace class for managing MitoCode workspace configurations,
+including directory mappings, file mappings, and configuration persistence.
+"""
+
 MITOCODE_CONFIG_PATH = ".mitocode"
+"""Default path for MitoCode configuration directory within a workspace."""
+
 DEFAULT_MAP = {
     "dir_map": {
         "agent": "/agent",
@@ -21,9 +29,38 @@ DEFAULT_MAP = {
         "allow_commands": "/allow_command.json"
     }
 }
+"""Default directory and file mappings for workspace structure.
+
+The dir_map defines logical directory names to actual paths, while file_map
+defines logical file names to actual file paths within the workspace.
+"""
 
 class Workspace:
+    """Manages MitoCode workspace configurations and file operations.
+
+    The Workspace class handles initialization, configuration persistence,
+    and path resolution for MitoCode workspaces using directory and file mappings.
+
+    Attributes:
+        path (Path): The root path of the workspace.
+        config_path (Path): The path to the .mitocode configuration directory.
+        config_file (Path): The path to the config.json file.
+        config (dict): The workspace configuration dictionary containing name,
+            description, dir_map, and file_map.
+    """
+
     def __init__(self, workspace_path: Union[str, Path], name: str, description: str = "", dir_map: dict = None, file_map: dict = None) -> None:
+        """Initialize a Workspace instance.
+
+        Args:
+            workspace_path: The root path of the workspace, either as a string or Path object.
+            name: The name of the workspace.
+            description: Optional description of the workspace. Defaults to empty string.
+            dir_map: Optional dictionary mapping logical directory names to actual paths.
+                If None, uses DEFAULT_MAP["dir_map"].
+            file_map: Optional dictionary mapping logical file names to actual paths.
+                If None, uses DEFAULT_MAP["file_map"].
+        """
         workspace_path: Path = self._convert_to_path(workspace_path)
         self.path: Path = workspace_path
         self.config_path: Path = Path(workspace_path) / MITOCODE_CONFIG_PATH
@@ -37,6 +74,30 @@ class Workspace:
 
     @classmethod
     def new_workspace(cls, workspace_path: Union[str, Path], name: str, description: str = "", dir_map: dict = None, file_map: dict = None, override = True) -> 'Workspace | None':
+        """Create a new workspace at the specified path.
+
+        This class method initializes a new MitoCode workspace by creating the configuration
+        directory and saving the initial configuration. If a workspace already exists at
+        the path, it can either be overridden or re-initialized based on the override parameter.
+
+        Args:
+            cls: The class reference.
+            workspace_path: The root path where the workspace should be created.
+            name: The name of the workspace.
+            description: Optional description of the workspace. Defaults to empty string.
+            dir_map: Optional custom directory mapping. Defaults to DEFAULT_MAP["dir_map"].
+            file_map: Optional custom file mapping. Defaults to DEFAULT_MAP["file_map"].
+            override: If True, removes existing workspace configuration before creating new one.
+                If False and workspace exists, initializes from existing path instead.
+                Defaults to True.
+
+        Returns:
+            A new Workspace instance if successful, or an existing Workspace instance if
+            override is False and workspace already exists.
+
+        Raises:
+            MitoCodeWorkspaceInitError: If the workspace path does not exist.
+        """
         workspace_path: Path = cls._convert_to_path(workspace_path)
         if not workspace_path.exists():
             raise MitoCodeWorkspaceInitError("Workspace path does not exist: " + str(workspace_path))
@@ -55,6 +116,22 @@ class Workspace:
 
     @classmethod
     def init_from_path(cls, path: Union[str, Path]) -> 'Workspace | None':
+        """Initialize a Workspace instance from an existing workspace path.
+
+        This class method loads an existing workspace configuration from the specified path.
+        It validates that the required configuration files exist and are properly formatted.
+
+        Args:
+            path: The root path of the existing workspace, either as a string or Path object.
+
+        Returns:
+            A Workspace instance initialized with the existing configuration, or None if
+            initialization fails.
+
+        Raises:
+            MitoCodeWorkspaceInitError: If configuration files are not found or if there
+                are errors reading/parsing the configuration.
+        """
         try:
             path: Path = cls._convert_to_path(path)
             config_path: Path = path / MITOCODE_CONFIG_PATH
@@ -71,6 +148,19 @@ class Workspace:
             raise MitoCodeWorkspaceInitError(str(e))
 
     def dump(self) -> bool:
+        """Save the workspace configuration to disk.
+
+        Writes the current configuration dictionary to the config.json file
+        in the .mitocode directory.
+
+        Returns:
+            True if the configuration was successfully saved, False if the
+            required directories do not exist.
+
+        Raises:
+            MitoCodeWorkspaceDumpError: If there is an error writing the
+                configuration file.
+        """
         if self.config_path.is_dir() and self.path.is_dir():
             try:
                 with open(str(self.config_path / "config.json"), "w") as f:
@@ -83,6 +173,19 @@ class Workspace:
 
     @staticmethod
     def _convert_to_path(str_path: Union[str, Path]) -> Path:
+        """Convert a string or Path object to a Path.
+
+        This static method ensures that the input is converted to a pathlib.Path object.
+
+        Args:
+            str_path: The path to convert, either as a string or Path object.
+
+        Returns:
+            A Path object representing the input path.
+
+        Raises:
+            MitoCodePathConvertError: If the input is None or empty.
+        """
         if str_path:
             if isinstance(str_path, str):
                 return Path(str_path)
@@ -90,10 +193,41 @@ class Workspace:
         raise MitoCodePathConvertError("Fail :" + str(str_path))
 
     def open(self, file, *args, **kwargs) -> TextIOWrapper | FileIO | BufferedRandom | BufferedWriter | BufferedReader | BinaryIO | IO:
+        """Open a file within the workspace using mapped paths.
+
+        Resolves the file path using the workspace's directory and file mappings,
+        then opens the file with the specified arguments.
+
+        Args:
+            file: The logical file identifier. If it starts with '/', it is treated
+                as a directory mapping (e.g., '/agent/file.txt'). Otherwise, it is
+                treated as a file mapping key (e.g., 'config' for config.json).
+            *args: Additional positional arguments to pass to the built-in open().
+            **kwargs: Additional keyword arguments to pass to the built-in open().
+
+        Returns:
+            A file object opened at the resolved path.
+        """
         file = self.get_map(file)
         return open(file, *args, **kwargs)
 
     def get_map(self, input_str: str) -> Path:
+        """Resolve a logical file or directory identifier to an absolute path.
+
+        This method interprets the input string according to the workspace's mapping rules:
+        - If the input starts with '/', it is treated as a directory mapping reference.
+          The first part after '/' is looked up in dir_map, and remaining parts are
+          appended as subdirectories/files.
+        - Otherwise, it is treated as a file mapping key and looked up in file_map.
+
+        Args:
+            input_str: The logical identifier to resolve. Examples:
+                - '/agent/tasks/task1.txt' -> resolves 'agent' in dir_map, then appends 'tasks/task1.txt'
+                - 'config' -> looks up 'config' in file_map to get the actual filename
+
+        Returns:
+            A Path object representing the resolved absolute path within the workspace.
+        """
         # begin with / means dir_map
         if input_str.startswith("/"):
             path_parts = input_str.strip("/").split("/")
