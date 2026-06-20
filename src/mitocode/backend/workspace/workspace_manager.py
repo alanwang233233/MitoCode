@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import Union
 from mitocode.backend.exception.MitoCodeException import MitoCodePathConvertError, MitoCodeWorkspaceInitError, MitoCodeWorkspaceDumpError
 import json
-from jsonschema import validate, ValidationError
 import shutil
 
 MITOCODE_CONFIG_PATH = ".mitocode"
@@ -14,9 +13,7 @@ class Workspace:
         self.path: Path = workspace_path
         self.config_path: Path = Path(workspace_path) / MITOCODE_CONFIG_PATH
         self.config_file = self.config_path / "config.json"
-        self.config: dict = {}
-        self.config['name'] = name
-        self.config['description'] = description
+        self.config: dict = {'name': name, 'description': description}
 
     @classmethod
     def new_workspace(cls, workspace_path: Union[str, Path], name: str, description: str = "", override = True) -> 'Workspace | None':
