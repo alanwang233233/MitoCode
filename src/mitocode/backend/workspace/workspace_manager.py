@@ -163,7 +163,7 @@ class Workspace:
         """
         if self.config_path.is_dir() and self.path.is_dir():
             try:
-                with open(str(self.config_path / "config.json"), "w") as f:
+                with open(self.config_path / "config.json", "w") as f:
                     json.dump(self.config, f)
                 return True
             except Exception as e:
