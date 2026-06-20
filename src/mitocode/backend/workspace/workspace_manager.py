@@ -45,8 +45,7 @@ class Workspace:
                 with open(path / MITOCODE_CONFIG_PATH / "config.json", "r") as f:
                     config: dict = json.load(f)
                     if config:
-                        if config.get('name') and config
-get('dir_map') and config.get('file_map'):
+                        if config.get('name') and config.get('dir_map') and config.get('file_map'):
                             return Workspace(path, config["name"], config["description"])
 
         except FileNotFoundError as e:
@@ -55,7 +54,7 @@ get('dir_map') and config.get('file_map'):
             raise MitoCodeWorkspaceInitError(str(e))
 
     def dump(self) -> bool:
-        if self.config_path.is_dir() and self.path.is_dir() and self.config_file.is_file():
+        if self.config_path.is_dir() and self.path.is_dir():
             try:
                 with open(str(self.config_path / "config.json"), "w") as f:
                     json.dump(self.config, f)
