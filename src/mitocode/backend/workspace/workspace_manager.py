@@ -234,6 +234,7 @@ class Workspace:
         Raises:
             ValueError: If the resolved path escapes the workspace root.
         """
+        target = Path(str(target).lstrip("/"))
         full_path = (self.path / target).resolve()
         workspace_root = self.path.resolve()
         if not full_path.is_relative_to(workspace_root):
