@@ -6,9 +6,9 @@
     "context": "/context"
   },
   "file_map": {
-    "mcpServers": "mcpServers.json",
-    "config": "config.json",
-    "skills": "skills.json",
-    "allow_commands": "allow_command.json"
+    "mcpServers": "/mcpServers.json",
+    "config": "/config.json",
+    "skills": "/skills.json",
+    "allow_commands": "/allow_command.json"
   }
 }

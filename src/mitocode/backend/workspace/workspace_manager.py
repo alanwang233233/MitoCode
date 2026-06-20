@@ -1,9 +1,12 @@
-from os import mkdir
-from pathlib import Path
-from typing import Union
-from mitocode.backend.exception.MitoCodeException import MitoCodePathConvertError, MitoCodeWorkspaceInitError, MitoCodeWorkspaceDumpError
 import json
 import shutil
+from io import TextIOWrapper, FileIO, BufferedRandom, BufferedWriter, BufferedReader
+from os import mkdir
+from pathlib import Path
+from typing import Union, BinaryIO, IO
+
+from mitocode.backend.exception.MitoCodeException import MitoCodePathConvertError, MitoCodeWorkspaceInitError, \
+    MitoCodeWorkspaceDumpError
 
 MITOCODE_CONFIG_PATH = ".mitocode"
 
@@ -68,3 +71,24 @@ class Workspace:
                 return Path(str_path)
             return str_path
         raise MitoCodePathConvertError("Fail :" + str(str_path))
+
+    def open(self, file, *args, **kwargs) -> TextIOWrapper | FileIO | BufferedRandom | BufferedWriter | BufferedReader | BinaryIO | IO:
+        file = self.get_map(file)
+        return open(file, *args, **kwargs)
+
+    def get_map(self, input_str: str) -> Path:
+        # begin with / means dir_map
+        if input_str.startswith("/"):
+            path_parts = input_str.strip("/").split("/")
+            if not path_parts or path_parts == [""]:
+                return self.path
+            dir_key = path_parts[0]
+            rest_parts = path_parts[1:]
+            mapped_dir = self.config["dir_map"].get(dir_key, dir_key)
+            mapped_dir_path = Path(mapped_dir.lstrip("/"))
+            full_relative = mapped_dir_path.joinpath(*rest_parts)
+            return self.path / full_relative
+        else:
+            # or it means file map
+            file_name = self.config["file_map"].get(input_str, input_str)
+            return self.path / file_name
