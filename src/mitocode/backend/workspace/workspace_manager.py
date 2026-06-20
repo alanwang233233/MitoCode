@@ -36,7 +36,7 @@ class Workspace:
         }
 
     @classmethod
-    def new_workspace(cls, workspace_path: Union[str, Path], name: str, description: str = "", override = True) -> 'Workspace | None':
+    def new_workspace(cls, workspace_path: Union[str, Path], name: str, description: str = "", dir_map: dict = None, file_map: dict = None, override = True) -> 'Workspace | None':
         workspace_path: Path = cls._convert_to_path(workspace_path)
         if not workspace_path.exists():
             raise MitoCodeWorkspaceInitError("Workspace path does not exist: " + str(workspace_path))
@@ -49,7 +49,7 @@ class Workspace:
                 shutil.rmtree(workspace_path / MITOCODE_CONFIG_PATH)
 
         mkdir(Path(workspace_path) / MITOCODE_CONFIG_PATH)
-        new_workspace = cls(workspace_path, name, description)
+        new_workspace = cls(workspace_path, name, description, dir_map, file_map)
         new_workspace.dump()
         return new_workspace
 
