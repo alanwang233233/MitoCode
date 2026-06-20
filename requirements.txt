@@ -1,3 +1,6 @@
+# ======================
+# Core Dependencies
+# ======================
 uvicorn
 sse-starlette
 rich
@@ -9,3 +12,4 @@ httpx
 httpx-sse
 textual
 fastapi
+jsonschema

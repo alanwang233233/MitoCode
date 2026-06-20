@@ -1,8 +1,5 @@
+# ======================
+# Optional Dependencies
+# ======================
 pytest>=7.0
-openai
-mcp
-loguru
-httpx
-httpx-sse
-textual
-fastapi
+pytest-asyncio
