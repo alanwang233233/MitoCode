@@ -211,6 +211,31 @@ class Workspace:
         file = self.get_map(file)
         return open(file, *args, **kwargs)
 
+    def _validate_within_workspace(self, target: Path) -> Path:
+        """Resolve the given path against the workspace root and verify it stays within bounds.
+
+        This is a security barrier against path traversal attacks — any ``..`` components,
+        absolute symlinks pointing outside the workspace, or malicious map entries are
+        rejected here.
+
+        Args:
+            target: A relative path to resolve against ``self.path``.
+
+        Returns:
+            The fully resolved absolute path if it lies within the workspace.
+
+        Raises:
+            ValueError: If the resolved path escapes the workspace root.
+        """
+        full_path = (self.path / target).resolve()
+        workspace_root = self.path.resolve()
+        if not full_path.is_relative_to(workspace_root):
+            raise ValueError(
+                f"Path traversal detected: '{target}' resolves to '{full_path}', "
+                f"which is outside the workspace root '{workspace_root}'"
+            )
+        return full_path
+
     def get_map(self, input_str: str) -> Path:
         """Resolve a logical file or directory identifier to an absolute path.
 
@@ -220,6 +245,8 @@ class Workspace:
           appended as subdirectories/files.
         - Otherwise, it is treated as a file mapping key and looked up in file_map.
 
+        All resolved paths are validated to prevent path traversal outside the workspace.
+
         Args:
             input_str: The logical identifier to resolve. Examples:
                 - '/agent/tasks/task1.txt' -> resolves 'agent' in dir_map, then appends 'tasks/task1.txt'
@@ -227,6 +254,9 @@ class Workspace:
 
         Returns:
             A Path object representing the resolved absolute path within the workspace.
+
+        Raises:
+            ValueError: If the resolved path escapes the workspace root.
         """
         # begin with / means dir_map
         if input_str.startswith("/"):
@@ -238,8 +268,8 @@ class Workspace:
             mapped_dir = self.config["dir_map"].get(dir_key, dir_key)
             mapped_dir_path = Path(mapped_dir.lstrip("/"))
             full_relative = mapped_dir_path.joinpath(*rest_parts)
-            return self.path / full_relative
+            return self._validate_within_workspace(full_relative)
         else:
             # or it means file map
             file_name = self.config["file_map"].get(input_str, input_str)
-            return self.path / file_name
+            return self._validate_within_workspace(Path(file_name))
