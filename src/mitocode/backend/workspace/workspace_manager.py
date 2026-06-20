@@ -134,13 +134,17 @@ class Workspace:
         try:
             path: Path = cls._convert_to_path(path)
             config_path: Path = path / MITOCODE_CONFIG_PATH
-            if path.exists() and (path / MITOCODE_CONFIG_PATH).exists() and (config_path / "config.json").is_file() and (config_path / "config.json").exists():
-                with open(path / MITOCODE_CONFIG_PATH / "config.json", "r") as f:
-                    config: dict = json.load(f)
-                    if config:
-                        if config.get('name') and config.get('dir_map') and config.get('file_map'):
-                            return Workspace(path, config["name"], config["description"], config["dir_map"], config["file_map"])
+            config_file = config_path / "config.json"
+            if not config_file.is_file():
+                raise MitoCodeWorkspaceInitError(f"Workspace configuration file not found at {config_file}")
 
+            with open(config_file, "r") as f:
+                config: dict = json.load(f)
+
+            if not config or not all(k in config for k in ("name", "dir_map", "file_map")):
+                raise MitoCodeWorkspaceInitError("Workspace configuration is missing required fields ('name', 'dir_map', 'file_map').")
+
+            return Workspace(path, config["name"], config.get("description", ""), config["dir_map"], config["file_map"])
         except (OSError, json.JSONDecodeError, KeyError) as e:
             raise MitoCodeWorkspaceInitError(str(e))
 
