@@ -9,14 +9,31 @@ from mitocode.backend.exception.MitoCodeException import MitoCodePathConvertErro
     MitoCodeWorkspaceDumpError
 
 MITOCODE_CONFIG_PATH = ".mitocode"
+DEFAULT_MAP = {
+    "dir_map": {
+        "agent": "/agent",
+        "context": "/context"
+    },
+    "file_map": {
+        "mcpServers": "/mcpServers.json",
+        "config": "/config.json",
+        "skills": "/skills.json",
+        "allow_commands": "/allow_command.json"
+    }
+}
 
 class Workspace:
-    def __init__(self, workspace_path: Union[str, Path], name: str, description: str = "") -> None:
+    def __init__(self, workspace_path: Union[str, Path], name: str, description: str = "", dir_map: dict = None, file_map: dict = None) -> None:
         workspace_path: Path = self._convert_to_path(workspace_path)
         self.path: Path = workspace_path
         self.config_path: Path = Path(workspace_path) / MITOCODE_CONFIG_PATH
         self.config_file = self.config_path / "config.json"
-        self.config: dict = {'name': name, 'description': description}
+        self.config: dict = {
+            'name': name,
+            'description': description,
+            'dir_map': dir_map or DEFAULT_MAP.get("dir_map"),
+            'file_map': file_map or DEFAULT_MAP.get("file_map")
+        }
 
     @classmethod
     def new_workspace(cls, workspace_path: Union[str, Path], name: str, description: str = "", override = True) -> 'Workspace | None':
