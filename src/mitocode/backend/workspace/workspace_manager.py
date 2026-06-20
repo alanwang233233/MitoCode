@@ -15,8 +15,8 @@ class Workspace:
         self.config_path: Path = Path(workspace_path) / MITOCODE_CONFIG_PATH
         self.config_file = self.config_path / "config.json"
         self.config: dict = {}
-        self.config.name  = name
-        self.config.description = description
+        self.config['name'] = name
+        self.config['description'] = description
 
     @classmethod
     def new_workspace(cls, workspace_path: Union[str, Path], name: str, description: str = "", override = True) -> 'Workspace | None':
@@ -45,7 +45,8 @@ class Workspace:
                 with open(path / MITOCODE_CONFIG_PATH / "config.json", "r") as f:
                     config: dict = json.load(f)
                     if config:
-                        if config["name"] and config["description"] and config["dir_map"] and config["file_map"]:
+                        if config.get('name') and config
+get('dir_map') and config.get('file_map'):
                             return Workspace(path, config["name"], config["description"])
 
         except FileNotFoundError as e:
