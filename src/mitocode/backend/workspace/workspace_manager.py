@@ -63,7 +63,7 @@ class Workspace:
                     config: dict = json.load(f)
                     if config:
                         if config.get('name') and config.get('dir_map') and config.get('file_map'):
-                            return Workspace(path, config["name"], config["description"])
+                            return Workspace(path, config["name"], config["description"], config["dir_map"], config["file_map"])
 
         except FileNotFoundError as e:
             raise MitoCodeWorkspaceInitError("File not found: " + str(e))
