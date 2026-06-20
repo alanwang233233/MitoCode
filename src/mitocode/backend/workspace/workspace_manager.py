@@ -1,7 +1,6 @@
 import json
 import shutil
 from io import TextIOWrapper, FileIO, BufferedRandom, BufferedWriter, BufferedReader
-from os import mkdir
 from pathlib import Path
 from typing import Union, BinaryIO, IO
 
@@ -109,7 +108,7 @@ class Workspace:
                 # log
                 shutil.rmtree(workspace_path / MITOCODE_CONFIG_PATH)
 
-        mkdir(Path(workspace_path) / MITOCODE_CONFIG_PATH)
+        (workspace_path / MITOCODE_CONFIG_PATH).mkdir(parents=True, exist_ok=True)
         new_workspace = cls(workspace_path, name, description, dir_map, file_map)
         new_workspace.dump()
         return new_workspace
@@ -142,9 +141,7 @@ class Workspace:
                         if config.get('name') and config.get('dir_map') and config.get('file_map'):
                             return Workspace(path, config["name"], config["description"], config["dir_map"], config["file_map"])
 
-        except FileNotFoundError as e:
-            raise MitoCodeWorkspaceInitError("File not found: " + str(e))
-        except Exception as e:
+        except (OSError, json.JSONDecodeError, KeyError) as e:
             raise MitoCodeWorkspaceInitError(str(e))
 
     def dump(self) -> bool:
@@ -192,14 +189,14 @@ class Workspace:
             return str_path
         raise MitoCodePathConvertError("Fail :" + str(str_path))
 
-    def open(self, file, *args, **kwargs) -> TextIOWrapper | FileIO | BufferedRandom | BufferedWriter | BufferedReader | BinaryIO | IO:
+    def open(self, file_path, *args, **kwargs) -> TextIOWrapper | FileIO | BufferedRandom | BufferedWriter | BufferedReader | BinaryIO | IO:
         """Open a file within the workspace using mapped paths.
 
         Resolves the file path using the workspace's directory and file mappings,
         then opens the file with the specified arguments.
 
         Args:
-            file: The logical file identifier. If it starts with '/', it is treated
+            file_path: The logical file identifier. If it starts with '/', it is treated
                 as a directory mapping (e.g., '/agent/file.txt'). Otherwise, it is
                 treated as a file mapping key (e.g., 'config' for config.json).
             *args: Additional positional arguments to pass to the built-in open().
@@ -208,8 +205,8 @@ class Workspace:
         Returns:
             A file object opened at the resolved path.
         """
-        file = self.get_map(file)
-        return open(file, *args, **kwargs)
+        file_path = self.get_map(file_path)
+        return open(file_path, *args, **kwargs)
 
     def _validate_within_workspace(self, target: Path) -> Path:
         """Resolve the given path against the workspace root and verify it stays within bounds.
