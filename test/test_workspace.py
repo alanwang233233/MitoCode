@@ -1,12 +1,10 @@
 """
 Unit tests for Workspace class in mitocode.backend.workspace.workspace_manager.
 
-Covers: _convert_to_path, __init__, new_workspace, init_from_path, dump,
-        get_map, _validate_within_workspace, open.
+Covers: _convert_to_path, __init__, new_workspace, init_from_path, dump, _validate_within_workspace.
 """
 
 import json
-import stat
 from pathlib import Path
 from unittest.mock import mock_open, patch
 
@@ -18,7 +16,6 @@ from mitocode.backend.exception.MitoCodeException import (
     MitoCodeWorkspaceDumpError,
 )
 from mitocode.backend.workspace.workspace_manager import (
-    DEFAULT_MAP,
     MITOCODE_CONFIG_PATH,
     Workspace,
 )
@@ -52,28 +49,13 @@ def empty_dir(tmp_path):
 
 @pytest.fixture
 def populated_workspace(tmp_path):
-    """A workspace whose dir_map directories and file_map files exist on disk.
-
-    Uses custom maps so that paths are relative (no leading '/') and stay
-    inside the workspace.  The agent/ directory and config.json file are
-    created ahead of time.
-    """
     root = tmp_path / "populated_ws"
     root.mkdir()
     ws = Workspace.new_workspace(
         root,
         "populated",
         "workspace with pre-created paths",
-        dir_map={"agent": "/agent", "context": "/context"},
-        file_map={"config": "/config.json", "mcpServers": "/mcpServers.json"},
     )
-    # Create the mapped directories
-    for dir_name in ws.config["dir_map"].values():
-        (root / dir_name.lstrip("/")).mkdir(parents=True, exist_ok=True)
-    # Touch the mapped files so they can be opened
-    for file_name in ws.config["file_map"].values():
-        (root / file_name.lstrip("/")).parent.mkdir(parents=True, exist_ok=True)
-        (root / file_name.lstrip("/")).write_text("")
     return ws
 
 
@@ -115,22 +97,12 @@ class TestConvertToPath:
 class TestInit:
     """Tests for the Workspace constructor."""
 
-    def test_default_maps_are_used_when_not_provided(self, empty_dir):
+    def test_workspace_properly(self, empty_dir):
         ws = Workspace(empty_dir, "agent-1")
         assert ws.config["name"] == "agent-1"
         assert ws.config["description"] == ""
-        assert ws.config["dir_map"] == DEFAULT_MAP["dir_map"]
-        assert ws.config["file_map"] == DEFAULT_MAP["file_map"]
         assert ws.config_path == empty_dir / MITOCODE_CONFIG_PATH
         assert ws.config_file == ws.config_path / "config.json"
-
-    def test_custom_maps_override_defaults(self, empty_dir):
-        custom_dir = {"custom": "/custom_dir"}
-        custom_file = {"secret": "/secret.json"}
-        ws = Workspace(empty_dir, "agent-2", "desc", dir_map=custom_dir, file_map=custom_file)
-        assert ws.config["description"] == "desc"
-        assert ws.config["dir_map"] is custom_dir
-        assert ws.config["file_map"] is custom_file
 
     def test_init_does_not_create_files_on_disk(self, empty_dir):
         """__init__ is a pure data constructor — it must not touch the filesystem."""
@@ -218,14 +190,6 @@ class TestInitFromPath:
         with pytest.raises(MitoCodeWorkspaceInitError, match="empty"):
             Workspace.init_from_path(tmp_workspace_root)
 
-    def test_raises_when_config_missing_required_fields(self, tmp_workspace_root):
-        tmp_workspace_root.mkdir()
-        mitocode = tmp_workspace_root / MITOCODE_CONFIG_PATH
-        mitocode.mkdir()
-        (mitocode / "config.json").write_text(json.dumps({"name": "no-maps"}))
-        with pytest.raises(MitoCodeWorkspaceInitError, match="invalid"):
-            Workspace.init_from_path(tmp_workspace_root)
-
     def test_raises_on_malformed_json(self, tmp_workspace_root):
         tmp_workspace_root.mkdir()
         mitocode = tmp_workspace_root / MITOCODE_CONFIG_PATH
@@ -240,7 +204,11 @@ class TestInitFromPath:
         mitocode = tmp_workspace_root / MITOCODE_CONFIG_PATH
         mitocode.mkdir()
         config_file = mitocode / "config.json"
-        config_file.write_text(json.dumps({"name": "x", "dir_map": {}, "file_map": {}}))
+        config_file.write_text(json.dumps(
+            {
+                "name": "x"
+            }
+        ))
         # Remove read permission
         config_file.chmod(0o000)
         try:
@@ -266,10 +234,11 @@ class TestDump:
             data = json.load(f)
         assert data["description"] == "updated description"
 
-    def test_dump_returns_false_when_config_path_not_dir(self, empty_dir):
+    def test_dump_raise_when_config_path_not_dir(self, empty_dir):
         """If .mitocode doesn't exist, dump returns False."""
         ws = Workspace(empty_dir, "agent-nodir")
-        assert ws.dump() is False
+        with pytest.raises(MitoCodeWorkspaceDumpError, match="not found"):
+            ws.dump()
 
     def test_dump_raises_on_write_error(self, existing_workspace):
         """When writing fails after an OSError, MitoCodeWorkspaceDumpError is raised."""
@@ -311,96 +280,3 @@ class TestValidateWithinWorkspace:
             link_target = existing_workspace.path / "agent" / "escape_link"
             if link_target.exists() or link_target.is_symlink():
                 link_target.unlink()
-
-
-# ──────────────────────────────────────────────
-# get_map
-# ──────────────────────────────────────────────
-
-class TestGetMap:
-    """Tests for get_map — logical path resolution."""
-
-    def test_dir_map_resolves_known_key(self, existing_workspace):
-        result = existing_workspace.get_map("/agent/tasks/output.txt")
-        expected = (existing_workspace.path / "agent" / "tasks" / "output.txt").resolve()
-        assert result == expected
-
-    def test_dir_map_with_unknown_key_uses_literal(self, existing_workspace):
-        """Unknown dir keys are used as the literal directory name."""
-        result = existing_workspace.get_map("/custom_area/sub")
-        expected = (existing_workspace.path / "custom_area" / "sub").resolve()
-        assert result == expected
-
-    def test_dir_map_empty_path_returns_root(self, existing_workspace):
-        result = existing_workspace.get_map("/")
-        assert result == existing_workspace.path.resolve()
-
-    def test_dir_map_only_slash_returns_root(self, existing_workspace):
-        """Just '/' with nothing after it."""
-        result = existing_workspace.get_map("/")
-        assert result == existing_workspace.path.resolve()
-
-    def test_file_map_resolves_known_key(self, existing_workspace):
-        """Known keys in DEFAULT_MAP use paths starting with '/' (e.g. '/config.json').
-
-        The leading '/' is stripped by _validate_within_workspace, so '/config.json'
-        resolves to '<workspace_root>/config.json'."""
-        result = existing_workspace.get_map("config")
-        expected = (existing_workspace.path / "config.json").resolve()
-        assert result == expected
-
-    def test_file_map_with_unknown_key_uses_literal(self, existing_workspace):
-        result = existing_workspace.get_map("unknown_file.txt")
-        expected = (existing_workspace.path / "unknown_file.txt").resolve()
-        assert result == expected
-
-    def test_dir_map_traversal_is_blocked(self, existing_workspace):
-        with pytest.raises(ValueError, match="Path traversal detected"):
-            existing_workspace.get_map("/agent/../../../etc/passwd")
-
-    def test_file_map_traversal_is_blocked(self, existing_workspace):
-        with pytest.raises(ValueError, match="Path traversal detected"):
-            existing_workspace.get_map("../outside")
-
-
-# ──────────────────────────────────────────────
-# open
-# ──────────────────────────────────────────────
-
-class TestOpen:
-    """Tests for the open method — the main file-operation entry point."""
-
-    def test_open_via_file_map_writes_and_reads(self, populated_workspace):
-        content = '{"key": "value"}'
-        with populated_workspace.open("config", "w") as f:
-            f.write(content)
-
-        with populated_workspace.open("config", "r") as f:
-            assert f.read() == content
-
-    def test_open_via_dir_map_writes_and_reads(self, populated_workspace):
-        content = "log line 1\nlog line 2\n"
-        with populated_workspace.open("/agent/log.txt", "w") as f:
-            f.write(content)
-
-        with populated_workspace.open("/agent/log.txt", "r") as f:
-            assert f.read() == content
-
-    def test_open_passes_kwargs_correctly(self, populated_workspace):
-        """encoding kwargs are forwarded to builtins.open."""
-        with populated_workspace.open("/agent/utf8.txt", "w", encoding="utf-8") as f:
-            f.write("café")
-
-        with populated_workspace.open("/agent/utf8.txt", "r", encoding="utf-8") as f:
-            assert f.read() == "café"
-
-    def test_open_creates_parent_directories_if_needed_same_as_builtin_open(self, existing_workspace):
-        """open() itself does not create dirs — this is a behaviour-documenting test."""
-        # Workspace.open delegates to builtins.open which will NOT auto-create dirs.
-        # The caller (Agent) is expected to ensure parent dirs exist.
-        with pytest.raises(FileNotFoundError):
-            existing_workspace.open("/agent/deep/nested/file.txt", "w")
-
-    def test_open_traversal_is_blocked(self, existing_workspace):
-        with pytest.raises(ValueError, match="Path traversal detected"):
-            existing_workspace.open("/agent/../../../etc/passwd", "r")
