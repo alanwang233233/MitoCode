@@ -25,13 +25,15 @@ class Workspace:
             description.
     """
 
-    def __init__(self, workspace_path: Union[str, Path], name: str, description: str = "") -> None:
+    def __init__(self, workspace_path: Union[str, Path], name: str, description: str = "",
+                 version: str = "0.0.1") -> None:
         """Initialize a Workspace instance.
 
         Args:
             workspace_path: The root path of the workspace, either as a string or Path object.
             name: The name of the workspace.
             description: Optional description of the workspace. Defaults to empty string.
+            version: Optional version of the workspace configuration. Defaults to "0.0.1".
         """
         workspace_path: Path = self._convert_to_path(workspace_path)
         self.path: Path = workspace_path
@@ -39,12 +41,13 @@ class Workspace:
         self.config_file = self.config_path / "config.json"
         self.config: dict = {
             'name': name,
-            'description': description
+            'description': description,
+            'version': version
         }
 
     @classmethod
     def new_workspace(cls, workspace_path: Union[str, Path], name: str, description: str = "",
-                      override=True) -> 'Workspace | None':
+                      override=True) -> 'Workspace':
         """Create a new workspace at the specified path.
 
         This class method initializes a new MitoCode workspace by creating the configuration
@@ -84,7 +87,7 @@ class Workspace:
         return new_workspace
 
     @classmethod
-    def init_from_path(cls, path: Union[str, Path]) -> 'Workspace | None':
+    def init_from_path(cls, path: Union[str, Path]) -> 'Workspace':
         """Initialize a Workspace instance from an existing workspace path.
 
         This class method loads an existing workspace configuration from the specified path.
@@ -94,8 +97,7 @@ class Workspace:
             path: The root path of the existing workspace, either as a string or Path object.
 
         Returns:
-            A Workspace instance initialized with the existing configuration, or None if
-            initialization fails.
+            A Workspace instance initialized with the existing configuration.
 
         Raises:
             MitoCodeWorkspaceInitError: If configuration files are not found or if there
@@ -109,7 +111,9 @@ class Workspace:
                     config: dict = json.load(f)
                     if config:
                         if config.get('name'):
-                            return Workspace(path, config["name"], config.get("description", ""))
+                            workspace = Workspace(path, config["name"], config.get("description", ""))
+                            workspace.config['version'] = config.get('version')
+                            return workspace
                         else:
                             raise MitoCodeWorkspaceInitError("config invalid")
                     else:
@@ -127,12 +131,11 @@ class Workspace:
         in the .mitocode directory.
 
         Returns:
-            True if the configuration was successfully saved, False if the
-            required directories do not exist.
+            True if the configuration was successfully saved.
 
         Raises:
             MitoCodeWorkspaceDumpError: If there is an error writing the
-                configuration file.
+                configuration file or the required directories do not exist.
         """
         if self.config_path.is_dir() and self.path.is_dir():
             try:
