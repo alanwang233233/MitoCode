@@ -8,11 +8,17 @@ class MitoCodeBaseError(builtins.Exception):
 class MitoCodePathConvertError(MitoCodeBaseError):
     pass
 
-class MitoCodeWorkspaceInitError(MitoCodeBaseError):
+class MitoCodeWorkspaceError(MitoCodeBaseError):
     pass
 
-class MitoCodeWorkspaceCreateError(MitoCodeBaseError):
+class MitoCodeWorkspaceInitError(MitoCodeWorkspaceError):
     pass
 
-class MitoCodeWorkspaceDumpError(MitoCodeBaseError):
+class MitoCodeWorkspaceCreateError(MitoCodeWorkspaceError):
+    pass
+
+class MitoCodeWorkspaceDumpError(MitoCodeWorkspaceError):
+    pass
+
+class MitocodeMigrateError(MitoCodeWorkspaceError):
     pass
