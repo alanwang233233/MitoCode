@@ -10,7 +10,7 @@ from unittest.mock import mock_open, patch
 
 import pytest
 
-from mitocode.backend.exception.MitoCodeException import (
+from mitocode.backend.exception.mitocode_exception import (
     MitoCodePathConvertError,
     MitoCodeWorkspaceInitError,
     MitoCodeWorkspaceDumpError,

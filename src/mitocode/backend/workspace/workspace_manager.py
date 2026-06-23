@@ -5,7 +5,7 @@ import json
 import shutil
 from pathlib import Path
 from typing import Union
-from mitocode.backend.exception.MitoCodeException import MitoCodePathConvertError, MitoCodeWorkspaceInitError, \
+from mitocode.backend.exception.mitocode_exception import MitoCodePathConvertError, MitoCodeWorkspaceInitError, \
     MitoCodeWorkspaceDumpError
 
 """Default path for MitoCode configuration directory within a workspace."""
@@ -191,3 +191,6 @@ class Workspace:
                 f"which is outside the workspace root '{workspace_root}'"
             )
         return full_path
+
+    def migrate(self) -> None:
+        pass
