@@ -192,5 +192,10 @@ class Workspace:
             )
         return full_path
 
-    def migrate(self) -> None:
-        pass
+    def validate(self):
+        # TODO
+        return True
+
+    def reload(self):
+        # TODO
+        return True

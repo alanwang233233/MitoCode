@@ -15,7 +15,7 @@ from mitocode.backend.exception.mitocode_exception import (
     MitoCodeWorkspaceInitError,
     MitoCodeWorkspaceDumpError,
 )
-from mitocode.backend.workspace.workspace_manager import (
+from mitocode.backend.workspace.workspace import (
     MITOCODE_CONFIG_PATH,
     Workspace,
 )
