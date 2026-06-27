@@ -20,5 +20,11 @@ class MitoCodeWorkspaceCreateError(MitoCodeWorkspaceError):
 class MitoCodeWorkspaceDumpError(MitoCodeWorkspaceError):
     pass
 
+class MitoCodeWorkspaceTooOldError(MitoCodeWorkspaceError):
+    pass
+
+class MitoCodeAppTooOldError(MitoCodeBaseError):
+    pass
+
 class MitocodeMigrateError(MitoCodeWorkspaceError):
     pass

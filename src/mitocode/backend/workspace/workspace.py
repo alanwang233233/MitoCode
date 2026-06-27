@@ -5,11 +5,10 @@ import json
 import shutil
 from pathlib import Path
 from typing import Union
-from mitocode.backend.exception.mitocode_exception import MitoCodePathConvertError, MitoCodeWorkspaceInitError, \
-    MitoCodeWorkspaceDumpError
 
-"""Default path for MitoCode configuration directory within a workspace."""
-MITOCODE_CONFIG_PATH = ".mitocode"
+from mitocode import MITOCODE_CONFIG_PATH, APP_VERSION
+from mitocode.backend.exception.mitocode_exception import MitoCodePathConvertError, MitoCodeWorkspaceInitError, \
+    MitoCodeWorkspaceDumpError, MitoCodeWorkspaceTooOldError, MitoCodeAppTooOldError
 
 
 class Workspace:
@@ -25,8 +24,7 @@ class Workspace:
             description.
     """
 
-    def __init__(self, workspace_path: Union[str, Path], name: str, description: str = "",
-                 version: str = "0.0.1") -> None:
+    def __init__(self, workspace_path: Union[str, Path], name: str, version: int ,description: str = "") -> None:
         """Initialize a Workspace instance.
 
         Args:
@@ -82,7 +80,7 @@ class Workspace:
                 shutil.rmtree(workspace_path / MITOCODE_CONFIG_PATH)
 
         (workspace_path / MITOCODE_CONFIG_PATH).mkdir(parents=True, exist_ok=True)
-        new_workspace = cls(workspace_path, name, description)
+        new_workspace = cls(workspace_path, name, APP_VERSION, description)
         new_workspace.dump()
         return new_workspace
 
@@ -110,8 +108,12 @@ class Workspace:
                 with open(path / MITOCODE_CONFIG_PATH / "config.json", "r") as f:
                     config: dict = json.load(f)
                     if config:
+                        if config.get("version") > APP_VERSION:
+                            raise MitoCodeAppTooOldError("App need upgrade to open the workspace")
+                        elif config.get("version") < APP_VERSION:
+                            raise MitoCodeWorkspaceTooOldError("Workspace need migrate to be opened")
                         if config.get('name'):
-                            workspace = Workspace(path, config["name"], config.get("description", ""))
+                            workspace = Workspace(path, config["name"], config.get("version"), config.get("description", ""))
                             workspace.config['version'] = config.get('version')
                             return workspace
                         else:

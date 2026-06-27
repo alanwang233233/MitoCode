@@ -1,39 +1,54 @@
 import json
 from pathlib import Path
 from typing import Union, Callable
-from backend.exception.mitocode_exception import MitoCodeWorkspaceInitError, MitoCodePathConvertError, \
+from mitocode import APP_VERSION
+from mitocode.backend.exception.mitocode_exception import MitoCodeWorkspaceInitError, MitoCodePathConvertError, \
     MitocodeMigrateError
 from workspace import MITOCODE_CONFIG_PATH, Workspace
 
-LATEST_VERSION = 2
+LATEST_VERSION = APP_VERSION
 
 class BasicMigration:
     @classmethod
-    def migrate(cls, path: Union[Path, str]):
-        path: Path = Workspace._convert_to_path(path)
+    def migrate(cls, path: Union[Path, str]) -> bool:
         try:
+            # noinspection PyProtectedMember
+            path: Path = Workspace._convert_to_path(path)
             with open(path / MITOCODE_CONFIG_PATH / "config.json", "r") as f:
-                config = json.load(f)
-                version = config["version"]
+                config : dict= json.load(f)
+                version : int = int(config["version"])
         except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError, MitoCodePathConvertError) as e:
             raise MitoCodeWorkspaceInitError(
                 f"Failed to load configuration from {path / MITOCODE_CONFIG_PATH}: {str(e)}")
-        i = LATEST_VERSION
-        while i > 1:
+        if version == LATEST_VERSION:
+            # no need to migrate
+            return True
+        elif version > LATEST_VERSION:
+            raise MitocodeMigrateError(f"Current version {version} is higher than the latest version {LATEST_VERSION}! Maybe you need to upgrade Mitocode!.")
+        i : int = version + 1
+        while i <= LATEST_VERSION:
             tmp = i
-            migrate_func = cls._get_migrate_func(i)
-            i = i-1
+            migrate_func : Callable = cls._get_migrate_func(i)
+            i = i + 1
             try:
-                migrate_func()
-                print("migrate from version: ", tmp, " to version: ", i)
+                migrate_func(path)
+                # print("migrate from version: ", tmp, " to version: ", i)
             except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError, MitoCodePathConvertError) as e:
                 raise MitocodeMigrateError(str(e))
+        try:
+            with open(path / MITOCODE_CONFIG_PATH / "config.json", "w") as f:
+                config["version"] = LATEST_VERSION
+                json.dump(config, f)
+        except (OSError, ValueError, TypeError) as e:
+            raise MitoCodeWorkspaceInitError(str(e))
+        # print("success")
+        return True
 
 
     @classmethod
-    def _get_migrate_func(cls, target_version) -> Callable:
+    def _get_migrate_func(cls, target_version : int) -> Callable:
         if not (target_version -1 > 0 and target_version > 0):
-            raise MitocodeMigrateError("invalid target version" + str(target_version))
+            raise MitocodeMigrateError("invalid target version" + " " + str(target_version))
         func_name = f"_migrate_from_{target_version-1}_to_{target_version}"
         if hasattr(cls, func_name):
             return getattr(cls, func_name)
@@ -41,9 +56,9 @@ class BasicMigration:
             raise MitocodeMigrateError("No migration function found for version " + str(target_version))
 
     @classmethod
-    def _migrate_from_1_to_2(cls) -> bool:
+    def _migrate_from_1_to_2(cls, path) -> bool:
         # it's a test, and it's just a test
         # version 1 and 2 are the same, so no migration is not needed
         # we can simply change version from 1 to 2
-        print("pending migration...")
+        # print(path)
         return True
