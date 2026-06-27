@@ -1,10 +1,9 @@
 import json
 from pathlib import Path
 from typing import Union, Callable
-from mitocode import APP_VERSION
-from mitocode.backend.exception.mitocode_exception import MitoCodeWorkspaceInitError, MitoCodePathConvertError, \
-    MitocodeMigrateError
-from workspace import MITOCODE_CONFIG_PATH, Workspace
+from mitocode import APP_VERSION, MITOCODE_CONFIG_PATH
+from mitocode.backend.exception.mitocode_exception import MitoCodeWorkspaceInitError, MitoCodePathConvertError, MitocodeMigrateError
+from .workspace import Workspace
 
 LATEST_VERSION = APP_VERSION
 
