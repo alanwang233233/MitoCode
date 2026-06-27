@@ -7,7 +7,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mitocode.backend.agent.agent import Agent
-from mitocode.backend.agent.agent_session import AgentSession, _PlainTextMessageBlock, _ToolResultMessageBlock, _ToolCallMessageBlock
+from mitocode.backend.agent.agent_session import AgentSession, _PlainTextMessageBlock, _ToolResultMessageBlock, \
+    _ToolCallMessageBlock
 from mitocode.backend.agent.agent_runtime import AgentRuntime
 from mitocode.backend.agent.session_factory import SessionFactory
 
@@ -18,6 +19,7 @@ from mitocode.backend.agent.session_factory import SessionFactory
 
 class AsyncIterator:
     """Minimal async iterator used to mock provider streams."""
+
     def __init__(self, items):
         self.items = list(items)
 
@@ -665,7 +667,7 @@ class TestAgentRuntimeEdgeCases:
 
     @pytest.mark.asyncio
     async def test_run_tool_type_error_reported_as_invalid_argument(
-        self, session, provider, runtime
+            self, session, provider, runtime
     ):
         """A tool that raises TypeError (e.g. wrong keyword args) reports
         'Invalid argument.' without surfacing the raw exception."""
@@ -703,7 +705,7 @@ class TestAgentRuntimeEdgeCases:
 
     @pytest.mark.asyncio
     async def test_run_tool_invalid_json_arguments(
-        self, session, provider, runtime
+            self, session, provider, runtime
     ):
         """A tool call whose argument string is not valid JSON reports
         'Invalid JSON Format.' and is not dispatched to the Python function."""
@@ -744,7 +746,7 @@ class TestAgentRuntimeEdgeCases:
 
     @pytest.mark.asyncio
     async def test_run_content_filter_reason_treated_as_standard_stop(
-        self, session, provider, runtime
+            self, session, provider, runtime
     ):
         """'content_filter' finish reason must emit system.finished.standard."""
         provider.chat = mock.AsyncMock(
@@ -767,7 +769,7 @@ class TestAgentRuntimeEdgeCases:
 
     @pytest.mark.asyncio
     async def test_run_multiple_parallel_tool_calls_all_executed(
-        self, session, provider, runtime
+            self, session, provider, runtime
     ):
         """When the LLM proposes two tool calls in a single turn, both are
         executed and both results are appended to the session."""
@@ -839,7 +841,7 @@ class TestAgentRuntimeEdgeCases:
 
     @pytest.mark.asyncio
     async def test_run_tool_result_persisted_in_session_messages(
-        self, session, provider, runtime
+            self, session, provider, runtime
     ):
         """After a tool call round-trip, both the tool-call block and its result
         block must appear in session.messages."""
@@ -881,7 +883,7 @@ class TestAgentRuntimeEdgeCases:
 
     @pytest.mark.asyncio
     async def test_run_tool_arguments_streamed_in_chunks(
-        self, session, provider, runtime
+            self, session, provider, runtime
     ):
         """Tool argument JSON arriving in fragments must be concatenated and
         parsed correctly before execution."""
@@ -1026,7 +1028,7 @@ class TestAgentRuntimeStreamingIdNameRegression:
 
     @pytest.mark.asyncio
     async def test_tool_call_id_streamed_in_second_chunk_is_updated_on_block(
-        self, session, provider, runtime
+            self, session, provider, runtime
     ):
         """If the tool call ID arrives across two chunks (first empty, second
         with the real value), the _ToolCallMessageBlock and the final result
@@ -1085,7 +1087,7 @@ class TestAgentRuntimeStreamingIdNameRegression:
 
     @pytest.mark.asyncio
     async def test_tool_call_name_streamed_in_second_chunk_is_updated_on_block(
-        self, session, provider, runtime
+            self, session, provider, runtime
     ):
         """If the function name arrives across two chunks (first half in chunk 1,
         second half in chunk 2), the block must end up with the full name so the
@@ -1095,14 +1097,14 @@ class TestAgentRuntimeStreamingIdNameRegression:
         tc_part1 = mock.MagicMock()
         tc_part1.index = 0
         tc_part1.id = "call_n"
-        tc_part1.function.name = "ec"   # partial name
+        tc_part1.function.name = "ec"  # partial name
         tc_part1.function.arguments = None
 
         # Chunk 2: second half of name
         tc_part2 = mock.MagicMock()
         tc_part2.index = 0
         tc_part2.id = None
-        tc_part2.function.name = "ho"   # completes "echo"
+        tc_part2.function.name = "ho"  # completes "echo"
         tc_part2.function.arguments = None
 
         # Chunk 3: arguments + finish reason

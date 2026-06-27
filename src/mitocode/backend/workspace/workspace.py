@@ -24,7 +24,7 @@ class Workspace:
             description.
     """
 
-    def __init__(self, workspace_path: Union[str, Path], name: str, version: int ,description: str = "") -> None:
+    def __init__(self, workspace_path: Union[str, Path], name: str, version: int, description: str = "") -> None:
         """Initialize a Workspace instance.
 
         Args:
@@ -110,13 +110,15 @@ class Workspace:
                     if config:
                         version = config.get("version")
                         if version is None:
-                            raise MitoCodeWorkspaceInitError("Configuration file is invalid: 'version' field is missing")
+                            raise MitoCodeWorkspaceInitError(
+                                "Configuration file is invalid: 'version' field is missing")
                         if version > APP_VERSION:
                             raise MitoCodeAppTooOldError("App need upgrade to open the workspace")
                         elif version < APP_VERSION:
                             raise MitoCodeWorkspaceTooOldError("Workspace need migrate to be opened")
                         if config.get('name'):
-                            workspace = Workspace(path, config["name"], config.get("version"), config.get("description", ""))
+                            workspace = Workspace(path, config["name"], config.get("version"),
+                                                  config.get("description", ""))
                             workspace.config['version'] = config.get('version')
                             return workspace
                         else:
