@@ -35,10 +35,14 @@ class BasicMigration:
             except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError, MitoCodePathConvertError) as e:
                 raise MitocodeMigrateError(str(e))
         try:
-            with open(path / MITOCODE_CONFIG_PATH / "config.json", "w") as f:
+            config_file_path = path / MITOCODE_CONFIG_PATH / "config.json"
+            if config_file_path.exists():
+                with open(config_file_path, "r") as f:
+                    config = json.load(f)
+            with open(config_file_path, "w") as f:
                 config["version"] = LATEST_VERSION
                 json.dump(config, f)
-        except (OSError, ValueError, TypeError) as e:
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as e:
             raise MitoCodeWorkspaceInitError(str(e))
         # print("success")
         return True
