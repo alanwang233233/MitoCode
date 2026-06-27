@@ -98,7 +98,7 @@ class TestInit:
     """Tests for the Workspace constructor."""
 
     def test_workspace_properly(self, empty_dir):
-        ws = Workspace(empty_dir, "agent-1")
+        ws = Workspace(empty_dir, "agent-1", 1)
         assert ws.config["name"] == "agent-1"
         assert ws.config["description"] == ""
         assert ws.config_path == empty_dir / MITOCODE_CONFIG_PATH
