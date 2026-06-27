@@ -107,7 +107,7 @@ class TestInit:
     def test_init_does_not_create_files_on_disk(self, empty_dir):
         """__init__ is a pure data constructor — it must not touch the filesystem."""
         before = set(p.name for p in empty_dir.iterdir()) if empty_dir.exists() else set()
-        Workspace(empty_dir, "agent-mem")
+        Workspace(empty_dir, "agent-mem", 2)
         after = set(p.name for p in empty_dir.iterdir()) if empty_dir.exists() else set()
         assert before == after
 
@@ -236,7 +236,7 @@ class TestDump:
 
     def test_dump_raise_when_config_path_not_dir(self, empty_dir):
         """If .mitocode doesn't exist, dump returns False."""
-        ws = Workspace(empty_dir, "agent-nodir")
+        ws = Workspace(empty_dir, "agent-nodir", 2)
         with pytest.raises(MitoCodeWorkspaceDumpError, match="not found"):
             ws.dump()
 
