@@ -8,11 +8,18 @@
 
 - [ ] 移除Herobrine
 - [ ] 完成Workspace.validate()，Workspace.reload()的具体实现
-- [ ] 添加日志功能
+- [ ] 重构Agent对外接口
+- [ ] 添加上下文管理功能
+- [ ] 添加工具管理功能
+- [ ] 添加索引功能
+- [ ] 添加MCP功能
+- [ ] 添加Agent Skills功能
+- [ ] 完成TUI
 
 ## 中优先级
 
 - [ ] 补充migration.py，workspace.py的单元测试
+- [ ] 添加日志功能
 - [ ] 完成快照功能
 - [ ] 将所有raise ...改为raise ... from e，便于调试
 
