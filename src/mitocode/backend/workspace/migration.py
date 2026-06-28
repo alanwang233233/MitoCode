@@ -39,9 +39,10 @@ class BasicMigration:
                 raise MitocodeMigrateError(str(e))
         try:
             config_file_path = path / MITOCODE_CONFIG_PATH / "config.json"
-            if config_file_path.exists():
-                with open(config_file_path, "r") as f:
-                    config = json.load(f)
+            if not config_file_path.exists():
+                raise MitocodeMigrateError("Configuration file 'config.json' was lost or deleted during migration.")
+            with open(config_file_path, "r") as f:
+                config = json.load(f)
             with open(config_file_path, "w") as f:
                 config["version"] = LATEST_VERSION
                 json.dump(config, f)
