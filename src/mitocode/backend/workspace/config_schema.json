@@ -6,9 +6,9 @@
     "type": "object",
     "properties": {
       "version": {
-        "type": "string",
+        "type": "integer",
         "description": "Workspace version",
-        "minLength": 1
+        "minimum": 1
       },
       "name": {
         "type": "string",
@@ -18,31 +18,11 @@
       "description": {
         "type": "string",
         "description": "Workspace description"
-      },
-      "dir_map": {
-        "type": "object",
-        "description": "Directory mapping relationships",
-        "additionalProperties": {
-          "type": "string",
-          "pattern": "^/.+"
-        },
-        "minProperties": 1
-      },
-      "file_map": {
-        "type": "object",
-        "description": "File mapping relationships",
-        "additionalProperties": {
-          "type": "string",
-          "pattern": "^[^/\\*?\"<>|]+$"
-        },
-        "minProperties": 1
       }
     },
     "required": [
-      "name",
-      "dir_map",
-      "file_map"
+      "name"
     ],
-    "additionalProperties": false
+    "additionalProperties": true
   }
 }

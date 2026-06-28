@@ -8,6 +8,7 @@ agents: dict[int, Agent] = {}
 agents_cnt = 0
 lock = threading.Lock()
 
+
 def submit_exist(agent_id: int, message: str):
     with lock:
         agent = agents[agent_id]
@@ -15,7 +16,7 @@ def submit_exist(agent_id: int, message: str):
     return executor.submit(agent.run)
 
 
-def submit_new(prompt: list[dict], globalmcpmanager : mcp_manager.MCPManager, **settings):
+def submit_new(prompt: list[dict], globalmcpmanager: mcp_manager.MCPManager, **settings):
     with lock:
         agent = Agent(prompt, globalmcpmanager, settings=settings)
         global agents_cnt

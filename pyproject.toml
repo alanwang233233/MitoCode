@@ -9,27 +9,27 @@ description = "vibe_coding_test"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "uvicorn",
-  "sse-starlette",
-  "rich",
-  "openai",
-  "mcp",
-  "loguru",
-  "httpx",
-  "httpx-sse",
-  "textual",
-  "fastapi",
+    "uvicorn",
+    "sse-starlette",
+    "rich",
+    "openai",
+    "mcp",
+    "loguru",
+    "httpx",
+    "httpx-sse",
+    "textual",
+    "fastapi",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=7.0",
-  "openai",
-  "mcp",
-  "loguru",
-  "httpx",
-  "httpx-sse",
-  "textual",
-  "fastapi",
+    "pytest>=7.0",
+    "openai",
+    "mcp",
+    "loguru",
+    "httpx",
+    "httpx-sse",
+    "textual",
+    "fastapi",
 ]
 

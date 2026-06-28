@@ -136,11 +136,11 @@ class MCPSessionManager:
 
 
 def call_tool_in_thread(
-    manager: MCPSessionManager,
-    tool_name: str,
-    tool_args: dict,
-    result_holder: list,
-    error_holder: list,
+        manager: MCPSessionManager,
+        tool_name: str,
+        tool_args: dict,
+        result_holder: list,
+        error_holder: list,
 ):
     """Worker function executed in a ThreadPoolExecutor thread to call an MCP tool."""
     try:

@@ -35,4 +35,3 @@ def test_openai_subagent_settings_schema_validation():
 def test_openai_subagent_schema_declares_required_api_key():
     schema = ChatProviderOpenAI.get_settings_schema()
     assert "api_key" in schema["required"]
-

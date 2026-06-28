@@ -7,7 +7,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mitocode.backend.agent.agent import Agent
-from mitocode.backend.agent.agent_session import _PlainTextMessageBlock, _ToolResultMessageBlock, _ToolCallMessageBlock, _MessageBlock
+from mitocode.backend.agent.agent_session import _PlainTextMessageBlock, _ToolResultMessageBlock, _ToolCallMessageBlock, \
+    _MessageBlock
 
 
 # ---------------------------------------------------------------------------
@@ -246,17 +247,17 @@ class TestSingleAgentBuildStandardContext:
         provider = mock.MagicMock()
         agent = Agent(provider=provider)
         agent.append_user_prompt("hello")
-        
+
         # Add a finished tool call
         tool_block = _ToolCallMessageBlock("my_tool", "call_1")
         tool_block.append_argument_chunk('{"x": 1}')
         tool_block.finish()
         agent.messages.append(tool_block)
-        
+
         # Add tool result
         result_block = _ToolResultMessageBlock("call_1", "result")
         agent.messages.append(result_block)
-        
+
         context = agent.build_standard_context()
         assert len(context) == 3
         assert context[0] == {"role": "user", "content": "hello"}
@@ -272,13 +273,13 @@ class TestSingleAgentBuildStandardContext:
         provider = mock.MagicMock()
         agent = Agent(provider=provider)
         agent.append_user_prompt("hello")
-        
+
         # Add a finished tool call without result
         tool_block = _ToolCallMessageBlock("my_tool", "call_1")
         tool_block.append_argument_chunk('{}')
         tool_block.finish()
         agent.messages.append(tool_block)
-        
+
         context = agent.build_standard_context()
         assert len(context) == 2
         assert context[0] == {"role": "user", "content": "hello"}
@@ -288,12 +289,13 @@ class TestSingleAgentBuildStandardContext:
 
 class AsyncIterator:
     """Helper class to create async iterators for testing."""
+
     def __init__(self, items):
         self.items = items
-    
+
     def __aiter__(self):
         return self
-    
+
     async def __anext__(self):
         if self.items:
             return self.items.pop(0)
@@ -325,26 +327,26 @@ class TestSingleAgentRun:
         chunk1.choices = [mock.MagicMock()]
         chunk1.choices[0].delta.content = "Hello"
         chunk1.choices[0].finish_reason = None
-        
+
         chunk2 = mock.MagicMock()
         chunk2.choices = [mock.MagicMock()]
         chunk2.choices[0].delta.content = " World"
         chunk2.choices[0].finish_reason = "stop"
-        
+
         async def mock_chat(**kwargs):
             return AsyncIterator([chunk1, chunk2])
-        
+
         provider.chat = mock_chat
-        
+
         events = []
         async for event in agent.run():
             events.append(event)
-        
+
         text_events = [e for e in events if e["event"] == "agent.text"]
         assert len(text_events) == 2
         assert text_events[0]["delta"] == "Hello"
         assert text_events[1]["delta"] == " World"
-        
+
         finish_events = [e for e in events if e["event"] == "system.finished.standard"]
         assert len(finish_events) == 1
         assert finish_events[0]["reason"] == "stop"
@@ -361,50 +363,51 @@ class TestSingleAgentRun:
         chunk1.choices[0].delta.tool_calls[0].function.name = "my_tool"
         chunk1.choices[0].delta.tool_calls[0].function.arguments = '{"x": 1}'
         chunk1.choices[0].finish_reason = "tool_calls"
-        
+
         # Second chunk (after tool result is sent back) returns normal response
         chunk2 = mock.MagicMock()
         chunk2.choices = [mock.MagicMock()]
         chunk2.choices[0].delta.content = "Tool executed successfully"
         chunk2.choices[0].finish_reason = "stop"
-        
+
         call_count = [0]
+
         async def mock_chat(**kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
                 return AsyncIterator([chunk1])
             else:
                 return AsyncIterator([chunk2])
-        
+
         provider.chat = mock_chat
-        
+
         # Register a tool
         def my_tool(x):
             return f"result_{x}"
-        
+
         agent.tools_map = {"my_tool": my_tool}
-        
+
         events = []
         async for event in agent.run():
             events.append(event)
-        
+
         header_events = [e for e in events if e["event"] == "agent.tool_call.header"]
         assert len(header_events) == 1
         assert header_events[0]["id"] == "call_1"
         assert header_events[0]["name"] == "my_tool"
-        
+
         delta_events = [e for e in events if e["event"] == "agent.tool_call.delta"]
         assert len(delta_events) == 1
         assert delta_events[0]["delta"] == '{"x": 1}'
-        
+
         execution_events = [e for e in events if e["event"] == "agent.tool_call.execution"]
         assert len(execution_events) == 1
         assert execution_events[0]["name"] == "my_tool"
-        
+
         result_events = [e for e in events if e["event"] == "agent.tool_call.result"]
         assert len(result_events) == 1
         assert result_events[0]["success"] is True
-        
+
         # Should also have final finish event
         finish_events = [e for e in events if e["event"] == "system.finished.standard"]
         assert len(finish_events) == 1
@@ -421,32 +424,33 @@ class TestSingleAgentRun:
         chunk1.choices[0].delta.tool_calls[0].function.name = "unknown_tool"
         chunk1.choices[0].delta.tool_calls[0].function.arguments = '{}'
         chunk1.choices[0].finish_reason = "tool_calls"
-        
+
         # Second chunk (after tool result is sent back) returns normal response
         chunk2 = mock.MagicMock()
         chunk2.choices = [mock.MagicMock()]
         chunk2.choices[0].delta.content = "Tool not found"
         chunk2.choices[0].finish_reason = "stop"
-        
+
         call_count = [0]
+
         async def mock_chat(**kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
                 return AsyncIterator([chunk1])
             else:
                 return AsyncIterator([chunk2])
-        
+
         provider.chat = mock_chat
-        
+
         events = []
         async for event in agent.run():
             events.append(event)
-        
+
         result_events = [e for e in events if e["event"] == "agent.tool_call.result"]
         assert len(result_events) == 1
         assert result_events[0]["success"] is False
         assert "not registered" in result_events[0]["result"]
-        
+
         # Should also have final finish event
         finish_events = [e for e in events if e["event"] == "system.finished.standard"]
         assert len(finish_events) == 1
@@ -463,37 +467,38 @@ class TestSingleAgentRun:
         chunk1.choices[0].delta.tool_calls[0].function.name = "failing_tool"
         chunk1.choices[0].delta.tool_calls[0].function.arguments = '{}'
         chunk1.choices[0].finish_reason = "tool_calls"
-        
+
         # Second chunk (after tool result is sent back) returns normal response
         chunk2 = mock.MagicMock()
         chunk2.choices = [mock.MagicMock()]
         chunk2.choices[0].delta.content = "Error occurred"
         chunk2.choices[0].finish_reason = "stop"
-        
+
         call_count = [0]
+
         async def mock_chat(**kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
                 return AsyncIterator([chunk1])
             else:
                 return AsyncIterator([chunk2])
-        
+
         provider.chat = mock_chat
-        
+
         def failing_tool():
             raise Exception("Tool error")
-        
+
         agent.tools_map = {"failing_tool": failing_tool}
-        
+
         events = []
         async for event in agent.run():
             events.append(event)
-        
+
         result_events = [e for e in events if e["event"] == "agent.tool_call.result"]
         assert len(result_events) == 1
         assert result_events[0]["success"] is False
         assert "Error executing tool" in result_events[0]["result"]
-        
+
         # Should also have final finish event
         finish_events = [e for e in events if e["event"] == "system.finished.standard"]
         assert len(finish_events) == 1
@@ -502,21 +507,21 @@ class TestSingleAgentRun:
     async def test_run_calls_on_end_callback(self, agent, provider):
         on_end = mock.MagicMock()
         agent.on_end = on_end
-        
+
         chunk = mock.MagicMock()
         chunk.choices = [mock.MagicMock()]
         chunk.choices[0].delta.content = "Done"
         chunk.choices[0].finish_reason = "stop"
-        
+
         async def mock_chat(**kwargs):
             return AsyncIterator([chunk])
-        
+
         provider.chat = mock_chat
-        
+
         events = []
         async for event in agent.run():
             events.append(event)
-        
+
         assert on_end.called
         assert len(events) >= 1
         assert any(e["event"] == "system.finished.standard" for e in events)
@@ -525,44 +530,44 @@ class TestSingleAgentRun:
     async def test_run_handles_async_on_end_callback(self, agent, provider):
         async def async_on_end(agent_obj, messages):
             pass
-        
+
         agent.on_end = async_on_end
-        
+
         chunk = mock.MagicMock()
         chunk.choices = [mock.MagicMock()]
         chunk.choices[0].delta.content = "Done"
         chunk.choices[0].finish_reason = "stop"
-        
+
         async def mock_chat(**kwargs):
             return AsyncIterator([chunk])
-        
+
         provider.chat = mock_chat
-        
+
         events = []
         async for event in agent.run():
             events.append(event)
-        
+
         assert any(e["event"] == "system.finished.standard" for e in events)
 
     @pytest.mark.asyncio
     async def test_run_skips_chunks_without_choices(self, agent, provider):
         chunk_no_choices = mock.MagicMock()
         chunk_no_choices.choices = None
-        
+
         chunk_with_content = mock.MagicMock()
         chunk_with_content.choices = [mock.MagicMock()]
         chunk_with_content.choices[0].delta.content = "text"
         chunk_with_content.choices[0].finish_reason = "stop"
-        
+
         async def mock_chat(**kwargs):
             return AsyncIterator([chunk_no_choices, chunk_with_content])
-        
+
         provider.chat = mock_chat
-        
+
         events = []
         async for event in agent.run():
             events.append(event)
-        
+
         text_events = [e for e in events if e["event"] == "agent.text"]
         assert len(text_events) == 1
         assert text_events[0]["delta"] == "text"
@@ -573,16 +578,16 @@ class TestSingleAgentRun:
         chunk.choices = [mock.MagicMock()]
         chunk.choices[0].delta.content = "truncated"
         chunk.choices[0].finish_reason = "length"
-        
+
         async def mock_chat(**kwargs):
             return AsyncIterator([chunk])
-        
+
         provider.chat = mock_chat
-        
+
         events = []
         async for event in agent.run():
             events.append(event)
-        
+
         finish_events = [e for e in events if e["event"] == "system.finished.standard"]
         assert len(finish_events) == 1
         assert finish_events[0]["reason"] == "length"
