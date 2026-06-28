@@ -108,10 +108,15 @@ class Workspace:
                 with open(path / MITOCODE_CONFIG_PATH / "config.json", "r") as f:
                     config: dict = json.load(f)
                     if config:
-                        version = config.get("version")
-                        if version is None:
+                        version_raw = config.get("version")
+                        if version_raw is None:
                             raise MitoCodeWorkspaceInitError(
                                 "Configuration file is invalid: 'version' field is missing")
+                        try:
+                            version = int(version_raw)
+                        except (ValueError, TypeError):
+                            raise MitoCodeWorkspaceInitError(
+                                f"Configuration file is invalid: 'version' must be an integer, got {version_raw}")
                         if version > APP_VERSION:
                             raise MitoCodeAppTooOldError("App need upgrade to open the workspace")
                         elif version < APP_VERSION:
