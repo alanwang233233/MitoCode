@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Union, Callable
 from mitocode import APP_VERSION, MITOCODE_CONFIG_PATH
 from mitocode.backend.exception.mitocode_exception import MitoCodeWorkspaceInitError, MitoCodePathConvertError, \
-    MitocodeMigrateError
+    MitoCodeMigrateError
 from .workspace import Workspace
 
 LATEST_VERSION = APP_VERSION
@@ -25,22 +25,21 @@ class BasicMigration:
             # no need to migrate
             return True
         elif version > LATEST_VERSION:
-            raise MitocodeMigrateError(
+            raise MitoCodeMigrateError(
                 f"Current version {version} is higher than the latest version {LATEST_VERSION}! Maybe you need to upgrade Mitocode!.")
-        i: int = version + 1
-        while i <= LATEST_VERSION:
-            tmp = i
-            migrate_func: Callable = cls._get_migrate_func(i)
-            i = i + 1
+        current_version = version
+        while current_version < LATEST_VERSION:
+            next_version = current_version + 1
+            migrate_func = cls._get_migrate_func(next_version)
             try:
                 migrate_func(path)
-                # print("migrate from version: ", tmp, " to version: ", i)
             except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError, MitoCodePathConvertError) as e:
-                raise MitocodeMigrateError(str(e))
+                raise MitoCodeMigrateError(str(e))
+            current_version = next_version
         try:
             config_file_path = path / MITOCODE_CONFIG_PATH / "config.json"
             if not config_file_path.exists():
-                raise MitocodeMigrateError("Configuration file 'config.json' was lost or deleted during migration.")
+                raise MitoCodeMigrateError("Configuration file 'config.json' was lost or deleted during migration.")
             with open(config_file_path, "r") as f:
                 config = json.load(f)
             with open(config_file_path, "w") as f:
@@ -54,12 +53,12 @@ class BasicMigration:
     @classmethod
     def _get_migrate_func(cls, target_version: int) -> Callable:
         if not (target_version - 1 > 0 and target_version > 0):
-            raise MitocodeMigrateError("invalid target version" + " " + str(target_version))
+            raise MitoCodeMigrateError("invalid target version" + " " + str(target_version))
         func_name = f"_migrate_from_{target_version - 1}_to_{target_version}"
         if hasattr(cls, func_name):
             return getattr(cls, func_name)
         else:
-            raise MitocodeMigrateError("No migration function found for version " + str(target_version))
+            raise MitoCodeMigrateError("No migration function found for version " + str(target_version))
 
     @classmethod
     def _migrate_from_1_to_2(cls, path) -> bool:

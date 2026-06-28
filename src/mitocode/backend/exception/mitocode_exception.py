@@ -35,5 +35,5 @@ class MitoCodeAppTooOldError(MitoCodeBaseError):
     pass
 
 
-class MitocodeMigrateError(MitoCodeWorkspaceError):
+class MitoCodeMigrateError(MitoCodeWorkspaceError):
     pass
