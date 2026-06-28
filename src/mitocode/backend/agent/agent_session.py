@@ -107,7 +107,15 @@ class AgentSession:
             managed_map = tool_manager.tools_map()
             managed_schemas = tool_manager.tool_schemas("agent")
             tools_map = {**managed_map, **tools_map}
-            tool_schemas = [*managed_schemas, *tool_schemas]
+            
+            merged_schemas = {s["function"]["name"]: s for s in managed_schemas if "function" in s and "name" in s["function"]}
+            for schema in tool_schemas:
+                name = schema.get("function", {}).get("name")
+                if name:
+                    merged_schemas[name] = schema
+                else:
+                    merged_schemas[id(schema)] = schema
+            tool_schemas = list(merged_schemas.values())
 
         self.provider = provider
         self.messages: List[_MessageBlock] = []
