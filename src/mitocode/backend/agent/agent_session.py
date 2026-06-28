@@ -3,6 +3,7 @@ import json
 from typing import List, Any, Dict, Callable
 
 from loguru import logger as loguru_logger
+from .tools import ToolManager
 
 logger = loguru_logger.bind(name=__name__)
 
@@ -94,19 +95,39 @@ class AgentSession:
         provider = settings.get("provider", None)
         tools_map = settings.get("tools_map", {})
         tool_schemas = settings.get("tool_schemas", [])
+        tool_manager = settings.get("tool_manager", None)
         on_end = settings.get("on_end", None)
 
         if not provider:
             raise ValueError("Provider is required.")
+        if tool_manager is not None and not isinstance(tool_manager, ToolManager):
+            raise TypeError("tool_manager must be an instance of ToolManager.")
+
+        if tool_manager:
+            managed_map = tool_manager.tools_map()
+            managed_schemas = tool_manager.tool_schemas("agent")
+            tools_map = {**managed_map, **tools_map}
+            tool_schemas = [*managed_schemas, *tool_schemas]
 
         self.provider = provider
         self.messages: List[_MessageBlock] = []
         self.tools_map: Dict[str, Callable] = tools_map
         self.tool_schemas = tool_schemas
+        self.tool_manager: ToolManager | None = tool_manager
         self.on_end = on_end
 
         # Asyncio event to handle cancellation signals safely
         self._cancel_event = asyncio.Event()
+
+    def get_tool_docs_for_human(self) -> Dict[str, str]:
+        if not self.tool_manager:
+            return {}
+        return self.tool_manager.human_docs()
+
+    def get_tool_docs_for_agent(self) -> Dict[str, str]:
+        if not self.tool_manager:
+            return {}
+        return self.tool_manager.agent_docs()
 
     def cancel(self):
         """Signals the session to halt its current run stream."""
