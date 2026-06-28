@@ -107,7 +107,7 @@ class Workspace:
             if path.exists() and (path / MITOCODE_CONFIG_PATH).exists() and (config_path / "config.json").is_file():
                 with open(path / MITOCODE_CONFIG_PATH / "config.json", "r") as f:
                     config: dict = json.load(f)
-                    if config:
+                    if isinstance(config, dict) and config:
                         version_raw = config.get("version")
                         if version_raw is None:
                             raise MitoCodeWorkspaceInitError(
