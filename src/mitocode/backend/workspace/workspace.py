@@ -79,7 +79,7 @@ class Workspace:
                 # log
                 shutil.rmtree(workspace_path / MITOCODE_CONFIG_PATH)
 
-        (workspace_path / MITOCODE_CONFIG_PATH).mkdir(parents=True, exist_ok=True)
+        (workspace_path / MITOCODE_CONFIG_PATH).mkdir(parents=False, exist_ok=True)
         new_workspace = cls(workspace_path, name, APP_VERSION, description)
         new_workspace.dump()
         return new_workspace
