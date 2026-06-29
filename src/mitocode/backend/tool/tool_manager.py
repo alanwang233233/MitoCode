@@ -2,6 +2,16 @@ import inspect
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Union, get_args, get_origin, Literal
 
+try:
+    import types
+
+    UnionType = getattr(types, "UnionType", None)
+except ImportError:
+    types = None
+    UnionType = Union
+
+from mitocode.backend.exception.mitocode_exception import MitoCodeToolDefinitionError
+
 
 def _annotation_to_schema(annotation: Any) -> Dict[str, Any]:
     """Convert a Python type annotation to a JSON Schema fragment.
@@ -16,11 +26,11 @@ def _annotation_to_schema(annotation: Any) -> Dict[str, Any]:
     origin = get_origin(annotation)
     args = get_args(annotation)
 
-    if origin is Union:
-        non_none = [a for a in args if a is not type(None)]
-        if len(non_none) == 1:
-            return _annotation_to_schema(non_none[0])
-        return {"anyOf": [_annotation_to_schema(a) for a in non_none]}
+    if origin is Union or origin is UnionType:
+        raw = [a for a in args]
+        if len(raw) == 1:
+            return _annotation_to_schema(raw[0])
+        return {"anyOf": [_annotation_to_schema(a) for a in raw]}
 
     if origin is Literal:
         enum_values = list(args)
@@ -32,9 +42,18 @@ def _annotation_to_schema(annotation: Any) -> Dict[str, Any]:
         return {"type": "string"}
 
     if origin in (list, tuple, set):
-        return {"type": "array"}
+        schema : Dict[str,Any]= {
+            "type": "array",
+        }
+        if args:
+            schema["items"] = _annotation_to_schema(args[0])
+        return schema
+
     if origin is dict:
-        return {"type": "object"}
+        schema: Dict[str, Any] = {"type": "object"}
+        if len(args) == 2:
+            schema["additionalProperties"] = _annotation_to_schema(args[1])
+        return schema
 
     _BASE_TYPE_MAP = {
         str: {"type": "string"},
@@ -43,11 +62,14 @@ def _annotation_to_schema(annotation: Any) -> Dict[str, Any]:
         bool: {"type": "boolean"},
         dict: {"type": "object"},
         list: {"type": "array"},
+        None: {"type": "null"},
+        type(None) : {"type": "null"}
     }
-    schema = _BASE_TYPE_MAP.get(annotation, {"type": "string"})
-    # Return a shallow copy so that every parameter gets its own dict.
-    # Without the copy, two ``str`` parameters with defaults would share
-    # the same schema object and overwrite each other's ``default``.
+    try:
+        schema = _BASE_TYPE_MAP[annotation]
+    except KeyError as e:
+        raise MitoCodeToolDefinitionError(
+            f"Unsupported type annotation: {annotation}. Supported types: str, int, float, bool, dict, list") from e
     return dict(schema)
 
 
@@ -57,6 +79,12 @@ def _build_parameters_schema(func: Callable) -> Dict[str, Any]:
     required: List[str] = []
 
     for name, parameter in signature.parameters.items():
+        if parameter.kind == inspect.Parameter.POSITIONAL_ONLY:
+            func_name = getattr(func, "__name__", type(func).__name__)
+            raise MitoCodeToolDefinitionError(
+                f"Tool function '{func_name}' contains positional-only parameter '{name}'. "
+                "Positional-only parameters are not supported because LLMs invoke tools using keyword arguments."
+            )
         if parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
             continue
 
