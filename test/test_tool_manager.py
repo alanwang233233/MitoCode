@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mitocode.backend.agent.agent_session import AgentSession
 from mitocode.backend.agent.session_factory import SessionFactory
-from mitocode.backend.tool.tools import ToolManager, declare_tool, _build_parameters_schema
+from mitocode.backend.tool.tool_manager import ToolManager, declare_tool, _build_parameters_schema
 
 
 def test_tool_manager_decorator_registration_and_docs():
