@@ -10,7 +10,7 @@
 - [ ] 完成Workspace.validate()，Workspace.reload()的具体实现
 - [ ] 重构Agent对外接口
 - [ ] 添加上下文管理功能
-- [ ] 添加工具管理功能
+- [x] 添加工具管理功能:PR #6
 - [ ] 添加索引功能
 - [ ] 添加MCP功能
 - [ ] 添加Agent Skills功能
@@ -25,6 +25,5 @@
 
 ## 低优先级
 
-- [x] 全局执行black + isort，修复行过长、导入顺序
-- [ ] 将执行black + isort添加到CI
+- [ ] 将执行black，gitleaks，pip-audit，pytest-cov，pip-licenses，mutmut添加到CI，单独拆分出codeql（因为执行太慢，改成并行运行加快速度）
 - [ ] 统一补齐所有模块、类、函数docstring

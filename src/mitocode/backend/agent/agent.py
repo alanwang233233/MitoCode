@@ -16,9 +16,9 @@ class Agent:
     :class:`AgentRuntime`.
 
     All stateful attributes (``provider``, ``messages``, ``tools_map``,
-    ``tool_schemas``, ``on_end``, ``_cancel_event``) are transparently
-    forwarded to the underlying :class:`AgentSession` so that existing code
-    continues to work without modification.
+    ``tool_schemas``, ``tool_manager``, ``on_end``, ``_cancel_event``) are
+    transparently forwarded to the underlying :class:`AgentSession` so that
+    existing code continues to work without modification.
 
     The :meth:`run` async-generator delegates execution to the shared
     :class:`AgentRuntime` singleton.

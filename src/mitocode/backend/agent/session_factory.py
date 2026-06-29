@@ -33,7 +33,8 @@ class SessionFactory:
 
         Args:
             **settings: Settings accepted by :class:`AgentSession`, e.g.
-                ``provider``, ``tools_map``, ``tool_schemas``, ``on_end``.
+                ``provider``, ``tools_map``, ``tool_schemas``,
+                ``tool_manager``, ``on_end``.
 
         Returns:
             AgentSession: A freshly constructed session instance.
