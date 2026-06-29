@@ -20,10 +20,10 @@ from mitocode.backend.workspace.workspace import (
     Workspace,
 )
 
-
 # ──────────────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────────────
+
 
 @pytest.fixture
 def tmp_workspace_root(tmp_path):
@@ -63,6 +63,7 @@ def populated_workspace(tmp_path):
 # _convert_to_path
 # ──────────────────────────────────────────────
 
+
 class TestConvertToPath:
     """Tests for the static method _convert_to_path."""
 
@@ -94,6 +95,7 @@ class TestConvertToPath:
 # __init__
 # ──────────────────────────────────────────────
 
+
 class TestInit:
     """Tests for the Workspace constructor."""
 
@@ -106,15 +108,20 @@ class TestInit:
 
     def test_init_does_not_create_files_on_disk(self, empty_dir):
         """__init__ is a pure data constructor — it must not touch the filesystem."""
-        before = set(p.name for p in empty_dir.iterdir()) if empty_dir.exists() else set()
+        before = (
+            set(p.name for p in empty_dir.iterdir()) if empty_dir.exists() else set()
+        )
         Workspace(empty_dir, "agent-mem", 2)
-        after = set(p.name for p in empty_dir.iterdir()) if empty_dir.exists() else set()
+        after = (
+            set(p.name for p in empty_dir.iterdir()) if empty_dir.exists() else set()
+        )
         assert before == after
 
 
 # ──────────────────────────────────────────────
 # new_workspace
 # ──────────────────────────────────────────────
+
 
 class TestNewWorkspace:
     """Tests for the class method new_workspace."""
@@ -162,6 +169,7 @@ class TestNewWorkspace:
 # init_from_path
 # ──────────────────────────────────────────────
 
+
 class TestInitFromPath:
     """Tests for the class method init_from_path."""
 
@@ -204,11 +212,7 @@ class TestInitFromPath:
         mitocode = tmp_workspace_root / MITOCODE_CONFIG_PATH
         mitocode.mkdir()
         config_file = mitocode / "config.json"
-        config_file.write_text(json.dumps(
-            {
-                "name": "x"
-            }
-        ))
+        config_file.write_text(json.dumps({"name": "x"}))
         # Remove read permission
         config_file.chmod(0o000)
         try:
@@ -221,6 +225,7 @@ class TestInitFromPath:
 # ──────────────────────────────────────────────
 # dump
 # ──────────────────────────────────────────────
+
 
 class TestDump:
     """Tests for the dump method."""
@@ -253,11 +258,14 @@ class TestDump:
 # _validate_within_workspace
 # ──────────────────────────────────────────────
 
+
 class TestValidateWithinWorkspace:
     """Tests for the security barrier _validate_within_workspace."""
 
     def test_normal_path_passes(self, existing_workspace):
-        resolved = existing_workspace._validate_within_workspace(Path("agent/output.txt"))
+        resolved = existing_workspace._validate_within_workspace(
+            Path("agent/output.txt")
+        )
         assert resolved.is_relative_to(existing_workspace.path.resolve())
 
     def test_traversal_with_dotdot_is_blocked(self, existing_workspace):

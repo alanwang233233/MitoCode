@@ -63,7 +63,7 @@ class AgentRuntime:
             standard_messages = session.build_standard_context()
             stream = await session.provider.chat(
                 tools=session.tool_schemas if session.tool_schemas else None,
-                messages=standard_messages
+                messages=standard_messages,
             )
 
             tool_calls_dict = {}
@@ -76,56 +76,72 @@ class AgentRuntime:
                     yield {"event": "system.cancelled"}
                     break
 
-                if not getattr(chunk, 'choices', None):
+                if not getattr(chunk, "choices", None):
                     continue
 
                 delta = chunk.choices[0].delta
                 finish_reason = chunk.choices[0].finish_reason
 
                 # 1. Handle Text
-                if getattr(delta, 'content', None):
+                if getattr(delta, "content", None):
                     session.append_assistant_delta(delta.content)
                     yield {"event": "agent.text", "delta": delta.content}
 
                 # 2. Handle Tools
-                if getattr(delta, 'tool_calls', None):
+                if getattr(delta, "tool_calls", None):
                     for tool_call_chunk in delta.tool_calls:
                         index = tool_call_chunk.index
 
                         if index not in tool_calls_dict:
                             tool_calls_dict[index] = {"id": "", "name": ""}
 
-                        if getattr(tool_call_chunk, 'id', None):
+                        if getattr(tool_call_chunk, "id", None):
                             tool_calls_dict[index]["id"] += tool_call_chunk.id
                             # Keep the block in sync if it was already created with a
                             # partial ID (ID can be spread across multiple chunks).
                             if index in active_tool_blocks:
-                                active_tool_blocks[index].id = tool_calls_dict[index]["id"]
+                                active_tool_blocks[index].id = tool_calls_dict[index][
+                                    "id"
+                                ]
 
-                        if (getattr(tool_call_chunk, 'function', None) and
-                                getattr(tool_call_chunk.function, 'name', None)):
-                            tool_calls_dict[index]["name"] += tool_call_chunk.function.name
+                        if getattr(tool_call_chunk, "function", None) and getattr(
+                            tool_call_chunk.function, "name", None
+                        ):
+                            tool_calls_dict[index][
+                                "name"
+                            ] += tool_call_chunk.function.name
 
                             if index not in active_tool_blocks:
                                 call_id = tool_calls_dict[index]["id"]
                                 call_name = tool_calls_dict[index]["name"]
-                                block = _ToolCallMessageBlock(name=call_name, call_id=call_id)
+                                block = _ToolCallMessageBlock(
+                                    name=call_name, call_id=call_id
+                                )
                                 session.messages.append(block)
                                 active_tool_blocks[index] = block
-                                yield {"event": "agent.tool_call.header", "id": call_id, "name": call_name}
+                                yield {
+                                    "event": "agent.tool_call.header",
+                                    "id": call_id,
+                                    "name": call_name,
+                                }
                             else:
                                 # Name can also be spread across multiple chunks.
-                                active_tool_blocks[index].name = tool_calls_dict[index]["name"]
+                                active_tool_blocks[index].name = tool_calls_dict[index][
+                                    "name"
+                                ]
 
-                        if (getattr(tool_call_chunk, 'function', None) and
-                                getattr(tool_call_chunk.function, 'arguments', None)):
+                        if getattr(tool_call_chunk, "function", None) and getattr(
+                            tool_call_chunk.function, "arguments", None
+                        ):
                             arg_delta = tool_call_chunk.function.arguments
                             if index in active_tool_blocks:
-                                active_tool_blocks[index].append_argument_chunk(arg_delta)
+                                active_tool_blocks[index].append_argument_chunk(
+                                    arg_delta
+                                )
                             yield {
                                 "event": "agent.tool_call.delta",
                                 "id": tool_calls_dict[index].get("id"),
-                                "delta": arg_delta
+                                "delta": arg_delta,
                             }
 
                 if finish_reason:
@@ -148,7 +164,11 @@ class AgentRuntime:
                     func_args = block.parameter
                     success = False
 
-                    yield {"event": "agent.tool_call.execution", "name": func_name, "args": func_args}
+                    yield {
+                        "event": "agent.tool_call.execution",
+                        "name": func_name,
+                        "args": func_args,
+                    }
 
                     if block.parse_error:
                         result_str = f"Invalid JSON Format. {block.parse_error}"
@@ -170,7 +190,9 @@ class AgentRuntime:
                         result_str = f"Error: Tool '{func_name}' is not registered."
 
                     session.messages.append(
-                        _ToolResultMessageBlock(tool_call_id=block.id, result=result_str)
+                        _ToolResultMessageBlock(
+                            tool_call_id=block.id, result=result_str
+                        )
                     )
                     yield {
                         "event": "agent.tool_call.result",
@@ -190,5 +212,8 @@ class AgentRuntime:
                     if ret and asyncio.iscoroutine(ret):
                         await ret
 
-                yield {"event": "system.finished.standard", "reason": stream_finished_reason}
+                yield {
+                    "event": "system.finished.standard",
+                    "reason": stream_finished_reason,
+                }
                 break

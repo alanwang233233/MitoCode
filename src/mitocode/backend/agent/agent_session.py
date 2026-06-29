@@ -67,7 +67,7 @@ class _ToolCallMessageBlock(_MessageBlock):
             "function": {
                 "name": self.name,
                 "arguments": self.arguments_string,
-            }
+            },
         }
 
 
@@ -108,8 +108,11 @@ class AgentSession:
             managed_schemas = tool_manager.tool_schemas("agent")
             tools_map = {**managed_map, **tools_map}
 
-            merged_schemas = {s["function"]["name"]: s for s in managed_schemas if
-                              "function" in s and "name" in s["function"]}
+            merged_schemas = {
+                s["function"]["name"]: s
+                for s in managed_schemas
+                if "function" in s and "name" in s["function"]
+            }
             for schema in tool_schemas:
                 name = schema.get("function", {}).get("name")
                 if name:
@@ -149,9 +152,11 @@ class AgentSession:
 
     def append_assistant_delta(self, delta: str):
         """Appends streaming text chunks to the latest assistant message."""
-        if (not self.messages or
-                not isinstance(self.messages[-1], _PlainTextMessageBlock) or
-                self.messages[-1].role != "assistant"):
+        if (
+            not self.messages
+            or not isinstance(self.messages[-1], _PlainTextMessageBlock)
+            or self.messages[-1].role != "assistant"
+        ):
             self.messages.append(_PlainTextMessageBlock("assistant", delta))
         else:
             self.messages[-1].append(delta)
@@ -167,38 +172,31 @@ class AgentSession:
 
             if isinstance(block, _PlainTextMessageBlock):
                 if tool_calls:
-                    context.append({
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": tool_calls
-                    })
+                    context.append(
+                        {"role": "assistant", "content": None, "tool_calls": tool_calls}
+                    )
                     tool_calls = []
-                context.append({
-                    "role": block.role,
-                    "content": block.message
-                })
+                context.append({"role": block.role, "content": block.message})
             elif isinstance(block, _ToolCallMessageBlock):
                 tool_calls.append(block.to_standard())
             elif isinstance(block, _ToolResultMessageBlock):
                 if tool_calls:
-                    context.append({
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": tool_calls
-                    })
+                    context.append(
+                        {"role": "assistant", "content": None, "tool_calls": tool_calls}
+                    )
                     tool_calls = []
-                context.append({
-                    "role": block.role,
-                    "tool_call_id": block.tool_call_id,
-                    "content": block.content
-                })
+                context.append(
+                    {
+                        "role": block.role,
+                        "tool_call_id": block.tool_call_id,
+                        "content": block.content,
+                    }
+                )
 
         # Catch any trailing tool calls at the end of the history
         if tool_calls:
-            context.append({
-                "role": "assistant",
-                "content": None,
-                "tool_calls": tool_calls
-            })
+            context.append(
+                {"role": "assistant", "content": None, "tool_calls": tool_calls}
+            )
 
         return context

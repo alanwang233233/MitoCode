@@ -16,7 +16,9 @@ def submit_exist(agent_id: int, message: str):
     return executor.submit(agent.run)
 
 
-def submit_new(prompt: list[dict], globalmcpmanager: mcp_manager.MCPManager, **settings):
+def submit_new(
+    prompt: list[dict], globalmcpmanager: mcp_manager.MCPManager, **settings
+):
     with lock:
         agent = Agent(prompt, globalmcpmanager, settings=settings)
         global agents_cnt

@@ -1,6 +1,16 @@
 import inspect
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Union, get_args, get_origin, Literal
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Union,
+    get_args,
+    get_origin,
+    Literal,
+)
 
 try:
     import types
@@ -42,7 +52,7 @@ def _annotation_to_schema(annotation: Any) -> Dict[str, Any]:
         return {"type": "string"}
 
     if origin in (list, tuple, set):
-        schema : Dict[str,Any]= {
+        schema: Dict[str, Any] = {
             "type": "array",
         }
         if args:
@@ -63,13 +73,14 @@ def _annotation_to_schema(annotation: Any) -> Dict[str, Any]:
         dict: {"type": "object"},
         list: {"type": "array"},
         None: {"type": "null"},
-        type(None) : {"type": "null"}
+        type(None): {"type": "null"},
     }
     try:
         schema = _BASE_TYPE_MAP[annotation]
     except KeyError as e:
         raise MitoCodeToolDefinitionError(
-            f"Unsupported type annotation: {annotation}. Supported types: str, int, float, bool, dict, list") from e
+            f"Unsupported type annotation: {annotation}. Supported types: str, int, float, bool, dict, list"
+        ) from e
     return dict(schema)
 
 
@@ -85,7 +96,10 @@ def _build_parameters_schema(func: Callable) -> Dict[str, Any]:
                 f"Tool function '{func_name}' contains positional-only parameter '{name}'. "
                 "Positional-only parameters are not supported because LLMs invoke tools using keyword arguments."
             )
-        if parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+        if parameter.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
             continue
 
         param_schema = _annotation_to_schema(parameter.annotation)
@@ -106,10 +120,10 @@ def _build_parameters_schema(func: Callable) -> Dict[str, Any]:
 
 
 def declare_tool(
-        name: Optional[str] = None,
-        *,
-        human_doc: Optional[str] = None,
-        agent_doc: Optional[str] = None,
+    name: Optional[str] = None,
+    *,
+    human_doc: Optional[str] = None,
+    agent_doc: Optional[str] = None,
 ):
     def _decorator(func: Callable):
         setattr(
@@ -140,11 +154,11 @@ class ToolManager:
         self._tools: Dict[str, ToolSpec] = {}
 
     def tool(
-            self,
-            name: Optional[str] = None,
-            *,
-            human_doc: Optional[str] = None,
-            agent_doc: Optional[str] = None,
+        self,
+        name: Optional[str] = None,
+        *,
+        human_doc: Optional[str] = None,
+        agent_doc: Optional[str] = None,
     ):
         def _decorator(func: Callable):
             self.register(func, name=name, human_doc=human_doc, agent_doc=agent_doc)
@@ -153,17 +167,19 @@ class ToolManager:
         return _decorator
 
     def register(
-            self,
-            func: Callable,
-            *,
-            name: Optional[str] = None,
-            human_doc: Optional[str] = None,
-            agent_doc: Optional[str] = None,
+        self,
+        func: Callable,
+        *,
+        name: Optional[str] = None,
+        human_doc: Optional[str] = None,
+        agent_doc: Optional[str] = None,
     ) -> ToolSpec:
         meta = getattr(func, "__mitocode_tool_meta__", {})
 
         tool_name = name or meta.get("name") or func.__name__
-        human_description = human_doc or meta.get("human_doc") or inspect.getdoc(func) or ""
+        human_description = (
+            human_doc or meta.get("human_doc") or inspect.getdoc(func) or ""
+        )
         agent_description = agent_doc or meta.get("agent_doc") or human_description
 
         spec = ToolSpec(
@@ -184,14 +200,16 @@ class ToolManager:
         schemas = []
         for spec in self._tools.values():
             description = spec.agent_doc if use_agent_doc else spec.human_doc
-            schemas.append({
-                "type": "function",
-                "function": {
-                    "name": spec.name,
-                    "description": description,
-                    "parameters": spec.parameters_schema,
-                },
-            })
+            schemas.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": spec.name,
+                        "description": description,
+                        "parameters": spec.parameters_schema,
+                    },
+                }
+            )
         return schemas
 
     def human_docs(self) -> Dict[str, str]:

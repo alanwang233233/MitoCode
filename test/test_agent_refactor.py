@@ -7,15 +7,19 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mitocode.backend.agent.agent import Agent
-from mitocode.backend.agent.agent_session import AgentSession, _PlainTextMessageBlock, _ToolResultMessageBlock, \
-    _ToolCallMessageBlock
+from mitocode.backend.agent.agent_session import (
+    AgentSession,
+    _PlainTextMessageBlock,
+    _ToolResultMessageBlock,
+    _ToolCallMessageBlock,
+)
 from mitocode.backend.agent.agent_runtime import AgentRuntime
 from mitocode.backend.agent.session_factory import SessionFactory
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 class AsyncIterator:
     """Minimal async iterator used to mock provider streams."""
@@ -79,6 +83,7 @@ def make_tool_chunk(index, call_id, name, arguments):
 # ===========================================================================
 # AgentSession tests
 # ===========================================================================
+
 
 class TestAgentSessionInit:
     def test_requires_provider(self):
@@ -213,6 +218,7 @@ class TestAgentSessionBuildStandardContext:
 # AgentRuntime tests
 # ===========================================================================
 
+
 class TestAgentRuntimeRun:
     @pytest.fixture
     def provider(self):
@@ -237,10 +243,12 @@ class TestAgentRuntimeRun:
     @pytest.mark.asyncio
     async def test_run_yields_text_events(self, session, provider, runtime):
         provider.chat = mock.AsyncMock(
-            return_value=AsyncIterator([
-                make_chunk(content="Hello", finish_reason=None),
-                make_chunk(content=" World", finish_reason="stop"),
-            ])
+            return_value=AsyncIterator(
+                [
+                    make_chunk(content="Hello", finish_reason=None),
+                    make_chunk(content=" World", finish_reason="stop"),
+                ]
+            )
         )
         events = []
         async for event in runtime.run(session):
@@ -258,9 +266,11 @@ class TestAgentRuntimeRun:
     @pytest.mark.asyncio
     async def test_run_yields_length_reason(self, session, provider, runtime):
         provider.chat = mock.AsyncMock(
-            return_value=AsyncIterator([
-                make_chunk(content="truncated", finish_reason="length"),
-            ])
+            return_value=AsyncIterator(
+                [
+                    make_chunk(content="truncated", finish_reason="length"),
+                ]
+            )
         )
         events = []
         async for event in runtime.run(session):
@@ -275,10 +285,12 @@ class TestAgentRuntimeRun:
         no_choices = mock.MagicMock()
         no_choices.choices = None
         provider.chat = mock.AsyncMock(
-            return_value=AsyncIterator([
-                no_choices,
-                make_chunk(content="text", finish_reason="stop"),
-            ])
+            return_value=AsyncIterator(
+                [
+                    no_choices,
+                    make_chunk(content="text", finish_reason="stop"),
+                ]
+            )
         )
         events = []
         async for event in runtime.run(session):
@@ -443,7 +455,9 @@ class TestAgentRuntimeRun:
         session_b = AgentSession(provider=provider)
 
         provider.chat = mock.AsyncMock(
-            return_value=AsyncIterator([make_chunk(content="reply", finish_reason="stop")])
+            return_value=AsyncIterator(
+                [make_chunk(content="reply", finish_reason="stop")]
+            )
         )
 
         session_a.append_user_prompt("question_a")
@@ -457,6 +471,7 @@ class TestAgentRuntimeRun:
 # ===========================================================================
 # SessionFactory tests
 # ===========================================================================
+
 
 class TestSessionFactory:
     def test_create_session_with_no_defaults(self):
@@ -512,6 +527,7 @@ class TestSessionFactory:
 # ===========================================================================
 # AgentSession — edge-case tests
 # ===========================================================================
+
 
 class TestAgentSessionEdgeCases:
     """Additional edge cases not covered by the baseline suite."""
@@ -622,6 +638,7 @@ class TestAgentSessionEdgeCases:
 # AgentRuntime — edge-case tests
 # ===========================================================================
 
+
 class TestAgentRuntimeEdgeCases:
     """Additional edge cases not covered by the baseline suite."""
 
@@ -667,7 +684,7 @@ class TestAgentRuntimeEdgeCases:
 
     @pytest.mark.asyncio
     async def test_run_tool_type_error_reported_as_invalid_argument(
-            self, session, provider, runtime
+        self, session, provider, runtime
     ):
         """A tool that raises TypeError (e.g. wrong keyword args) reports
         'Invalid argument.' without surfacing the raw exception."""
@@ -704,9 +721,7 @@ class TestAgentRuntimeEdgeCases:
         assert "Invalid argument" in result_events[0]["result"]
 
     @pytest.mark.asyncio
-    async def test_run_tool_invalid_json_arguments(
-            self, session, provider, runtime
-    ):
+    async def test_run_tool_invalid_json_arguments(self, session, provider, runtime):
         """A tool call whose argument string is not valid JSON reports
         'Invalid JSON Format.' and is not dispatched to the Python function."""
         tc = mock.MagicMock()
@@ -746,13 +761,15 @@ class TestAgentRuntimeEdgeCases:
 
     @pytest.mark.asyncio
     async def test_run_content_filter_reason_treated_as_standard_stop(
-            self, session, provider, runtime
+        self, session, provider, runtime
     ):
         """'content_filter' finish reason must emit system.finished.standard."""
         provider.chat = mock.AsyncMock(
-            return_value=AsyncIterator([
-                make_chunk(content="filtered", finish_reason="content_filter"),
-            ])
+            return_value=AsyncIterator(
+                [
+                    make_chunk(content="filtered", finish_reason="content_filter"),
+                ]
+            )
         )
 
         events = []
@@ -769,7 +786,7 @@ class TestAgentRuntimeEdgeCases:
 
     @pytest.mark.asyncio
     async def test_run_multiple_parallel_tool_calls_all_executed(
-            self, session, provider, runtime
+        self, session, provider, runtime
     ):
         """When the LLM proposes two tool calls in a single turn, both are
         executed and both results are appended to the session."""
@@ -841,7 +858,7 @@ class TestAgentRuntimeEdgeCases:
 
     @pytest.mark.asyncio
     async def test_run_tool_result_persisted_in_session_messages(
-            self, session, provider, runtime
+        self, session, provider, runtime
     ):
         """After a tool call round-trip, both the tool-call block and its result
         block must appear in session.messages."""
@@ -872,8 +889,7 @@ class TestAgentRuntimeEdgeCases:
         assert "_ToolCallMessageBlock" in types
         assert "_ToolResultMessageBlock" in types
         result_block = next(
-            m for m in session.messages
-            if isinstance(m, _ToolResultMessageBlock)
+            m for m in session.messages if isinstance(m, _ToolResultMessageBlock)
         )
         assert result_block.content == "pong"
 
@@ -883,7 +899,7 @@ class TestAgentRuntimeEdgeCases:
 
     @pytest.mark.asyncio
     async def test_run_tool_arguments_streamed_in_chunks(
-            self, session, provider, runtime
+        self, session, provider, runtime
     ):
         """Tool argument JSON arriving in fragments must be concatenated and
         parsed correctly before execution."""
@@ -947,10 +963,12 @@ class TestAgentRuntimeEdgeCases:
         empty_choices = mock.MagicMock()
         empty_choices.choices = []
         provider.chat = mock.AsyncMock(
-            return_value=AsyncIterator([
-                empty_choices,
-                make_chunk(content="ok", finish_reason="stop"),
-            ])
+            return_value=AsyncIterator(
+                [
+                    empty_choices,
+                    make_chunk(content="ok", finish_reason="stop"),
+                ]
+            )
         )
 
         events = []
@@ -964,6 +982,7 @@ class TestAgentRuntimeEdgeCases:
 # ===========================================================================
 # SessionFactory — edge-case tests
 # ===========================================================================
+
 
 class TestSessionFactoryEdgeCases:
     """Additional edge cases not covered by the baseline suite."""
@@ -1011,6 +1030,7 @@ class TestSessionFactoryEdgeCases:
 # Regression tests for gemini-code-assist issues
 # ===========================================================================
 
+
 class TestAgentRuntimeStreamingIdNameRegression:
     """Regression tests covering the streamed tool-call ID/name fixes."""
 
@@ -1028,7 +1048,7 @@ class TestAgentRuntimeStreamingIdNameRegression:
 
     @pytest.mark.asyncio
     async def test_tool_call_id_streamed_in_second_chunk_is_updated_on_block(
-            self, session, provider, runtime
+        self, session, provider, runtime
     ):
         """If the tool call ID arrives across two chunks (first empty, second
         with the real value), the _ToolCallMessageBlock and the final result
@@ -1087,7 +1107,7 @@ class TestAgentRuntimeStreamingIdNameRegression:
 
     @pytest.mark.asyncio
     async def test_tool_call_name_streamed_in_second_chunk_is_updated_on_block(
-            self, session, provider, runtime
+        self, session, provider, runtime
     ):
         """If the function name arrives across two chunks (first half in chunk 1,
         second half in chunk 2), the block must end up with the full name so the
