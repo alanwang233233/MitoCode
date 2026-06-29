@@ -8,7 +8,7 @@ from .agent_session import (
     _ToolResultMessageBlock,
 )
 from .session_factory import SessionFactory
-from mitocode.backend.tool.tools import ToolManager, ToolSpec, declare_tool
+from mitocode.backend.tool.tool_manager import ToolManager, ToolSpec, declare_tool
 
 __all__ = [
     "Agent",

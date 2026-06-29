@@ -4,7 +4,7 @@ Provides decorator-based tool declaration, automatic JSON Schema generation
 from Python type annotations, and dual human/agent documentation support.
 """
 
-from .tools import ToolManager, ToolSpec, declare_tool
+from .tool_manager import ToolManager, ToolSpec, declare_tool
 
 __all__ = [
     "ToolManager",
