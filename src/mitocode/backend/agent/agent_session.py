@@ -3,7 +3,7 @@ import json
 from typing import List, Any, Dict, Callable
 
 from loguru import logger as loguru_logger
-from .tools import ToolManager
+from mitocode.backend.tool.tools import ToolManager
 
 logger = loguru_logger.bind(name=__name__)
 
@@ -107,8 +107,9 @@ class AgentSession:
             managed_map = tool_manager.tools_map()
             managed_schemas = tool_manager.tool_schemas("agent")
             tools_map = {**managed_map, **tools_map}
-            
-            merged_schemas = {s["function"]["name"]: s for s in managed_schemas if "function" in s and "name" in s["function"]}
+
+            merged_schemas = {s["function"]["name"]: s for s in managed_schemas if
+                              "function" in s and "name" in s["function"]}
             for schema in tool_schemas:
                 name = schema.get("function", {}).get("name")
                 if name:

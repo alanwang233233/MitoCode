@@ -4,6 +4,12 @@ from typing import Any, Callable, Dict, List, Optional, Union, get_args, get_ori
 
 
 def _annotation_to_schema(annotation: Any) -> Dict[str, Any]:
+    """Convert a Python type annotation to a JSON Schema fragment.
+
+    Returns a **new** dict on every call so that callers may safely
+    augment the result (e.g. with ``default`` or ``enum``) without
+    mutating a shared cache entry.
+    """
     if annotation is inspect._empty:
         return {"type": "string"}
 
@@ -30,7 +36,7 @@ def _annotation_to_schema(annotation: Any) -> Dict[str, Any]:
     if origin is dict:
         return {"type": "object"}
 
-    mapping = {
+    _BASE_TYPE_MAP = {
         str: {"type": "string"},
         int: {"type": "integer"},
         float: {"type": "number"},
@@ -38,7 +44,11 @@ def _annotation_to_schema(annotation: Any) -> Dict[str, Any]:
         dict: {"type": "object"},
         list: {"type": "array"},
     }
-    return mapping.get(annotation, {"type": "string"})
+    schema = _BASE_TYPE_MAP.get(annotation, {"type": "string"})
+    # Return a shallow copy so that every parameter gets its own dict.
+    # Without the copy, two ``str`` parameters with defaults would share
+    # the same schema object and overwrite each other's ``default``.
+    return dict(schema)
 
 
 def _build_parameters_schema(func: Callable) -> Dict[str, Any]:

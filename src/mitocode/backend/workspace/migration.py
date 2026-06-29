@@ -27,10 +27,10 @@ class BasicMigration:
         elif version > LATEST_VERSION:
             raise MitoCodeMigrateError(
                 f"Current version {version} is higher than the latest version {LATEST_VERSION}! Maybe you need to upgrade Mitocode!.")
-        current_version : int= version
+        current_version: int = version
         while current_version < LATEST_VERSION:
-            next_version : int = current_version + 1
-            migrate_func : Callable = cls._get_migrate_func(next_version)
+            next_version: int = current_version + 1
+            migrate_func: Callable = cls._get_migrate_func(next_version)
             try:
                 migrate_func(path)
             except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError, MitoCodePathConvertError) as e:

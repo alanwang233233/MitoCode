@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mitocode.backend.agent.agent_session import AgentSession
 from mitocode.backend.agent.session_factory import SessionFactory
-from mitocode.backend.agent.tools import ToolManager, declare_tool
+from mitocode.backend.tool.tools import ToolManager, declare_tool, _build_parameters_schema
 
 
 def test_tool_manager_decorator_registration_and_docs():
@@ -78,3 +78,30 @@ def test_session_factory_forwards_tool_manager():
     session = factory.create_session()
     assert "noop" in session.tools_map
     assert session.tool_schemas[0]["function"]["name"] == "noop"
+
+
+def test_dict_reference_pollution():
+    def test_tool(city: str = "Beijing", country: str = "China"):
+        pass
+
+    schema = _build_parameters_schema(test_tool)
+    props = schema["properties"]
+    print("\n--- 生成的 Schema 结果 ---")
+    print(f"city 的 schema:   {props['city']}")
+    print(f"country 的 schema: {props['country']}")
+    print(f"两者是否是同一个对象？ {props['city'] is props['country']}")
+
+    # 4. 断言验证（在原始 Bug 代码下，以下断言会失败）
+
+    # 断言 A：city 的默认值应该是 "Beijing"
+    # 【Bug 现象】：实际上这里会变成 "China"，因为被 country 覆盖了！
+    assert props["city"]["default"] == "Beijing", \
+        f"city 的默认值被污染了！实际是: {props['city'].get('default')}"
+
+    # 断言 B：country 的默认值应该是 "China"
+    assert props["country"]["default"] == "China"
+
+    # 断言 C：这两个 schema 字典在内存中不能是同一个对象
+    # 【Bug 现象】：实际上它们是同一个对象 (is 返回 True)
+    assert props["city"] is not props["country"], \
+        "字典引用污染！city 和 country 的 schema 指向了同一个内存地址。"
