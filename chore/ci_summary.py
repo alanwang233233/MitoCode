@@ -241,14 +241,14 @@ def generate_markdown(
     # 信息展示区
     lines.append("### 信息展示")
     lines.append(
-        f"- **pip-audit**: 发现 {pip_audit_result['vulnerability_count']} 个已知漏洞（不阻塞）"
+        f"- **pip-audit**: 发现 {pip_audit_result['vulnerability_count']} 个已知漏洞"
     )
     lines.append(
         f"- **pip-licenses**: {'✅ 通过' if license_result['passed'] else '⚠️ 发现风险'} — "
         f"{license_result['count']} 个风险许可证（不阻塞）"
     )
     lines.append(
-        f"- **pyright**: {pyright_result['errors']} 个 error，{pyright_result['warnings']} 个 warning（不阻塞）"
+        f"- **pyright**: {pyright_result['errors']} 个 error，{pyright_result['warnings']} 个 warning"
     )
     lines.append(f"- **eff-u-code**: 详见下方输出")
     lines.append("")
