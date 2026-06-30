@@ -182,11 +182,17 @@ class ToolManager:
         )
         agent_description = agent_doc or meta.get("agent_doc") or human_description
 
+
+
+
+
+
         spec = ToolSpec(
             name=tool_name,
             func=func,
             human_doc=human_description,
             agent_doc=agent_description,
+
             parameters_schema=_build_parameters_schema(func),
         )
         self._tools[tool_name] = spec
@@ -200,6 +206,9 @@ class ToolManager:
         schemas = []
         for spec in self._tools.values():
             description = spec.agent_doc if use_agent_doc else spec.human_doc
+
+
+
             schemas.append(
                 {
                     "type": "function",
