@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
 
 jobs:
@@ -11,33 +11,171 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: write
-      contents: read
+      contents: write
+      pull-requests: write
       security-events: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref }}
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version: "3.10"
 
-      - name: Install dependencies
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python dependencies
         run: python -m pip install -r requirements.txt -r requirements-dev.txt
 
-      - name: Run pytest
+      - name: Install CI tools
+        run: |
+          python -m pip install black pylint pyright pip-audit pip-licenses pytest-cov
+          npm install -g eff-u-code
+
+      - name: Run pytest with coverage
         id: pytest
-        run: pytest test/ --tb=short
+        run: |
+          python -m pytest test/ \
+            --cov=src/mitocode \
+            --cov-report=xml \
+            --cov-report=term \
+            --cov-fail-under=80 \
+            --junitxml=report.xml
+
+      - name: Run gitleaks
+        id: gitleaks
+        run: |
+          gitleaks detect --source . --no-git -f json -r gitleak-result.json
+          leaks_count=$(jq length gitleak-result.json)
+          echo "leaks_count=$leaks_count" >> "$GITHUB_OUTPUT"
+          if [ "$leaks_count" -gt 0 ]; then
+            echo "Found $leaks_count potential secret leaks"
+            exit 1
+          fi
+
+      - name: Run pip-audit
+        id: pip-audit
+        continue-on-error: true
+        run: |
+          pip-audit | tee pip-audit-output.txt
+
+      - name: Run pip-licenses and license check
+        id: pip-licenses
+        continue-on-error: true
+        run: |
+          pip-licenses --format=csv --output-file=licenses.csv
+          python chore/check_licence.py | tee license-check-output.txt || true
+
+      - name: Run black formatter
+        id: black
+        run: |
+          black src test --target-version=py310
+
+      - name: Run pylint
+        id: pylint
+        run: |
+          pylint --output-format=json2 src/mitocode > pylint-report.json || true
+          python - <<'PY'
+          import json, sys
+          data = json.load(open('pylint-report.json'))
+          stats = data.get('statistics', {})
+          score = float(stats.get('score', 0))
+          print(f'pylint score: {score:.2f}/10')
+          if score < 8:
+              print('pylint score is below 8, failing')
+              sys.exit(1)
+          PY
+
+      - name: Run pyright
+        id: pyright
+        continue-on-error: true
+        run: |
+          pyright src | tee pyright-output.txt
+
+      - name: Run eff-u-code
+        id: eff-u-code
+        continue-on-error: true
+        run: |
+          fuck-u-code analyze src | tee eff-u-code-output.txt
 
       - name: Initialize CodeQL
+        id: codeql-init
         uses: github/codeql-action/init@v4
         with:
           languages: python
 
       - name: Perform CodeQL Analysis
+        id: codeql
         uses: github/codeql-action/analyze@v4
         with:
           upload: never
           output: sarif-results
+
+      - name: Commit and push changes
+        id: commit
+        if: |
+          github.event_name == 'pull_request' &&
+          steps.pytest.outcome == 'success' &&
+          steps.gitleaks.outcome == 'success' &&
+          steps.pylint.outcome == 'success'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "ci: auto-format and update reports"
+            git push origin HEAD:${{ github.head_ref }}
+            echo "committed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate CI summary
+        id: summary
+        if: always()
+        env:
+          CI_COMMIT_STATUS: |
+            ${{ steps.commit.outcome == 'success' && (steps.commit.outputs.committed == 'true' && '已自动提交 ✅' || '无变更可提交') || (steps.commit.outcome == 'skipped' && '未执行（前置阻塞步骤未通过）' || '待执行') }}
+        run: |
+          python chore/ci_summary.py --repo-root .
+
+      - name: Publish PR comment
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('ci-summary.md', 'utf8');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      - name: Upload CI artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-reports
+          path: |
+            report.xml
+            coverage.xml
+            gitleak-result.json
+            licenses.csv
+            pylint-report.json
+            pip-audit-output.txt
+            pyright-output.txt
+            eff-u-code-output.txt
+            ci-summary.md
+            ci-summary.json
 
       - name: Upload CodeQL artifacts
         if: always()
