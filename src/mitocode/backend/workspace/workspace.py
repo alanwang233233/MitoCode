@@ -138,10 +138,10 @@ class Workspace:
                             )
                         try:
                             version = int(version_raw)
-                        except (ValueError, TypeError):
+                        except (ValueError, TypeError) as e:
                             raise MitoCodeWorkspaceInitError(
                                 f"Configuration file is invalid: 'version' must be an integer, got {version_raw}"
-                            )
+                            ) from e
                         if version > APP_VERSION:
                             raise MitoCodeAppTooOldError(
                                 "App need upgrade to open the workspace"
@@ -169,7 +169,7 @@ class Workspace:
                 )
 
         except (OSError, json.JSONDecodeError, KeyError) as e:
-            raise MitoCodeWorkspaceInitError(str(e))
+            raise MitoCodeWorkspaceInitError(str(e)) from e
 
     def dump(self) -> bool:
         """Save the workspace configuration to disk.
@@ -190,7 +190,7 @@ class Workspace:
                     json.dump(self.config, f)
                 return True
             except (OSError, TypeError, ValueError) as e:
-                raise MitoCodeWorkspaceDumpError(str(e))
+                raise MitoCodeWorkspaceDumpError(str(e)) from e
         raise MitoCodeWorkspaceDumpError("path not found or not a directory")
 
     @staticmethod
