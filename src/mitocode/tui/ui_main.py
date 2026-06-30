@@ -56,7 +56,7 @@ class ToolCallPanelSyntax(Static):
                     new_code,
                     fromfile="",
                     tofile=self.finished_diff_tofile,
-                    lineterm='',
+                    lineterm="",
                 )
                 diff_out = "".join(diff_lines)
                 if diff_out == "":
@@ -66,36 +66,29 @@ class ToolCallPanelSyntax(Static):
                     "diff",
                     theme="monokai",
                     line_numbers=self.finished_show_line_number,
-                    line_range=self.finished_line_number_range
+                    line_range=self.finished_line_number_range,
                 )
                 return Panel(
                     syntax,
                     title=self.title + " " + self.finished_result,
-                    border_style="green" if self.finished_success else "red"
+                    border_style="green" if self.finished_success else "red",
                 )
             syntax = Syntax(
                 self.code,
                 self.lang,
                 theme="monokai",
                 line_numbers=self.finished_show_line_number,
-                line_range=self.finished_line_number_range
+                line_range=self.finished_line_number_range,
             )
             return Panel(
                 syntax,
                 title=self.title + " " + self.finished_result,
-                border_style="green" if self.finished_success else "red"
+                border_style="green" if self.finished_success else "red",
             )
         syntax = Syntax(
-            self.code,
-            self.lang,
-            theme="monokai",
-            line_numbers=self.show_line_number
+            self.code, self.lang, theme="monokai", line_numbers=self.show_line_number
         )
-        return Panel(
-            syntax,
-            title=self.title,
-            border_style="cyan"
-        )
+        return Panel(syntax, title=self.title, border_style="cyan")
 
     def end(self, success: bool = True, show_line_number: bool = False):
         self.finished = True
@@ -128,7 +121,9 @@ class AgentView(VerticalScroll):
             if was_at_bottom:
                 self.call_after_refresh(self.scroll_end, animate=False)
 
-    async def start_tool_call(self, action: str, description: str, additional: str) -> None:
+    async def start_tool_call(
+        self, action: str, description: str, additional: str
+    ) -> None:
         was_at_bottom = self.scroll_offset.y >= self.max_scroll_y
 
         lang = "python"
@@ -170,7 +165,9 @@ class AgentView(VerticalScroll):
         if tool_panels:
             last_panel = tool_panels.last()
             last_panel.finished_result = result
-            last_panel.finished_success = "error" not in result.lower() and "fail" not in result.lower()
+            last_panel.finished_success = (
+                "error" not in result.lower() and "fail" not in result.lower()
+            )
             last_panel.end()
 
         if was_at_bottom:
@@ -188,7 +185,8 @@ class DynamicGrid(Grid):
             w.styles.display = "none"
 
         n = len(widgets)
-        if n == 0: return
+        if n == 0:
+            return
 
         if n == 1:
             self.styles.grid_size_columns = 1
@@ -225,7 +223,9 @@ class DynamicGrid(Grid):
             for i in range(1, actual_right_rows + 1):
                 if i == actual_right_rows and n - 1 > actual_right_rows:
                     remaining = n - actual_right_rows
-                    widget = Static(f"+ {remaining} agents", classes="agent-view ellipsis")
+                    widget = Static(
+                        f"+ {remaining} agents", classes="agent-view ellipsis"
+                    )
                     await self.mount(widget)
                 else:
                     widget = widgets[i]
@@ -253,8 +253,10 @@ class AgentTree(Tree):
             self.select_node(node)
 
             current_time = time.time()
-            if (current_time - self._last_click_time < 0.4 and
-                    node == self._last_click_node):
+            if (
+                current_time - self._last_click_time < 0.4
+                and node == self._last_click_node
+            ):
                 node.toggle()
                 self._last_click_time = 0
             else:
@@ -267,10 +269,11 @@ class AgentTree(Tree):
 
 
 class VibeFrontend(App):
-    BINDINGS = [("d", "toggle_dark", "Toggle dark mode"),
-                ("f12", "toggle_debug", "Toggle debug mode"),
-                ("f5", "refresh_layout", "Refresh layout"),
-                ]
+    BINDINGS = [
+        ("d", "toggle_dark", "Toggle dark mode"),
+        ("f12", "toggle_debug", "Toggle debug mode"),
+        ("f5", "refresh_layout", "Refresh layout"),
+    ]
 
     CSS = """
         Screen {
@@ -435,7 +438,9 @@ class VibeFrontend(App):
                                 if payload.get("event") == "sync":
                                     agents_delta = payload.get("agents", [])
                                     if agents_delta:
-                                        self.print_log(f"Received {len(agents_delta)} deltas")
+                                        self.print_log(
+                                            f"Received {len(agents_delta)} deltas"
+                                        )
                                         self._update_and_render_tree(agents_delta)
                             except json.JSONDecodeError:
                                 continue
@@ -447,9 +452,7 @@ class VibeFrontend(App):
         self.agent_tree.show_root = False
 
         self.run_worker(
-            self._sse_global_sync(),
-            group="sse_workers",
-            name="global_sync_worker"
+            self._sse_global_sync(), group="sse_workers", name="global_sync_worker"
         )
 
     def _update_and_render_tree(self, incoming_agents: list):
@@ -474,7 +477,9 @@ class VibeFrontend(App):
         root_candidates = [a for a in agents_list if a["id"] not in all_child_ids]
 
         for root_data in root_candidates:
-            self._build_tree_recursive(self.agent_tree.root, root_data, self.agent_data_store)
+            self._build_tree_recursive(
+                self.agent_tree.root, root_data, self.agent_data_store
+            )
 
     def _build_tree_recursive(self, parent_node, current_agent_data, agent_map):
         agent_id = current_agent_data["id"]
@@ -508,7 +513,7 @@ class VibeFrontend(App):
             self.run_worker(
                 self._sse_single_agent(view.agent_id),
                 group="sse_workers",
-                name=f"sse_{view.agent_id}"
+                name=f"sse_{view.agent_id}",
             )
 
 
@@ -518,12 +523,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sse",
         default="http://127.0.0.1:8000/message",
-        help="SSE endpoint URL for agent messages"
+        help="SSE endpoint URL for agent messages",
     )
     parser.add_argument(
         "--sync",
         default="http://127.0.0.1:8000/sync",
-        help="SSE endpoint URL for global sync"
+        help="SSE endpoint URL for global sync",
     )
 
     args = parser.parse_args()

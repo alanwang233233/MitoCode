@@ -1,4 +1,5 @@
 """Default mock chat provider that can also serve as a provider base class."""
+
 from typing import List, Dict, Any, Optional
 import asyncio
 
@@ -17,7 +18,11 @@ class _MockToolCallDelta:
 
 
 class _MockDelta:
-    def __init__(self, content: Optional[str] = None, tool_calls: Optional[List[_MockToolCallDelta]] = None):
+    def __init__(
+        self,
+        content: Optional[str] = None,
+        tool_calls: Optional[List[_MockToolCallDelta]] = None,
+    ):
         self.content = content
         self.tool_calls = tool_calls
 
@@ -37,13 +42,15 @@ class _SampleChatProvider:
     """Default provider: offline mock server, overridable for real API backends."""
 
     def __init__(
-            self,
-            default_model: str = "mock-model",
-            default_messages: Optional[List[Dict[str, Any]]] = None,
-            settings: Optional[Dict[str, Any]] = None,
+        self,
+        default_model: str = "mock-model",
+        default_messages: Optional[List[Dict[str, Any]]] = None,
+        settings: Optional[Dict[str, Any]] = None,
     ):
         if default_messages is None:
-            default_messages = [{"role": "system", "content": "You are a helpful assistant."}]
+            default_messages = [
+                {"role": "system", "content": "You are a helpful assistant."}
+            ]
         if settings is None:
             settings = {}
 
@@ -82,9 +89,9 @@ class _SampleChatProvider:
 
     @staticmethod
     def _merge_messages(
-            default_messages: List[Dict[str, Any]],
-            messages: Optional[List[Dict[str, Any]]],
-            user_messages: str,
+        default_messages: List[Dict[str, Any]],
+        messages: Optional[List[Dict[str, Any]]],
+        user_messages: str,
     ) -> List[Dict[str, Any]]:
         current_messages: List[Dict[str, Any]] = list(default_messages)
         if messages:
@@ -94,11 +101,11 @@ class _SampleChatProvider:
         return current_messages
 
     async def _wrap_stream(
-            self,
-            stream,
-            current_messages: List[Dict[str, Any]],
-            on_token,
-            on_stop,
+        self,
+        stream,
+        current_messages: List[Dict[str, Any]],
+        on_token,
+        on_stop,
     ):
         finish_reason = "unknown"
         try:
@@ -117,16 +124,16 @@ class _SampleChatProvider:
             raise
 
     async def chat(
-            self,
-            user_messages: str = "",
-            model: str = "",
-            tools: Optional[list] = None,
-            messages: Optional[List[Dict[str, Any]]] = None,
-            on_start=lambda _, __: None,
-            on_token=lambda _, __: None,
-            tool_call=lambda _, __: None,
-            on_tool_call=lambda _, __: None,
-            on_stop=lambda _, __: None,
+        self,
+        user_messages: str = "",
+        model: str = "",
+        tools: Optional[list] = None,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        on_start=lambda _, __: None,
+        on_token=lambda _, __: None,
+        tool_call=lambda _, __: None,
+        on_tool_call=lambda _, __: None,
+        on_stop=lambda _, __: None,
     ):
         # TODO: Add tool call mock
         del tools, tool_call, on_tool_call
@@ -135,7 +142,9 @@ class _SampleChatProvider:
         if current_model not in self.model_list:
             raise ValueError(f"Unknown model: {current_model}")
 
-        current_messages = self._merge_messages(self.default_messages, messages, user_messages)
+        current_messages = self._merge_messages(
+            self.default_messages, messages, user_messages
+        )
         on_start(user_messages, current_messages)
 
         last_user = ""
@@ -152,9 +161,11 @@ class _SampleChatProvider:
 
         async def _mock_stream():
             for i in range(0, len(full_text), chunk_size):
-                delta_text = full_text[i: i + chunk_size]
+                delta_text = full_text[i : i + chunk_size]
                 on_token(delta_text, current_messages)
-                yield _MockChunk(delta=_MockDelta(content=delta_text), finish_reason=None)
+                yield _MockChunk(
+                    delta=_MockDelta(content=delta_text), finish_reason=None
+                )
                 await asyncio.sleep(0)
             yield _MockChunk(delta=_MockDelta(content=None), finish_reason="stop")
 

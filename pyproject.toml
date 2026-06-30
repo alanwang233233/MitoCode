@@ -33,3 +33,9 @@ dev = [
     "fastapi",
 ]
 
+[tool.coverage.run]
+source = ["src/mitocode"]
+omit = [
+    "src/mitocode/tui/*",
+    "src/mitocode/backend/__main__.py",
+]
