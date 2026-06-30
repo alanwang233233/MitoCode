@@ -38,10 +38,8 @@ class MitoCodeAppTooOldError(MitoCodeBaseError):
 class MitoCodeMigrateError(MitoCodeWorkspaceError):
     pass
 
-
 class MitoCodeToolError(MitoCodeBaseError):
     pass
-
 
 class MitoCodeToolDefinitionError(MitoCodeToolError):
     pass

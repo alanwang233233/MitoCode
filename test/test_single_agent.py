@@ -7,17 +7,13 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mitocode.backend.agent.agent import Agent
-from mitocode.backend.agent.agent_session import (
-    _PlainTextMessageBlock,
-    _ToolResultMessageBlock,
-    _ToolCallMessageBlock,
-    _MessageBlock,
-)
+from mitocode.backend.agent.agent_session import _PlainTextMessageBlock, _ToolResultMessageBlock, _ToolCallMessageBlock, \
+    _MessageBlock
+
 
 # ---------------------------------------------------------------------------
 # _MessageBlock tests
 # ---------------------------------------------------------------------------
-
 
 class TestMessageBlock:
     def test_init_sets_finished_false(self):
@@ -28,7 +24,6 @@ class TestMessageBlock:
 # ---------------------------------------------------------------------------
 # _PlainTextMessageBlock tests
 # ---------------------------------------------------------------------------
-
 
 class TestPlainTextMessageBlock:
     def test_init_with_message(self):
@@ -60,7 +55,6 @@ class TestPlainTextMessageBlock:
 # _ToolCallMessageBlock tests
 # ---------------------------------------------------------------------------
 
-
 class TestToolCallMessageBlock:
     def test_init(self):
         block = _ToolCallMessageBlock("my_tool", "call_123")
@@ -87,7 +81,7 @@ class TestToolCallMessageBlock:
 
     def test_finish_with_invalid_json(self):
         block = _ToolCallMessageBlock("tool", "id1")
-        block.append_argument_chunk("{invalid json}")
+        block.append_argument_chunk('{invalid json}')
         block.finish()
         assert block.finished is True
         assert block.parse_error is not None
@@ -116,14 +110,13 @@ class TestToolCallMessageBlock:
             "function": {
                 "name": "my_tool",
                 "arguments": '{"arg": 1}',
-            },
+            }
         }
 
 
 # ---------------------------------------------------------------------------
 # _ToolResultMessageBlock tests
 # ---------------------------------------------------------------------------
-
 
 class TestToolResultMessageBlock:
     def test_init(self):
@@ -137,7 +130,6 @@ class TestToolResultMessageBlock:
 # ---------------------------------------------------------------------------
 # Agent tests
 # ---------------------------------------------------------------------------
-
 
 class TestSingleAgentInit:
     def test_init_with_provider_only(self):
@@ -284,7 +276,7 @@ class TestSingleAgentBuildStandardContext:
 
         # Add a finished tool call without result
         tool_block = _ToolCallMessageBlock("my_tool", "call_1")
-        tool_block.append_argument_chunk("{}")
+        tool_block.append_argument_chunk('{}')
         tool_block.finish()
         agent.messages.append(tool_block)
 
@@ -408,9 +400,7 @@ class TestSingleAgentRun:
         assert len(delta_events) == 1
         assert delta_events[0]["delta"] == '{"x": 1}'
 
-        execution_events = [
-            e for e in events if e["event"] == "agent.tool_call.execution"
-        ]
+        execution_events = [e for e in events if e["event"] == "agent.tool_call.execution"]
         assert len(execution_events) == 1
         assert execution_events[0]["name"] == "my_tool"
 
@@ -432,7 +422,7 @@ class TestSingleAgentRun:
         chunk1.choices[0].delta.tool_calls[0].index = 0
         chunk1.choices[0].delta.tool_calls[0].id = "call_1"
         chunk1.choices[0].delta.tool_calls[0].function.name = "unknown_tool"
-        chunk1.choices[0].delta.tool_calls[0].function.arguments = "{}"
+        chunk1.choices[0].delta.tool_calls[0].function.arguments = '{}'
         chunk1.choices[0].finish_reason = "tool_calls"
 
         # Second chunk (after tool result is sent back) returns normal response
@@ -475,7 +465,7 @@ class TestSingleAgentRun:
         chunk1.choices[0].delta.tool_calls[0].index = 0
         chunk1.choices[0].delta.tool_calls[0].id = "call_1"
         chunk1.choices[0].delta.tool_calls[0].function.name = "failing_tool"
-        chunk1.choices[0].delta.tool_calls[0].function.arguments = "{}"
+        chunk1.choices[0].delta.tool_calls[0].function.arguments = '{}'
         chunk1.choices[0].finish_reason = "tool_calls"
 
         # Second chunk (after tool result is sent back) returns normal response

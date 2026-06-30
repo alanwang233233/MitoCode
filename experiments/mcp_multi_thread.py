@@ -21,30 +21,16 @@ def ensure_dependencies():
     print("Checking and installing dependencies...")
     try:
         # Check Node.js and npm
-        subprocess.run(
-            ["npm", "--version"], check=True, capture_output=True, timeout=10
-        )
-    except (
-        subprocess.CalledProcessError,
-        FileNotFoundError,
-        subprocess.TimeoutExpired,
-    ):
+        subprocess.run(["npm", "--version"], check=True, capture_output=True, timeout=10)
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
     try:
         # Check uv
         subprocess.run(["uv", "--version"], check=True, capture_output=True, timeout=10)
-    except (
-        subprocess.CalledProcessError,
-        FileNotFoundError,
-        subprocess.TimeoutExpired,
-    ):
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         print("Installing dependencies...")
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "uv", "mcp", "openai"],
-            check=True,
-            timeout=300,
-        )
+        subprocess.run([sys.executable, "-m", "pip", "install", "uv", "mcp", "openai"], check=True, timeout=300)
 
 
 def build_server_params():
@@ -59,23 +45,14 @@ def build_server_params():
         StdioServerParameters(
             command=sys.executable,
             args=["-m", "uv", "tool", "run", "-q", "mcp-server-git", "-r", os.getcwd()],
-            env=env,
+            env=env
         ),
         # Terminal controller MCP server parameters
         StdioServerParameters(
             command=sys.executable,
-            args=[
-                "-m",
-                "uv",
-                "tool",
-                "run",
-                "-q",
-                "--from",
-                "terminal-controller",
-                "terminal_controller",
-            ],
-            env=env,
-        ),
+            args=["-m", "uv", "tool", "run", "-q", "--from", "terminal-controller", "terminal_controller"],
+            env=env
+        )
     ]
 
     return server_params_list
@@ -94,9 +71,7 @@ class MCPSessionManager:
     def __init__(self, server_params_list: list[StdioServerParameters]):
         self.server_params_list = server_params_list
         self._loop = asyncio.new_event_loop()
-        self._loop_thread = threading.Thread(
-            target=self._run_loop, daemon=True, name="mcp-event-loop"
-        )
+        self._loop_thread = threading.Thread(target=self._run_loop, daemon=True, name="mcp-event-loop")
         self._stack = AsyncExitStack()
         self.sessions: list[ClientSession] = []
         self.all_tools: list = []
@@ -119,17 +94,11 @@ class MCPSessionManager:
         for params in self.server_params_list:
             print(f"Connecting to server: {params.command} {' '.join(params.args)}")
             transport_manager = stdio_client(params)
-            read_stream, write_stream = await self._stack.enter_async_context(
-                transport_manager
-            )
-            session = await self._stack.enter_async_context(
-                ClientSession(read_stream, write_stream)
-            )
+            read_stream, write_stream = await self._stack.enter_async_context(transport_manager)
+            session = await self._stack.enter_async_context(ClientSession(read_stream, write_stream))
             await session.initialize()
             self.sessions.append(session)
-            print(
-                f"Connected to {params.command} {params.args[1] if len(params.args) > 1 else ''} MCP Server."
-            )
+            print(f"Connected to {params.command} {params.args[1] if len(params.args) > 1 else ''} MCP Server.")
 
         for session in self.sessions:
             response = await session.list_tools()
@@ -167,11 +136,11 @@ class MCPSessionManager:
 
 
 def call_tool_in_thread(
-    manager: MCPSessionManager,
-    tool_name: str,
-    tool_args: dict,
-    result_holder: list,
-    error_holder: list,
+        manager: MCPSessionManager,
+        tool_name: str,
+        tool_args: dict,
+        result_holder: list,
+        error_holder: list,
 ):
     """Worker function executed in a ThreadPoolExecutor thread to call an MCP tool."""
     try:
@@ -186,8 +155,7 @@ def call_tool_in_thread(
 def main():
     if not OPENAI_API_KEY:
         print(
-            "WARNING: OPENAI_API_KEY environment variable is not set. The OpenAI API call will fail unless you provide one."
-        )
+            "WARNING: OPENAI_API_KEY environment variable is not set. The OpenAI API call will fail unless you provide one.")
 
     ensure_dependencies()
 
@@ -201,16 +169,14 @@ def main():
         # Prepare tools for OpenAI
         openai_tools = []
         for t in manager.all_tools:
-            openai_tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.inputSchema,
-                    },
+            openai_tools.append({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.inputSchema
                 }
-            )
+            })
 
         print("\nAll MCP servers initialized and tools loaded.")
         print(f"Total tools available to AI: {len(openai_tools)}")
@@ -221,17 +187,20 @@ def main():
         # Synchronous OpenAI client — no async needed
         client = OpenAI(
             api_key=OPENAI_API_KEY,
-            base_url="https://app.nextchat.club/api/siliconflow/v1",
+            base_url="https://app.nextchat.club/api/siliconflow/v1"
         )
-        messages = [{"role": "user", "content": "run winver"}]
+        messages = [
+            {
+                "role": "user",
+                "content": "run winver"
+            }
+        ]
 
         print("\nSending prompt to OpenAI:")
         print(messages[0]["content"])
 
         # Use a thread pool for parallel tool calls when the model requests multiple at once
-        with ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="tool-worker"
-        ) as executor:
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="tool-worker") as executor:
             while True:
                 print("\nWaiting for OpenAI model response...")
                 response = client.chat.completions.create(
@@ -239,7 +208,7 @@ def main():
                     messages=messages,
                     tools=openai_tools,
                     tool_choice="auto",
-                    timeout=COMMAND_TIMEOUT,  # 添加 API 请求超时
+                    timeout=COMMAND_TIMEOUT  # 添加 API 请求超时
                 )
 
                 response_message = response.choices[0].message
@@ -253,9 +222,7 @@ def main():
                     for tool_call in response_message.tool_calls:
                         tool_name = tool_call.function.name
                         tool_args = json.loads(tool_call.function.arguments)
-                        print(
-                            f"\nModel wants to call tool '{tool_name}' with args {tool_args}"
-                        )
+                        print(f"\nModel wants to call tool '{tool_name}' with args {tool_args}")
 
                         if tool_name in manager.tool_to_session_map:
                             result_holders[tool_call.id] = []
@@ -270,14 +237,12 @@ def main():
                             )
                         else:
                             print(f"Unknown tool requested: {tool_name}")
-                            messages.append(
-                                {
-                                    "role": "tool",
-                                    "tool_call_id": tool_call.id,
-                                    "name": tool_name,
-                                    "content": f"Error: unknown tool '{tool_name}'",
-                                }
-                            )
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_name,
+                                "content": f"Error: unknown tool '{tool_name}'"
+                            })
 
                     # Collect results in original order
                     for tool_call in response_message.tool_calls:
@@ -291,48 +256,38 @@ def main():
                         if error_holders[tool_call.id]:
                             exc = error_holders[tool_call.id][0]
                             if isinstance(exc, TimeoutError):
-                                print(
-                                    f"Error: Tool '{tool_name}' execution timed out after {COMMAND_TIMEOUT} seconds"
-                                )
-                                messages.append(
-                                    {
-                                        "role": "tool",
-                                        "tool_call_id": tool_call.id,
-                                        "name": tool_name,
-                                        "content": f"Error: Command timed out after {COMMAND_TIMEOUT} seconds. Try breaking the command into smaller steps.",
-                                    }
-                                )
+                                print(f"Error: Tool '{tool_name}' execution timed out after {COMMAND_TIMEOUT} seconds")
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "name": tool_name,
+                                    "content": f"Error: Command timed out after {COMMAND_TIMEOUT} seconds. Try breaking the command into smaller steps."
+                                })
                             else:
                                 print(f"Error calling tool {tool_name}: {exc}")
-                                messages.append(
-                                    {
-                                        "role": "tool",
-                                        "tool_call_id": tool_call.id,
-                                        "name": tool_name,
-                                        "content": f"Error: {str(exc)}",
-                                    }
-                                )
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "name": tool_name,
+                                    "content": f"Error: {str(exc)}"
+                                })
                         else:
                             result = result_holders[tool_call.id][0]
                             tool_result_content = ""
-                            if hasattr(result, "content"):
+                            if hasattr(result, 'content'):
                                 for content_item in result.content:
-                                    if hasattr(content_item, "text"):
+                                    if hasattr(content_item, 'text'):
                                         tool_result_content += content_item.text + "\n"
                             else:
                                 tool_result_content = str(result)
 
-                            print(
-                                f"Tool execution result: {tool_result_content[:500]}..."
-                            )  # show first 500 chars
-                            messages.append(
-                                {
-                                    "role": "tool",
-                                    "tool_call_id": tool_call.id,
-                                    "name": tool_name,
-                                    "content": tool_result_content,
-                                }
-                            )
+                            print(f"Tool execution result: {tool_result_content[:500]}...")  # show first 500 chars
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_name,
+                                "content": tool_result_content
+                            })
                 else:
                     # No more tool calls, AI is providing final text response
                     print("\nFinal response from AI:")

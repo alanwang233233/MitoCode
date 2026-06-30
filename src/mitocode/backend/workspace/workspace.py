@@ -1,20 +1,14 @@
 """
 Workspace manager module for MitoCode.
 """
-
 import json
 import shutil
 from pathlib import Path
 from typing import Union
 
 from mitocode import MITOCODE_CONFIG_PATH, APP_VERSION
-from mitocode.backend.exception.mitocode_exception import (
-    MitoCodePathConvertError,
-    MitoCodeWorkspaceInitError,
-    MitoCodeWorkspaceDumpError,
-    MitoCodeWorkspaceTooOldError,
-    MitoCodeAppTooOldError,
-)
+from mitocode.backend.exception.mitocode_exception import MitoCodePathConvertError, MitoCodeWorkspaceInitError, \
+    MitoCodeWorkspaceDumpError, MitoCodeWorkspaceTooOldError, MitoCodeAppTooOldError
 
 
 class Workspace:
@@ -30,13 +24,7 @@ class Workspace:
             description.
     """
 
-    def __init__(
-        self,
-        workspace_path: Union[str, Path],
-        name: str,
-        version: int,
-        description: str = "",
-    ) -> None:
+    def __init__(self, workspace_path: Union[str, Path], name: str, version: int, description: str = "") -> None:
         """Initialize a Workspace instance.
 
         Args:
@@ -50,19 +38,14 @@ class Workspace:
         self.config_path: Path = Path(workspace_path) / MITOCODE_CONFIG_PATH
         self.config_file = self.config_path / "config.json"
         self.config: dict = {
-            "name": name,
-            "description": description,
-            "version": version,
+            'name': name,
+            'description': description,
+            'version': version
         }
 
     @classmethod
-    def new_workspace(
-        cls,
-        workspace_path: Union[str, Path],
-        name: str,
-        description: str = "",
-        override=True,
-    ) -> "Workspace":
+    def new_workspace(cls, workspace_path: Union[str, Path], name: str, description: str = "",
+                      override=True) -> 'Workspace':
         """Create a new workspace at the specified path.
 
         This class method initializes a new MitoCode workspace by creating the configuration
@@ -87,9 +70,7 @@ class Workspace:
         """
         workspace_path: Path = cls._convert_to_path(workspace_path)
         if not workspace_path.exists():
-            raise MitoCodeWorkspaceInitError(
-                "Workspace path does not exist: " + str(workspace_path)
-            )
+            raise MitoCodeWorkspaceInitError("Workspace path does not exist: " + str(workspace_path))
 
         if (workspace_path / MITOCODE_CONFIG_PATH).exists():
             if not override:
@@ -104,7 +85,7 @@ class Workspace:
         return new_workspace
 
     @classmethod
-    def init_from_path(cls, path: Union[str, Path]) -> "Workspace":
+    def init_from_path(cls, path: Union[str, Path]) -> 'Workspace':
         """Initialize a Workspace instance from an existing workspace path.
 
         This class method loads an existing workspace configuration from the specified path.
@@ -123,50 +104,34 @@ class Workspace:
         try:
             path: Path = cls._convert_to_path(path)
             config_path: Path = path / MITOCODE_CONFIG_PATH
-            if (
-                path.exists()
-                and (path / MITOCODE_CONFIG_PATH).exists()
-                and (config_path / "config.json").is_file()
-            ):
+            if path.exists() and (path / MITOCODE_CONFIG_PATH).exists() and (config_path / "config.json").is_file():
                 with open(path / MITOCODE_CONFIG_PATH / "config.json", "r") as f:
                     config: dict = json.load(f)
                     if isinstance(config, dict) and config:
                         version_raw = config.get("version")
                         if version_raw is None:
                             raise MitoCodeWorkspaceInitError(
-                                "Configuration file is invalid: 'version' field is missing"
-                            )
+                                "Configuration file is invalid: 'version' field is missing")
                         try:
                             version = int(version_raw)
                         except (ValueError, TypeError):
                             raise MitoCodeWorkspaceInitError(
-                                f"Configuration file is invalid: 'version' must be an integer, got {version_raw}"
-                            )
+                                f"Configuration file is invalid: 'version' must be an integer, got {version_raw}")
                         if version > APP_VERSION:
-                            raise MitoCodeAppTooOldError(
-                                "App need upgrade to open the workspace"
-                            )
+                            raise MitoCodeAppTooOldError("App need upgrade to open the workspace")
                         elif version < APP_VERSION:
-                            raise MitoCodeWorkspaceTooOldError(
-                                "Workspace need migrate to be opened"
-                            )
-                        if config.get("name"):
-                            workspace = Workspace(
-                                path,
-                                config["name"],
-                                config.get("version"),
-                                config.get("description", ""),
-                            )
-                            workspace.config["version"] = config.get("version")
+                            raise MitoCodeWorkspaceTooOldError("Workspace need migrate to be opened")
+                        if config.get('name'):
+                            workspace = Workspace(path, config["name"], config.get("version"),
+                                                  config.get("description", ""))
+                            workspace.config['version'] = config.get('version')
                             return workspace
                         else:
                             raise MitoCodeWorkspaceInitError("config invalid")
                     else:
                         raise MitoCodeWorkspaceInitError("config is empty")
             else:
-                raise MitoCodeWorkspaceInitError(
-                    "Workspace configuration not found at: " + str(path)
-                )
+                raise MitoCodeWorkspaceInitError("Workspace configuration not found at: " + str(path))
 
         except (OSError, json.JSONDecodeError, KeyError) as e:
             raise MitoCodeWorkspaceInitError(str(e))

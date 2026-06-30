@@ -47,16 +47,16 @@ class ChatProviderOpenAI(_SampleChatProvider):
         self.timeout = timeout if timeout is not None else 60
 
     async def chat(
-        self,
-        user_messages: str = "",
-        model: str = "",
-        tools: Optional[list] = None,
-        messages: Optional[List[Dict[str, Any]]] = None,
-        on_start=lambda _, __: None,
-        on_token=lambda _, __: None,
-        tool_call=lambda _, __: None,
-        on_tool_call=lambda _, __: None,
-        on_stop=lambda _, __: None,
+            self,
+            user_messages: str = "",
+            model: str = "",
+            tools: Optional[list] = None,
+            messages: Optional[List[Dict[str, Any]]] = None,
+            on_start=lambda _, __: None,
+            on_token=lambda _, __: None,
+            tool_call=lambda _, __: None,
+            on_tool_call=lambda _, __: None,
+            on_stop=lambda _, __: None,
     ):
         # TODO: Add tool call callback function
 
@@ -65,9 +65,7 @@ class ChatProviderOpenAI(_SampleChatProvider):
             raise ValueError(f"Unknown model: {current_model}")
 
         req_messages = messages or []
-        current_messages = self._merge_messages(
-            self.default_messages, req_messages, user_messages
-        )
+        current_messages = self._merge_messages(self.default_messages, req_messages, user_messages)
         on_start(user_messages, current_messages)
 
         req = {

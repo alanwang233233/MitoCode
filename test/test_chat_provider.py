@@ -12,9 +12,7 @@ from mitocode.backend.chat_provider.chat_provider_openai import ChatProviderOpen
 
 @pytest.mark.asyncio
 async def test_mock_provider_works_with_single_agent_stream():
-    provider = _SampleChatProvider(
-        settings={"chunk_size": 8, "mock_reply_prefix": "[mock]"}
-    )
+    provider = _SampleChatProvider(settings={"chunk_size": 8, "mock_reply_prefix": "[mock]"})
     agent = Agent(provider=provider)
     agent.append_user_prompt("hello")
 
