@@ -238,8 +238,8 @@ def generate_markdown(
     )
     lines.append("")
 
-    # 信息展示区（不阻塞）
-    lines.append("### 信息展示（不阻塞 CI）")
+    # 信息展示区
+    lines.append("### 信息展示")
     lines.append(
         f"- **pip-audit**: 发现 {pip_audit_result['vulnerability_count']} 个已知漏洞（不阻塞）"
     )
@@ -257,7 +257,7 @@ def generate_markdown(
     lines.append("<details>")
     lines.append("<summary>📋 pytest 详细</summary>")
     lines.append("")
-    lines.append(f"```xml\n{_read_text(Path('report.xml'))[:2000]}\n```")
+    lines.append(f"```xml\n{_read_text(Path('pytest-cov-output.txt'))[:2000]}\n```")
     lines.append("</details>")
     lines.append("")
 
