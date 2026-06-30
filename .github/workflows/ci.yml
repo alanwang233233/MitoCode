@@ -50,12 +50,13 @@ jobs:
       - name: Run pytest with coverage
         id: pytest
         run: |
-          python -m pytest test/ \
+          set -o pipefail
+          stdbuf -i0 -o0 -e0 python -m pytest test/ \
             --cov=src/mitocode \
             --cov-report=xml \
             --cov-report=term \
             --cov-fail-under=80 \
-            --junitxml=report.xml | tee pytest-cov-output.txt
+            --junitxml=report.xml 2>&1 | tee pytest-cov-output.txt
 
       # ===== 2. gitleaks =====
       - name: Run gitleaks scan
