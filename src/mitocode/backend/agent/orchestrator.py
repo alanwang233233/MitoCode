@@ -111,6 +111,8 @@ class AgentOrchestrator:
             for sub_id in managed.sub_agent_ids:
                 self.cancel_agent(sub_id, cascade=True)
         managed.session.cancel()
+        if managed._task is not None:
+            managed._task.cancel()
 
     async def send_message(self, agent_id: int, message: str) -> Optional[asyncio.Task]:
         managed = self._agents.get(agent_id)
