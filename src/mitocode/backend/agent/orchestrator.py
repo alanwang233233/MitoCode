@@ -64,7 +64,9 @@ class AgentOrchestrator:
             description=description,
             parent_id=parent_id,
         )
-        if parent_id is not None and parent_id in self._agents:
+        if parent_id is not None:
+            if parent_id not in self._agents:
+                raise ValueError(f"Parent agent {parent_id} does not exist")
             self._agents[parent_id].sub_agent_ids.append(agent_id)
 
         self._agents[agent_id] = managed
@@ -74,7 +76,7 @@ class AgentOrchestrator:
             description=description,
             parent_id=parent_id,
         )
-        if parent_id is not None and parent_id in self._nodes:
+        if parent_id is not None:
             self._nodes[parent_id].sub_agent_ids.append(agent_id)
 
         self._push_tree_sync()
