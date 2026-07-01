@@ -817,6 +817,8 @@ class VibeFrontend(App):
         if not self.agent_tree:
             return
 
+        previous_active = self.active_agent_id
+
         agent_map: Dict[int, dict] = {}
         for a in agents_list:
             agent_map[a["id"]] = a
@@ -832,6 +834,10 @@ class VibeFrontend(App):
 
         for root_data in root_candidates:
             self._build_tree_recursive(self.agent_tree.root, root_data, agent_map)
+
+        if previous_active is not None and previous_active in self.agent_treenodes:
+            node = self.agent_treenodes[previous_active]
+            self._select_tree_node(node)
 
     def _build_tree_recursive(self, parent_node, current_agent_data, agent_map):
         agent_id = current_agent_data["id"]
