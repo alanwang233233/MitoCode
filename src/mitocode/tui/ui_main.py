@@ -805,7 +805,7 @@ class VibeFrontend(App):
             view = self.agents[self.active_agent_id]
             await view.append_user_message(text)
 
-            self.orchestrator.send_message(self.active_agent_id, text)
+            await self.orchestrator.send_message(self.active_agent_id, text)
             self.print_log(f"Sent to Agent {self.active_agent_id}: {text[:50]}...")
             self.chat_input.value = ""
 

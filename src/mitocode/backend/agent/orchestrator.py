@@ -112,13 +112,18 @@ class AgentOrchestrator:
                 self.cancel_agent(sub_id, cascade=True)
         managed.session.cancel()
 
-    def send_message(self, agent_id: int, message: str) -> Optional[asyncio.Task]:
+    async def send_message(self, agent_id: int, message: str) -> Optional[asyncio.Task]:
         managed = self._agents.get(agent_id)
         if managed is None:
             return None
 
         if managed.state == AgentState.RUNNING and managed._task is not None:
-            managed._task.cancel()
+            old_task = managed._task
+            old_task.cancel()
+            try:
+                await old_task
+            except asyncio.CancelledError:
+                pass
 
         managed.session.append_user_prompt(message)
         managed.state = AgentState.RUNNING

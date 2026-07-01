@@ -61,7 +61,7 @@ async def test_orchestrator_create_and_send_message():
     assert snapshot[0]["name"] == "TestAgent"
     assert snapshot[0]["state"] == "idle"
 
-    task = orchestrator.send_message(agent_id, "hello world")
+    task = await orchestrator.send_message(agent_id, "hello world")
     assert task is not None
 
     events = []
@@ -92,7 +92,7 @@ async def test_orchestrator_cancel_agent():
     orchestrator = AgentOrchestrator(default_provider=EchoProvider())
     agent_id = orchestrator.create_agent(name="CancelTest")
 
-    orchestrator.send_message(agent_id, "test")
+    await orchestrator.send_message(agent_id, "test")
     orchestrator.cancel_agent(agent_id)
 
     agent = orchestrator._agents[agent_id]
