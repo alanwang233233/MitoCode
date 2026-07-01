@@ -160,8 +160,12 @@ class AgentOrchestrator:
                 managed.state = AgentState.CANCELLED
             else:
                 managed.state = AgentState.FINISHED
+        except asyncio.CancelledError:
+            managed.state = AgentState.CANCELLED
+            raise
         except Exception:
             managed.state = AgentState.ERROR
         finally:
-            managed._task = None
+            if managed._task is asyncio.current_task():
+                managed._task = None
             self._push_tree_sync()
