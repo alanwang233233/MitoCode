@@ -31,7 +31,7 @@ class BasicMigration:
         ) as e:
             raise MitoCodeWorkspaceInitError(
                 f"Failed to load configuration from {path / MITOCODE_CONFIG_PATH}: {str(e)}"
-            )
+            ) from e
         if version == LATEST_VERSION:
             # no need to migrate
             return True
@@ -53,7 +53,7 @@ class BasicMigration:
                 TypeError,
                 MitoCodePathConvertError,
             ) as e:
-                raise MitoCodeMigrateError(str(e))
+                raise MitoCodeMigrateError(str(e)) from e
             current_version = next_version
         try:
             config_file_path = path / MITOCODE_CONFIG_PATH / "config.json"
@@ -67,7 +67,7 @@ class BasicMigration:
                 config["version"] = LATEST_VERSION
                 json.dump(config, f)
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as e:
-            raise MitoCodeWorkspaceInitError(str(e))
+            raise MitoCodeWorkspaceInitError(str(e)) from e
         # print("success")
         return True
 
