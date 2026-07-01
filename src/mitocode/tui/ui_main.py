@@ -97,47 +97,80 @@ class ToolCallPanelSyntax(Static):
                 old_code = self.finished_diff_origin.splitlines(keepends=True)
                 new_code = self.code.splitlines(keepends=True)
                 diff_lines = unified_diff(
-                    old_code, new_code, fromfile="", tofile=self.finished_diff_tofile, lineterm="",
+                    old_code,
+                    new_code,
+                    fromfile="",
+                    tofile=self.finished_diff_tofile,
+                    lineterm="",
                 )
                 diff_out = "".join(diff_lines) or "No diff"
                 syntax = Syntax(
-                    diff_out, "diff", theme="monokai", background_color="#282a36",
+                    diff_out,
+                    "diff",
+                    theme="monokai",
+                    background_color="#282a36",
                     line_numbers=self.finished_show_line_number,
                     line_range=self.finished_line_number_range,
                 )
                 return Panel(
                     syntax,
-                    title=f"[bold green]{self.title} ✓[/bold green]"
-                    if self.finished_success
-                    else f"[bold red]{self.title} ✗[/bold red]",
-                    title_align="left", border_style="", box=box.SIMPLE,
-                    style="on #282a36", padding=(1, 1, 0, 1),
+                    title=(
+                        f"[bold green]{self.title} ✓[/bold green]"
+                        if self.finished_success
+                        else f"[bold red]{self.title} ✗[/bold red]"
+                    ),
+                    title_align="left",
+                    border_style="",
+                    box=box.SIMPLE,
+                    style="on #282a36",
+                    padding=(1, 1, 0, 1),
                 )
             syntax = Syntax(
-                self.code, self.lang, theme="monokai", background_color="#282a36",
+                self.code,
+                self.lang,
+                theme="monokai",
+                background_color="#282a36",
                 line_numbers=self.finished_show_line_number,
                 line_range=self.finished_line_number_range,
             )
             return Panel(
                 syntax,
-                title=f"[bold green]{self.title} ✓[/bold green]"
-                if self.finished_success
-                else f"[bold red]{self.title} ✗[/bold red]",
-                title_align="left", border_style="", box=box.SIMPLE,
-                style="on #282a36", padding=(1, 1, 0, 1),
+                title=(
+                    f"[bold green]{self.title} ✓[/bold green]"
+                    if self.finished_success
+                    else f"[bold red]{self.title} ✗[/bold red]"
+                ),
+                title_align="left",
+                border_style="",
+                box=box.SIMPLE,
+                style="on #282a36",
+                padding=(1, 1, 0, 1),
             )
         if self._formatted:
             syntax = Syntax(
-                self.code, self.lang, theme="monokai", background_color="#282a36", line_numbers=False,
+                self.code,
+                self.lang,
+                theme="monokai",
+                background_color="#282a36",
+                line_numbers=False,
             )
             return Panel(
                 syntax,
-                title=f"[bold cyan]{self.title}[/bold cyan]", title_align="left",
-                border_style="", box=box.SIMPLE, style="on #282a36", padding=(1, 1, 0, 1),
+                title=f"[bold cyan]{self.title}[/bold cyan]",
+                title_align="left",
+                border_style="",
+                box=box.SIMPLE,
+                style="on #282a36",
+                padding=(1, 1, 0, 1),
             )
         return Panel(
-            "...", title=f"[bold cyan]{self.title}[/bold cyan]", title_align="left",
-            border_style="", box=box.SIMPLE, style="on #282a36", padding=(1, 1, 0, 1),
+            "...",
+            title=f"[bold cyan]{self.title}[/bold cyan]",
+            title_align="left",
+            border_style="",
+            box=box.SIMPLE,
+            style="on #282a36",
+            padding=(1, 1, 0, 1),
         )
 
     def end(self, success: bool = True, show_line_number: bool = False):

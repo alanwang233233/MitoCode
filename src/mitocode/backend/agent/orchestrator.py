@@ -22,7 +22,9 @@ class AgentOrchestrator:
     * Cascading cancellation.
     """
 
-    def __init__(self, tool_manager: Optional[ToolManager] = None, default_provider=None):
+    def __init__(
+        self, tool_manager: Optional[ToolManager] = None, default_provider=None
+    ):
         self._agents: Dict[int, ManagedAgent] = {}
         self._nodes: Dict[int, AgentNode] = {}
         self._counter: int = 0

@@ -99,10 +99,13 @@ python bubble_sort.py
 
 BASH_ARGS = json.dumps({"command": "ls -la"})
 
-WRITE_FILE_ARGS = json.dumps({
-    "file_path": "bubble_sort.py",
-    "content": BUBBLE_SORT_CODE,
-}, ensure_ascii=False)
+WRITE_FILE_ARGS = json.dumps(
+    {
+        "file_path": "bubble_sort.py",
+        "content": BUBBLE_SORT_CODE,
+    },
+    ensure_ascii=False,
+)
 
 READ_FILE_ARGS = json.dumps({"file_path": "bubble_sort.py"})
 

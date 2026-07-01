@@ -103,9 +103,7 @@ async def test_orchestrator_cancel_agent():
 async def test_orchestrator_parent_child_tree():
     orchestrator = AgentOrchestrator(default_provider=EchoProvider())
     parent_id = orchestrator.create_agent(name="Parent")
-    child_id = orchestrator.create_agent(
-        name="Child", parent_id=parent_id
-    )
+    child_id = orchestrator.create_agent(name="Child", parent_id=parent_id)
 
     snapshot = orchestrator.get_tree_snapshot()
     assert len(snapshot) == 2
@@ -143,7 +141,8 @@ def test_event_bridge_tool_call_header():
 def test_event_bridge_tool_call_delta():
     bridge = EventBridge()
     result = bridge.adapt(
-        {"event": "agent.tool_call.delta", "id": "call_1", "delta": '{"path":'}, agent_id=1
+        {"event": "agent.tool_call.delta", "id": "call_1", "delta": '{"path":'},
+        agent_id=1,
     )
     assert result == {"type": "tool_call", "agent_id": 1, "content": '{"path":'}
 
@@ -151,7 +150,12 @@ def test_event_bridge_tool_call_delta():
 def test_event_bridge_tool_call_result():
     bridge = EventBridge()
     result = bridge.adapt(
-        {"event": "agent.tool_call.result", "id": "call_1", "success": True, "result": "done"},
+        {
+            "event": "agent.tool_call.result",
+            "id": "call_1",
+            "success": True,
+            "result": "done",
+        },
         agent_id=1,
     )
     assert result == {"type": "tool_result", "agent_id": 1, "result": "done"}
@@ -160,5 +164,10 @@ def test_event_bridge_tool_call_result():
 def test_event_bridge_skips_internal():
     bridge = EventBridge()
     assert bridge.adapt({"event": "system.cancelled"}, agent_id=1) is None
-    assert bridge.adapt({"event": "system.finished.standard", "reason": "stop"}, agent_id=1) is None
+    assert (
+        bridge.adapt(
+            {"event": "system.finished.standard", "reason": "stop"}, agent_id=1
+        )
+        is None
+    )
     assert bridge.adapt({"event": "system.finished.tool_calls"}, agent_id=1) is None
