@@ -37,5 +37,6 @@ dev = [
 source = ["src/mitocode"]
 omit = [
     "src/mitocode/tui/*",
-    "src/mitocode/backend/__main__.py",
+    "src/mitocode/__main__.py",
+    "src/mitocode/backend/chat_provider/scenario_provider.py",
 ]
