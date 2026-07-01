@@ -82,7 +82,7 @@ class AgentOrchestrator:
         self._push_tree_sync()
         return agent_id
 
-    def destroy_agent(self, agent_id: int) -> None:
+    def destroy_agent(self, agent_id: int, _sync: bool = True) -> None:
         managed = self._agents.get(agent_id)
         if managed is None:
             return
@@ -99,11 +99,12 @@ class AgentOrchestrator:
                 parent_node.sub_agent_ids.remove(agent_id)
 
         for sub_id in list(managed.sub_agent_ids):
-            self.destroy_agent(sub_id)
+            self.destroy_agent(sub_id, _sync=False)
 
         self._agents.pop(agent_id, None)
         self._nodes.pop(agent_id, None)
-        self._push_tree_sync()
+        if _sync:
+            self._push_tree_sync()
 
     def cancel_agent(self, agent_id: int, cascade: bool = True) -> None:
         managed = self._agents.get(agent_id)
