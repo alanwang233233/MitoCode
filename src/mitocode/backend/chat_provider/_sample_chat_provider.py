@@ -119,7 +119,7 @@ class _SampleChatProvider:
                         finish_reason = choice.finish_reason
                 yield chunk
             on_stop(finish_reason, current_messages)
-        except Exception as e:
+        except Exception:
             on_stop("network-error", current_messages)
             raise
 
