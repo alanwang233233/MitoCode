@@ -530,7 +530,7 @@ class VibeFrontend(App):
         border-right: tall $accent;
     }
 
-    QuickCreateInput {
+    #quick-create {
         dock: bottom;
         margin: 0 1;
         height: 3;
