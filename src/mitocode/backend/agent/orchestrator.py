@@ -3,7 +3,6 @@ from typing import Any, Callable, Dict, List, Optional
 
 from mitocode.backend.agent.agent_runtime import AgentRuntime
 from mitocode.backend.agent.agent_session import AgentSession
-from mitocode.backend.agent.agent_node import AgentNode
 from mitocode.backend.agent.managed_agent import ManagedAgent, AgentState
 from mitocode.backend.bridge.event_adapter import EventBridge
 from mitocode.backend.tool.tool_manager import ToolManager
@@ -129,7 +128,17 @@ class AgentOrchestrator:
     # ------------------------------------------------------------------
 
     def get_tree_snapshot(self) -> List[dict]:
-        return [AgentNode.from_managed(m).to_dict() for m in self._agents.values()]
+        return [
+            {
+                "id": m.id,
+                "name": m.name,
+                "description": m.description,
+                "parent_id": m.parent_id,
+                "sub_agent": list(m.sub_agent_ids),
+                "state": m.state.value,
+            }
+            for m in self._agents.values()
+        ]
 
     def _push_tree_sync(self) -> None:
         snapshot = self.get_tree_snapshot()
