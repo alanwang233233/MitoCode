@@ -797,7 +797,6 @@ class VibeFrontend(App):
                 node_data = self.agent_treenodes[self.active_agent_id].data
                 if node_data and node_data.get("state") == "running":
                     self.print_log("Agent is busy, please wait.")
-                    self.chat_input.value = ""
                     return
 
             if self.active_agent_id not in self.agents:

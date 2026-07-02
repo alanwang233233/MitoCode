@@ -1,4 +1,5 @@
 import asyncio
+import copy
 from typing import Any, Dict, List
 
 from .agent_runtime import AgentRuntime
@@ -71,6 +72,11 @@ class AgentOrchestrator:
             raise ValueError(
                 "provider is required — pass it directly or set default_provider on the orchestrator"
             )
+        provider = copy.deepcopy(provider)
+        if hasattr(provider, "_turn"):
+            provider._turn = 0
+        if provider is self._default_provider:
+            provider = copy.copy(provider)
 
         session = AgentSession(
             provider=provider, tool_manager=self._tool_manager, **session_kwargs
