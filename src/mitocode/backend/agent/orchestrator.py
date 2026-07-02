@@ -3,6 +3,7 @@ from typing import Any, Dict, List
 
 from .agent_runtime import AgentRuntime
 from .agent_session import AgentSession
+from .agent_node import AgentNode
 from .managed_agent import ManagedAgent, AgentState
 from ..bridge.event_adapter import EventBridge
 from ..tool.tool_manager import ToolManager
@@ -178,17 +179,7 @@ class AgentOrchestrator:
 
     def get_tree_snapshot(self) -> List[dict]:
         """Return the current agent tree as a list of dicts for TUI rendering."""
-        return [
-            {
-                "id": m.id,
-                "name": m.name,
-                "description": m.description,
-                "parent_id": m.parent_id,
-                "sub_agent": list(m.sub_agent_ids),
-                "state": m.state.value,
-            }
-            for m in self._agents.values()
-        ]
+        return [AgentNode.from_managed(m).to_dict() for m in self._agents.values()]
 
     def _push_tree_sync(self) -> None:
         snapshot = self.get_tree_snapshot()
