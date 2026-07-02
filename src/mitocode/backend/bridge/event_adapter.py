@@ -1,6 +1,6 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
-from mitocode.backend.tool.tool_manager import ToolManager
+from ..tool.tool_manager import ToolManager
 
 
 class EventBridge:
@@ -13,10 +13,12 @@ class EventBridge:
     display metadata from a :class:`ToolManager`.
     """
 
-    def __init__(self, tool_manager: Optional[ToolManager] = None):
+    def __init__(self, tool_manager: ToolManager | None = None):
         self._tool_manager = tool_manager
 
-    def adapt(self, event: Dict[str, Any], agent_id: int) -> Optional[Dict[str, Any]]:
+    def adapt(
+        self, event: Dict[str, Any], agent_id: int
+    ) -> Dict[str, Any] | None:
         """Map one raw runtime event to a TUI-ready dict, or ``None`` to skip.
 
         Args:

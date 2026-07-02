@@ -1,8 +1,8 @@
 import asyncio
 from enum import Enum
-from typing import List, Optional
+from typing import List
 
-from mitocode.backend.agent.agent_session import AgentSession
+from .agent_session import AgentSession
 
 
 class AgentState(Enum):
@@ -27,13 +27,13 @@ class ManagedAgent:
         name: str,
         session: AgentSession,
         description: str = "",
-        parent_id: Optional[int] = None,
+        parent_id: int | None = None,
     ):
         self.id: int = agent_id
         self.name: str = name
         self.description: str = description
-        self.parent_id: Optional[int] = parent_id
+        self.parent_id: int | None = parent_id
         self.sub_agent_ids: List[int] = []
         self.session: AgentSession = session
         self.state: AgentState = AgentState.IDLE
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None

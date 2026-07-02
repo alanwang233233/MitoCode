@@ -1,11 +1,11 @@
 import asyncio
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List
 
-from mitocode.backend.agent.agent_runtime import AgentRuntime
-from mitocode.backend.agent.agent_session import AgentSession
-from mitocode.backend.agent.managed_agent import ManagedAgent, AgentState
-from mitocode.backend.bridge.event_adapter import EventBridge
-from mitocode.backend.tool.tool_manager import ToolManager
+from .agent_runtime import AgentRuntime
+from .agent_session import AgentSession
+from .managed_agent import ManagedAgent, AgentState
+from ..bridge.event_adapter import EventBridge
+from ..tool.tool_manager import ToolManager
 
 
 class AgentOrchestrator:
@@ -22,12 +22,14 @@ class AgentOrchestrator:
     """
 
     def __init__(
-        self, tool_manager: Optional[ToolManager] = None, default_provider=None
+        self,
+        tool_manager: ToolManager | None = None,
+        default_provider: Any = None,
     ):
         self._agents: Dict[int, ManagedAgent] = {}
         self._counter: int = 0
-        self._tool_manager = tool_manager
-        self._default_provider = default_provider
+        self._tool_manager: ToolManager | None = tool_manager
+        self._default_provider: Any = default_provider
         self._bridge = EventBridge(tool_manager)
         self.event_queue: asyncio.Queue = asyncio.Queue()
 
@@ -38,11 +40,28 @@ class AgentOrchestrator:
     def create_agent(
         self,
         name: str,
-        provider=None,
+        provider: Any = None,
         description: str = "",
-        parent_id: Optional[int] = None,
+        parent_id: int | None = None,
         **session_kwargs,
     ) -> int:
+        """Create and register a new agent.
+
+        Args:
+            name: Display name for the agent.
+            provider: Chat provider instance. Falls back to the orchestrator's
+                default_provider if not given.
+            description: Optional description shown in the tree.
+            parent_id: If set, the new agent becomes a child of this node.
+            **session_kwargs: Forwarded to :class:`AgentSession`.
+
+        Returns:
+            The numeric id of the newly created agent.
+
+        Raises:
+            ValueError: If no provider is available and parent_id references
+                a non-existent agent.
+        """
         agent_id = self._counter
         self._counter += 1
 
@@ -73,6 +92,13 @@ class AgentOrchestrator:
         return agent_id
 
     def destroy_agent(self, agent_id: int, _sync: bool = True) -> None:
+        """Remove an agent and all of its descendants.
+
+        Args:
+            agent_id: The agent to remove.
+            _sync: Internal flag.  Only the top-level call triggers a tree
+                sync event to the TUI.
+        """
         managed = self._agents.get(agent_id)
         if managed is None:
             return
@@ -92,6 +118,15 @@ class AgentOrchestrator:
             self._push_tree_sync()
 
     def cancel_agent(self, agent_id: int, cascade: bool = True) -> None:
+        """Request cancellation for an agent (and optionally its children).
+
+        Sets the session cancel event and, if an asyncio Task is associated,
+        cancels it for immediate interruption.
+
+        Args:
+            agent_id: The agent to cancel.
+            cascade: If True, recursively cancel all descendants first.
+        """
         managed = self._agents.get(agent_id)
         if managed is None:
             return
@@ -102,7 +137,21 @@ class AgentOrchestrator:
         if managed._task is not None:
             managed._task.cancel()
 
-    async def send_message(self, agent_id: int, message: str) -> Optional[asyncio.Task]:
+    async def send_message(
+        self, agent_id: int, message: str
+    ) -> asyncio.Task | None:
+        """Send a user message to an agent and start its run loop.
+
+        If the agent is already running the previous task is cancelled and
+        awaited before a new one is created, preventing concurrent execution.
+
+        Args:
+            agent_id: The target agent.
+            message: The user prompt to append.
+
+        Returns:
+            The newly created asyncio Task, or None if the agent does not exist.
+        """
         managed = self._agents.get(agent_id)
         if managed is None:
             return None
@@ -128,6 +177,7 @@ class AgentOrchestrator:
     # ------------------------------------------------------------------
 
     def get_tree_snapshot(self) -> List[dict]:
+        """Return the current agent tree as a list of dicts for TUI rendering."""
         return [
             {
                 "id": m.id,
