@@ -1,7 +1,6 @@
 import argparse
 
 from mitocode.backend.agent.orchestrator import AgentOrchestrator
-from mitocode.backend.chat_provider._sample_chat_provider import _SampleChatProvider
 from mitocode.backend.chat_provider.scenario_provider import ScenarioProvider
 from mitocode.backend.tool.tool_manager import ToolManager
 from mitocode.tui.ui_main import VibeFrontend
@@ -50,12 +49,6 @@ def _register_tools(tool_manager: ToolManager):
 def main():
     parser = argparse.ArgumentParser(description="MitoCode")
     parser.add_argument(
-        "--mock",
-        action="store_true",
-        default=False,
-        help="Use echo mock provider instead of scenario",
-    )
-    parser.add_argument(
         "--speed",
         type=float,
         default=0.03,
@@ -66,13 +59,7 @@ def main():
     tool_manager = ToolManager()
     _register_tools(tool_manager)
 
-    if args.mock:
-        provider = _SampleChatProvider(
-            default_model="mock-model",
-            settings={"mock_reply_prefix": "", "chunk_size": 4},
-        )
-    else:
-        provider = ScenarioProvider(delay=args.speed)
+    provider = ScenarioProvider(delay=args.speed)
 
     orchestrator = AgentOrchestrator(
         tool_manager=tool_manager, default_provider=provider
