@@ -16,9 +16,7 @@ class EventBridge:
     def __init__(self, tool_manager: ToolManager | None = None):
         self._tool_manager = tool_manager
 
-    def adapt(
-        self, event: Dict[str, Any], agent_id: int
-    ) -> Dict[str, Any] | None:
+    def adapt(self, event: Dict[str, Any], agent_id: int) -> Dict[str, Any] | None:
         """Map one raw runtime event to a TUI-ready dict, or ``None`` to skip.
 
         Args:

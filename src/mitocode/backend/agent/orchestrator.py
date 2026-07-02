@@ -144,9 +144,7 @@ class AgentOrchestrator:
         if managed._task is not None:
             managed._task.cancel()
 
-    async def send_message(
-        self, agent_id: int, message: str
-    ) -> asyncio.Task | None:
+    async def send_message(self, agent_id: int, message: str) -> asyncio.Task | None:
         """Send a user message to an agent and start its run loop.
 
         If the agent is already running the previous task is cancelled and
