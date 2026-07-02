@@ -72,8 +72,8 @@ class AgentOrchestrator:
             raise ValueError(
                 "provider is required — pass it directly or set default_provider on the orchestrator"
             )
-        provider = copy.deepcopy(provider)
         if hasattr(provider, "_turn"):
+            provider = copy.deepcopy(provider)
             provider._turn = 0
         if provider is self._default_provider:
             provider = copy.copy(provider)
