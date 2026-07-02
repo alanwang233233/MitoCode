@@ -26,7 +26,6 @@ class AgentOrchestrator:
         self, tool_manager: Optional[ToolManager] = None, default_provider=None
     ):
         self._agents: Dict[int, ManagedAgent] = {}
-        self._nodes: Dict[int, AgentNode] = {}
         self._counter: int = 0
         self._tool_manager = tool_manager
         self._default_provider = default_provider
@@ -70,14 +69,6 @@ class AgentOrchestrator:
             self._agents[parent_id].sub_agent_ids.append(agent_id)
 
         self._agents[agent_id] = managed
-        self._nodes[agent_id] = AgentNode(
-            id=agent_id,
-            name=name,
-            description=description,
-            parent_id=parent_id,
-        )
-        if parent_id is not None:
-            self._nodes[parent_id].sub_agent_ids.append(agent_id)
 
         self._push_tree_sync()
         return agent_id
@@ -93,16 +84,11 @@ class AgentOrchestrator:
             parent = self._agents[parent_id]
             if agent_id in parent.sub_agent_ids:
                 parent.sub_agent_ids.remove(agent_id)
-        if parent_id is not None and parent_id in self._nodes:
-            parent_node = self._nodes[parent_id]
-            if agent_id in parent_node.sub_agent_ids:
-                parent_node.sub_agent_ids.remove(agent_id)
 
         for sub_id in list(managed.sub_agent_ids):
             self.destroy_agent(sub_id, _sync=False)
 
         self._agents.pop(agent_id, None)
-        self._nodes.pop(agent_id, None)
         if _sync:
             self._push_tree_sync()
 
@@ -143,10 +129,7 @@ class AgentOrchestrator:
     # ------------------------------------------------------------------
 
     def get_tree_snapshot(self) -> List[dict]:
-        for agent_id, managed in self._agents.items():
-            if agent_id in self._nodes:
-                self._nodes[agent_id].state = managed.state.value
-        return [node.to_dict() for node in self._nodes.values()]
+        return [AgentNode.from_managed(m).to_dict() for m in self._agents.values()]
 
     def _push_tree_sync(self) -> None:
         snapshot = self.get_tree_snapshot()
