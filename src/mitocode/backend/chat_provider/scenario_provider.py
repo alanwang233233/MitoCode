@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 
@@ -8,30 +9,14 @@ def _make_chunk(
     tool_calls: Optional[List[Any]] = None,
     finish_reason: Optional[str] = None,
 ):
-    class _D:
-        pass
-
-    delta = _D()
-    delta.content = content
-    delta.tool_calls = tool_calls
-
-    choice = _D()
-    choice.delta = delta
-    choice.finish_reason = finish_reason
-
-    chunk = _D()
-    chunk.choices = [choice]
-    return chunk
+    delta = SimpleNamespace(content=content, tool_calls=tool_calls)
+    choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
+    return SimpleNamespace(choices=[choice])
 
 
 def _make_tool_call(index: int, call_id: str, name: Optional[str], arguments: str):
-    tc = type("_TC", (), {})()
-    tc.index = index
-    tc.id = call_id
-    tc.function = type("_F", (), {})()
-    tc.function.name = name or ""
-    tc.function.arguments = arguments
-    return tc
+    func = SimpleNamespace(name=name or "", arguments=arguments)
+    return SimpleNamespace(index=index, id=call_id, function=func)
 
 
 def _finish(reason: str):
