@@ -158,7 +158,12 @@ def test_event_bridge_tool_call_result():
         },
         agent_id=1,
     )
-    assert result == {"type": "tool_result", "agent_id": 1, "result": "done"}
+    assert result == {
+        "type": "tool_result",
+        "agent_id": 1,
+        "result": "done",
+        "success": True,
+    }
 
 
 def test_event_bridge_skips_internal():

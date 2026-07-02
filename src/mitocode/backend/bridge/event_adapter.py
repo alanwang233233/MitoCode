@@ -66,6 +66,7 @@ class EventBridge:
                 "type": "tool_result",
                 "agent_id": agent_id,
                 "result": result,
+                "success": event.get("success", False),
             }
 
         return None

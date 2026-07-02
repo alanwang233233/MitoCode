@@ -102,7 +102,8 @@ parts/
 #   pdm recommends including project-wide configuration in pdm.toml, but excluding .pdm-python.
 #pdm.toml
 # PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-pip-audit-output.txt__pycache__/
+pip-audit-output.txt
+__pycache__/
 pip-delete-this-directory.txt
 # pipenv
 #Pipfile.lock

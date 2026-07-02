@@ -411,10 +411,9 @@ class AgentView(VerticalScroll):
         if self._streaming_panel is not None and self._last_panel_type == "tool_call":
             self._streaming_panel.append_code(content)
 
-    async def finish_tool_call(self, result: str) -> None:
+    async def finish_tool_call(self, result: str, success: bool = True) -> None:
         if self._streaming_panel is not None and self._last_panel_type == "tool_call":
             panel = self._streaming_panel
-            success = "error" not in result.lower() and "fail" not in result.lower()
             if isinstance(panel, ToolCallPanelSyntax):
                 panel._finalize()
                 panel.finished_result = result
@@ -765,7 +764,8 @@ class VibeFrontend(App):
                 await agent_view.append_tool_content(event.get("content", ""))
         elif event_type == "tool_result":
             result = event.get("result", "")
-            await agent_view.finish_tool_call(result)
+            success = event.get("success", False)
+            await agent_view.finish_tool_call(result, success)
 
     # ------------------------------------------------------------------
     # Quick create & chat input
