@@ -75,8 +75,6 @@ class AgentOrchestrator:
         if hasattr(provider, "_turn"):
             provider = copy.deepcopy(provider)
             provider._turn = 0
-        if provider is self._default_provider:
-            provider = copy.copy(provider)
 
         session = AgentSession(
             provider=provider, tool_manager=self._tool_manager, **session_kwargs
