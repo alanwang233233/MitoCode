@@ -1,4 +1,4 @@
-from .agent import Agent
+from .legacy_agent import LegacyAgent
 from .agent_node import AgentNode
 from .agent_runtime import AgentRuntime
 from .agent_session import (
@@ -14,7 +14,7 @@ from .session_factory import SessionFactory
 from mitocode.backend.tool.tool_manager import ToolManager, ToolSpec, declare_tool
 
 __all__ = [
-    "Agent",
+    "LegacyAgent",
     "AgentNode",
     "AgentOrchestrator",
     "AgentRuntime",

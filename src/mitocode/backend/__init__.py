@@ -1,5 +1,5 @@
 from mitocode.backend.agent import (
-    Agent,
+    LegacyAgent,
     AgentNode,
     AgentOrchestrator,
     AgentRuntime,
@@ -14,7 +14,7 @@ from mitocode.backend.agent import (
 from mitocode.backend.bridge import EventBridge
 
 __all__ = [
-    "Agent",
+    "LegacyAgent",
     "AgentNode",
     "AgentOrchestrator",
     "AgentRuntime",

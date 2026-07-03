@@ -9,7 +9,6 @@ from .agent_session import (
 
 
 class AgentRuntime:
-
     @staticmethod
     async def run(session: AgentSession) -> AsyncGenerator[Dict[str, Any], None]:
         """

@@ -10,7 +10,7 @@ from .agent_runtime import AgentRuntime
 from .session_factory import SessionFactory
 
 
-class Agent:
+class LegacyAgent:
     """
     Backward-compatible wrapper that composes :class:`AgentSession` and
     :class:`AgentRuntime`.

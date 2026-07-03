@@ -4,6 +4,7 @@ from typing import List, Any, Dict, Callable
 
 from loguru import logger as loguru_logger
 from mitocode.backend.tool.tool_manager import ToolManager
+from mitocode.backend.chat_provider._sample_chat_provider import SampleChatProvider
 
 logger = loguru_logger.bind(name=__name__)
 
@@ -12,7 +13,7 @@ class _MessageBlock:
     """Base class for all message elements in the conversation history."""
 
     def __init__(self):
-        self.finished = False
+        self.finished : bool = False
 
 
 class _PlainTextMessageBlock(_MessageBlock):
@@ -20,10 +21,10 @@ class _PlainTextMessageBlock(_MessageBlock):
 
     def __init__(self, role: str, message: str = ""):
         super().__init__()
-        self.role = role
+        self.role : str = role
         self.message: str = message
         # Text blocks are considered valid for context building immediately
-        self.finished = True
+        self.finished : bool = True
 
     def append(self, delta: str):
         self.message += delta
@@ -84,10 +85,10 @@ class _ToolResultMessageBlock(_MessageBlock):
 
 class AgentSession:
     def __init__(self, **settings):
-        provider = settings.get("provider", None)
-        tool_manager = settings.get("tool_manager", None)
-        tools_map = tool_manager.tools_map()
-        tool_schemas = tool_manager.tools_map()
+        provider : SampleChatProvider = settings.get("provider", None)
+        tool_manager : ToolManager = settings.get("tool_manager", None)
+        tools_map : Dict[str, Callable] = tool_manager.tools_map()
+        tool_schemas : List[Dict[str, Any]] = tool_manager.tool_schemas("agent")
 
         if not provider:
             raise ValueError("Provider is required.")

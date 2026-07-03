@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mitocode.backend.agent.agent import Agent
+from mitocode.backend.agent.legacy_agent import LegacyAgent
 from mitocode.backend.agent.agent_session import (
     AgentSession,
     _PlainTextMessageBlock,
@@ -1182,13 +1182,13 @@ class TestAgentOnEndBackwardCompatibility:
         def on_end(obj, messages):
             received_first_arg.append(obj)
 
-        agent = Agent(provider=provider, on_end=on_end)
+        agent = LegacyAgent(provider=provider, on_end=on_end)
         async for _ in agent.run():
             pass
 
         assert len(received_first_arg) == 1
         # Must be the Agent wrapper, not the underlying AgentSession
-        assert isinstance(received_first_arg[0], Agent)
+        assert isinstance(received_first_arg[0], LegacyAgent)
         assert hasattr(received_first_arg[0], "run")
 
     @pytest.mark.asyncio
@@ -1201,7 +1201,7 @@ class TestAgentOnEndBackwardCompatibility:
         )
 
         original_on_end = mock.MagicMock()
-        agent = Agent(provider=provider, on_end=original_on_end)
+        agent = LegacyAgent(provider=provider, on_end=original_on_end)
         session = object.__getattribute__(agent, "_session")
 
         async for _ in agent.run():
@@ -1223,12 +1223,12 @@ class TestAgentOnEndBackwardCompatibility:
         async def async_on_end(obj, messages):
             received.append(obj)
 
-        agent = Agent(provider=provider, on_end=async_on_end)
+        agent = LegacyAgent(provider=provider, on_end=async_on_end)
         async for _ in agent.run():
             pass
 
         assert len(received) == 1
-        assert isinstance(received[0], Agent)
+        assert isinstance(received[0], LegacyAgent)
 
     @pytest.mark.asyncio
     async def test_direct_session_on_end_still_receives_session(self):
@@ -1252,4 +1252,4 @@ class TestAgentOnEndBackwardCompatibility:
 
         assert len(received) == 1
         assert isinstance(received[0], AgentSession)
-        assert not isinstance(received[0], Agent)
+        assert not isinstance(received[0], LegacyAgent)

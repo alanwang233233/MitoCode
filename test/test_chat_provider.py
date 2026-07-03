@@ -5,7 +5,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mitocode.backend.agent.agent import Agent
+from mitocode.backend.agent.legacy_agent import LegacyAgent
 from mitocode.backend.chat_provider._sample_chat_provider import SampleChatProvider
 from mitocode.backend.chat_provider.chat_provider_openai import ChatProviderOpenAI
 
@@ -15,7 +15,7 @@ async def test_mock_provider_works_with_single_agent_stream():
     provider = SampleChatProvider(
         settings={"chunk_size": 8, "mock_reply_prefix": "[mock]"}
     )
-    agent = Agent(provider=provider)
+    agent = LegacyAgent(provider=provider)
     agent.append_user_prompt("hello")
 
     events = []
