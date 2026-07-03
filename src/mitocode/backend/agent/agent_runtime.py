@@ -56,7 +56,7 @@ class AgentRuntime:
                 Format: {"event": "system.finished.standard", "reason": str}
         """
         while True:
-            if session._cancel_event.is_set():
+            if session.is_cancelled():
                 yield {"event": "system.cancelled"}
                 break
 
@@ -72,7 +72,7 @@ class AgentRuntime:
 
             async for chunk in stream:
                 # Check for cancellation during the stream loop
-                if session._cancel_event.is_set():
+                if session.is_cancelled():
                     yield {"event": "system.cancelled"}
                     break
 
@@ -148,7 +148,7 @@ class AgentRuntime:
                     stream_finished_reason = finish_reason
 
             # Break out entirely if we hit a cancel event while streaming
-            if session._cancel_event.is_set():
+            if session.is_cancelled():
                 break
 
             # 3. Handle End of Stream

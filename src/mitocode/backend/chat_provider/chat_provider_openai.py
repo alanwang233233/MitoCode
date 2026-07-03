@@ -1,11 +1,11 @@
 from typing import Any, Dict, List, Optional
 
-from ._sample_chat_provider import _SampleChatProvider
+from ._sample_chat_provider import Samplechatprovider
 
 from openai import AsyncOpenAI
 
 
-class ChatProviderOpenAI(_SampleChatProvider):
+class ChatProviderOpenAI(Samplechatprovider):
     """Provider subclass backed by OpenAI Chat Completions streaming API."""
 
     @staticmethod

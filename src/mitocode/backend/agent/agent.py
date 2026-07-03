@@ -16,7 +16,7 @@ class Agent:
     :class:`AgentRuntime`.
 
     All stateful attributes (``provider``, ``messages``, ``tools_map``,
-    ``tool_schemas``, ``tool_manager``, ``on_end``, ``_cancel_event``) are
+    ``tool_schemas``, ``tool_manager``, ``on_end``, and cancellation state are
     transparently forwarded to the underlying :class:`AgentSession` so that
     existing code continues to work without modification.
 

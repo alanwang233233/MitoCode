@@ -38,7 +38,7 @@ class _MockChunk:
         self.choices = [_MockChoice(delta=delta, finish_reason=finish_reason)]
 
 
-class _SampleChatProvider:
+class Samplechatprovider:
     """Default provider: offline mock server, overridable for real API backends."""
 
     def __init__(

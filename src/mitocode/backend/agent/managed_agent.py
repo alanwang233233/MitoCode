@@ -36,4 +36,4 @@ class ManagedAgent:
         self.sub_agent_ids: List[int] = []
         self.session: AgentSession = session
         self.state: AgentState = AgentState.IDLE
-        self._task: asyncio.Task | None = None
+        self.task: asyncio.Task | None = None

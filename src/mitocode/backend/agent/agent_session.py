@@ -145,6 +145,10 @@ class AgentSession:
         """Signals the session to halt its current run stream."""
         self._cancel_event.set()
 
+    def is_cancelled(self) -> bool:
+        """Return True if cancellation has been requested for this session."""
+        return self._cancel_event.is_set()
+
     def append_user_prompt(self, prompt: str):
         """Adds a user prompt to the context and clears any prior cancellation."""
         self._cancel_event.clear()  # Reset cancellation state before new run

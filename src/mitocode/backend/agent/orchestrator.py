@@ -7,7 +7,7 @@ from .agent_session import AgentSession
 from .agent_node import AgentNode
 from .managed_agent import ManagedAgent, AgentState
 from ..bridge.event_adapter import EventBridge
-from ..chat_provider._sample_chat_provider import _SampleChatProvider
+from ..chat_provider._sample_chat_provider import Samplechatprovider
 from ..chat_provider.scenario_provider import ScenarioProvider
 from ..tool.tool_manager import ToolManager
 
@@ -28,12 +28,12 @@ class AgentOrchestrator:
     def __init__(
         self,
         tool_manager: ToolManager | None = None,
-        default_provider: _SampleChatProvider | ScenarioProvider | None = None,
+        default_provider: Samplechatprovider | ScenarioProvider | None = None,
     ):
         self._agents: Dict[int, ManagedAgent] = {}
         self._counter: int = 0
         self._tool_manager: ToolManager | None = tool_manager
-        self._default_provider: _SampleChatProvider | ScenarioProvider | None = default_provider
+        self._default_provider: Samplechatprovider | ScenarioProvider | None = default_provider
         self._bridge = EventBridge(tool_manager)
         self.event_queue: asyncio.Queue = asyncio.Queue()
 
@@ -44,7 +44,7 @@ class AgentOrchestrator:
     def create_agent(
         self,
         name: str,
-        provider: _SampleChatProvider | ScenarioProvider | None = None,
+        provider: Samplechatprovider | ScenarioProvider | None = None,
         description: str = "",
         parent_id: int | None = None,
         **session_kwargs,
@@ -141,8 +141,8 @@ class AgentOrchestrator:
             for sub_id in managed.sub_agent_ids:
                 self.cancel_agent(sub_id, cascade=True)
         managed.session.cancel()
-        if managed._task is not None:
-            managed._task.cancel()
+        if managed.task is not None:
+            managed.task.cancel()
 
     async def send_message(self, agent_id: int, message: str) -> asyncio.Task | None:
         """Send a user message to an agent and start its run loop.
@@ -161,8 +161,8 @@ class AgentOrchestrator:
         if managed is None:
             return None
 
-        if managed.state == AgentState.RUNNING and managed._task is not None:
-            old_task = managed._task
+        if managed.state == AgentState.RUNNING and managed.task is not None:
+            old_task = managed.task
             old_task.cancel()
             try:
                 await old_task
@@ -174,7 +174,7 @@ class AgentOrchestrator:
         self._push_tree_sync()
 
         task = asyncio.create_task(self._run_agent(managed))
-        managed._task = task
+        managed.task = task
         return task
 
     # ------------------------------------------------------------------
@@ -203,7 +203,7 @@ class AgentOrchestrator:
                 if adapted is not None:
                     await self.event_queue.put((managed.id, adapted))
 
-            if managed.session._cancel_event.is_set():
+            if managed.session.is_cancelled():
                 managed.state = AgentState.CANCELLED
             else:
                 managed.state = AgentState.FINISHED
@@ -213,6 +213,6 @@ class AgentOrchestrator:
         except Exception:
             managed.state = AgentState.ERROR
         finally:
-            if managed._task is asyncio.current_task():
-                managed._task = None
+            if managed.task is asyncio.current_task():
+                managed.task = None
             self._push_tree_sync()
