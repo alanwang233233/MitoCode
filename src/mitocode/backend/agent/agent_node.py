@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
-    from .managed_agent import ManagedAgent
+    from .managed_agent import Agent
 
 
 @dataclass
@@ -21,7 +21,7 @@ class AgentNode:
     state: str = "idle"
 
     @classmethod
-    def from_managed(cls, managed: "ManagedAgent") -> "AgentNode":
+    def from_managed(cls, managed: "Agent") -> "AgentNode":
         return cls(
             id=managed.id,
             name=managed.name,

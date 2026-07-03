@@ -5,7 +5,7 @@ from typing import Dict, List
 from .agent_runtime import AgentRuntime
 from .agent_session import AgentSession
 from .agent_node import AgentNode
-from .managed_agent import ManagedAgent, AgentState
+from .managed_agent import Agent, AgentState
 from ..bridge.event_adapter import EventBridge
 from ..chat_provider._sample_chat_provider import SampleChatProvider
 from ..chat_provider.scenario_provider import ScenarioProvider
@@ -30,7 +30,7 @@ class AgentOrchestrator:
         tool_manager: ToolManager | None = None,
         default_provider: SampleChatProvider | ScenarioProvider | None = None,
     ):
-        self._agents: Dict[int, ManagedAgent] = {}
+        self._agents: Dict[int, Agent] = {}
         self._counter: int = 0
         self._tool_manager: ToolManager | None = tool_manager
         self._default_provider: SampleChatProvider | ScenarioProvider | None = (
@@ -83,7 +83,7 @@ class AgentOrchestrator:
         session = AgentSession(
             provider=provider, tool_manager=self._tool_manager, **session_kwargs
         )
-        managed = ManagedAgent(
+        managed = Agent(
             agent_id=agent_id,
             name=name,
             session=session,
@@ -198,7 +198,7 @@ class AgentOrchestrator:
     # Internal run loop
     # ------------------------------------------------------------------
 
-    async def _run_agent(self, managed: ManagedAgent) -> None:
+    async def _run_agent(self, managed: Agent) -> None:
         try:
             async for raw_event in AgentRuntime.run(managed.session):
                 adapted = self._bridge.adapt(raw_event, managed.id)

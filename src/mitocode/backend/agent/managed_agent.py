@@ -13,7 +13,7 @@ class AgentState(Enum):
     ERROR = "error"
 
 
-class ManagedAgent:
+class Agent:
     """Wraps an :class:`AgentSession` with lifecycle metadata.
 
     Each ``ManagedAgent`` is owned by :class:`AgentOrchestrator` and tracked

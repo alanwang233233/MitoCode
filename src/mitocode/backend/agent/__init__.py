@@ -8,7 +8,7 @@ from .agent_session import (
     _ToolCallMessageBlock,
     _ToolResultMessageBlock,
 )
-from .managed_agent import AgentState, ManagedAgent
+from .managed_agent import AgentState, Agent
 from .agent_orchestrator import AgentOrchestrator
 from .session_factory import SessionFactory
 from mitocode.backend.tool.tool_manager import ToolManager, ToolSpec, declare_tool
@@ -20,7 +20,7 @@ __all__ = [
     "AgentRuntime",
     "AgentSession",
     "AgentState",
-    "ManagedAgent",
+    "Agent",
     "SessionFactory",
     "ToolManager",
     "ToolSpec",
