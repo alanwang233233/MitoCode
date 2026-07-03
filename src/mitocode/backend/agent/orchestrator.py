@@ -33,7 +33,9 @@ class AgentOrchestrator:
         self._agents: Dict[int, ManagedAgent] = {}
         self._counter: int = 0
         self._tool_manager: ToolManager | None = tool_manager
-        self._default_provider: Samplechatprovider | ScenarioProvider | None = default_provider
+        self._default_provider: Samplechatprovider | ScenarioProvider | None = (
+            default_provider
+        )
         self._bridge = EventBridge(tool_manager)
         self.event_queue: asyncio.Queue = asyncio.Queue()
 
