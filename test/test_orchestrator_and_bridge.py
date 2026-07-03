@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mitocode.backend.agent.agent_runtime import AgentRuntime
 from mitocode.backend.agent.agent_session import AgentSession
-from mitocode.backend.agent.orchestrator import AgentOrchestrator
+from mitocode.backend.agent.agent_orchestrator import AgentOrchestrator
 from mitocode.backend.agent.managed_agent import AgentState
 from mitocode.backend.bridge.event_adapter import EventBridge
 from mitocode.backend.tool.tool_manager import ToolManager

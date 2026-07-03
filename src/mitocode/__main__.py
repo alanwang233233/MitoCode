@@ -1,6 +1,6 @@
 import argparse
 
-from mitocode.backend.agent.orchestrator import AgentOrchestrator
+from mitocode.backend.agent.agent_orchestrator import AgentOrchestrator
 from mitocode.backend.chat_provider.scenario_provider import ScenarioProvider
 from mitocode.backend.tool.tool_manager import ToolManager
 from mitocode.tui.ui_main import VibeFrontend

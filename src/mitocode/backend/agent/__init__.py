@@ -9,7 +9,7 @@ from .agent_session import (
     _ToolResultMessageBlock,
 )
 from .managed_agent import AgentState, ManagedAgent
-from .orchestrator import AgentOrchestrator
+from .agent_orchestrator import AgentOrchestrator
 from .session_factory import SessionFactory
 from mitocode.backend.tool.tool_manager import ToolManager, ToolSpec, declare_tool
 
