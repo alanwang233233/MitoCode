@@ -1,12 +1,14 @@
 import asyncio
 import copy
-from typing import Any, Dict, List
+from typing import Dict, List
 
 from .agent_runtime import AgentRuntime
 from .agent_session import AgentSession
 from .agent_node import AgentNode
 from .managed_agent import ManagedAgent, AgentState
 from ..bridge.event_adapter import EventBridge
+from ..chat_provider._sample_chat_provider import _SampleChatProvider
+from ..chat_provider.scenario_provider import ScenarioProvider
 from ..tool.tool_manager import ToolManager
 
 
@@ -26,12 +28,12 @@ class AgentOrchestrator:
     def __init__(
         self,
         tool_manager: ToolManager | None = None,
-        default_provider: Any = None,
+        default_provider: _SampleChatProvider | ScenarioProvider | None = None,
     ):
         self._agents: Dict[int, ManagedAgent] = {}
         self._counter: int = 0
         self._tool_manager: ToolManager | None = tool_manager
-        self._default_provider: Any = default_provider
+        self._default_provider: _SampleChatProvider | ScenarioProvider | None = default_provider
         self._bridge = EventBridge(tool_manager)
         self.event_queue: asyncio.Queue = asyncio.Queue()
 
@@ -42,7 +44,7 @@ class AgentOrchestrator:
     def create_agent(
         self,
         name: str,
-        provider: Any = None,
+        provider: _SampleChatProvider | ScenarioProvider | None = None,
         description: str = "",
         parent_id: int | None = None,
         **session_kwargs,
