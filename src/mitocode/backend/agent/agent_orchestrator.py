@@ -7,7 +7,7 @@ from .agent_session import AgentSession
 from .agent_node import AgentNode
 from .managed_agent import ManagedAgent, AgentState
 from ..bridge.event_adapter import EventBridge
-from ..chat_provider._sample_chat_provider import Samplechatprovider
+from ..chat_provider._sample_chat_provider import SampleChatProvider
 from ..chat_provider.scenario_provider import ScenarioProvider
 from ..tool.tool_manager import ToolManager
 
@@ -28,12 +28,12 @@ class AgentOrchestrator:
     def __init__(
         self,
         tool_manager: ToolManager | None = None,
-        default_provider: Samplechatprovider | ScenarioProvider | None = None,
+        default_provider: SampleChatProvider | ScenarioProvider | None = None,
     ):
         self._agents: Dict[int, ManagedAgent] = {}
         self._counter: int = 0
         self._tool_manager: ToolManager | None = tool_manager
-        self._default_provider: Samplechatprovider | ScenarioProvider | None = (
+        self._default_provider: SampleChatProvider | ScenarioProvider | None = (
             default_provider
         )
         self._bridge = EventBridge(tool_manager)
@@ -46,7 +46,7 @@ class AgentOrchestrator:
     def create_agent(
         self,
         name: str,
-        provider: Samplechatprovider | ScenarioProvider | None = None,
+        provider: SampleChatProvider | ScenarioProvider | None = None,
         description: str = "",
         parent_id: int | None = None,
         **session_kwargs,
