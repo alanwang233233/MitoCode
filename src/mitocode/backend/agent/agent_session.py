@@ -83,50 +83,22 @@ class _ToolResultMessageBlock(_MessageBlock):
 
 
 class AgentSession:
-    """
-    Strong-state container for a single agent conversation session.
-
-    Holds all mutable conversation state: the message history, the provider,
-    tool bindings, and the cancellation event.  One ``AgentSession`` object
-    represents one independent conversation thread.
-    """
-
     def __init__(self, **settings):
         provider = settings.get("provider", None)
-        tools_map = settings.get("tools_map", {})
-        tool_schemas = settings.get("tool_schemas", [])
         tool_manager = settings.get("tool_manager", None)
-        on_end = settings.get("on_end", None)
+        tools_map = tool_manager.tools_map()
+        tool_schemas = tool_manager.tools_map()
 
         if not provider:
             raise ValueError("Provider is required.")
         if tool_manager is not None and not isinstance(tool_manager, ToolManager):
             raise TypeError("tool_manager must be an instance of ToolManager.")
 
-        if tool_manager:
-            managed_map = tool_manager.tools_map()
-            managed_schemas = tool_manager.tool_schemas("agent")
-            tools_map = {**managed_map, **tools_map}
-
-            merged_schemas = {
-                s["function"]["name"]: s
-                for s in managed_schemas
-                if "function" in s and "name" in s["function"]
-            }
-            for schema in tool_schemas:
-                name = schema.get("function", {}).get("name")
-                if name:
-                    merged_schemas[name] = schema
-                else:
-                    merged_schemas[id(schema)] = schema
-            tool_schemas = list(merged_schemas.values())
-
         self.provider = provider
         self.messages: List[_MessageBlock] = []
         self.tools_map: Dict[str, Callable] = tools_map
         self.tool_schemas = tool_schemas
         self.tool_manager: ToolManager | None = tool_manager
-        self.on_end = on_end
 
         # Asyncio event to handle cancellation signals safely
         self._cancel_event = asyncio.Event()
