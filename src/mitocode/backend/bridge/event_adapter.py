@@ -41,7 +41,7 @@ class EventBridge:
             action = tool_name
             description = ""
             if self._tool_manager:
-                spec = self._tool_manager._tools.get(tool_name)
+                spec = self._tool_manager.get_spec(tool_name)
                 if spec:
                     action = spec.display_action or tool_name
                     description = spec.human_doc or tool_name

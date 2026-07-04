@@ -1,4 +1,5 @@
 # Re-export message block primitives so existing importers keep working.
+# pylint: disable=unused-import
 from .agent_session import (
     _MessageBlock,
     _PlainTextMessageBlock,

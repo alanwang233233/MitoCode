@@ -76,9 +76,9 @@ class AgentOrchestrator:
             raise ValueError(
                 "provider is required — pass it directly or set default_provider on the orchestrator"
             )
-        if hasattr(provider, "_turn"):
+        if hasattr(provider, "turn"):
             provider = copy.deepcopy(provider)
-            provider._turn = 0
+            provider.turn = 0
 
         session = AgentSession(
             provider=provider, tool_manager=self._tool_manager, **session_kwargs
@@ -212,7 +212,7 @@ class AgentOrchestrator:
         except asyncio.CancelledError:
             managed.state = AgentState.CANCELLED
             raise
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             managed.state = AgentState.ERROR
         finally:
             if managed.task is asyncio.current_task():

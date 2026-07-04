@@ -137,7 +137,7 @@ class ScenarioProvider:
     """
 
     def __init__(self, delay: float = 0.03):
-        self._turn = 0
+        self.turn = 0
         self._delay = delay
 
     @staticmethod
@@ -165,8 +165,8 @@ class ScenarioProvider:
         messages: Optional[List[Dict[str, Any]]] = None,
         **kwargs,
     ):
-        turn = self._turn
-        self._turn += 1
+        turn = self.turn
+        self.turn += 1
 
         chunks: List[Any] = []
 

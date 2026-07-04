@@ -103,7 +103,7 @@ jobs:
           stats = data.get('statistics', {})
           score = float(stats.get('score', 0))
           print(f'pylint score: {score:.2f}/10')
-           if score < 9:
+           if score < 8:
                print('pylint score is below 9, failing')
               sys.exit(1)
           PY

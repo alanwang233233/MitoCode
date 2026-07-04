@@ -212,6 +212,9 @@ class ToolManager:
     def tools_map(self) -> Dict[str, Callable]:
         return {name: spec.func for name, spec in self._tools.items()}
 
+    def get_spec(self, name: str) -> ToolSpec | None:
+        return self._tools.get(name)
+
     def tool_schemas(self, audience: str = "agent") -> List[Dict[str, Any]]:
         use_agent_doc = audience != "human"
         schemas = []

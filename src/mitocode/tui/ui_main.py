@@ -1,7 +1,7 @@
 import json
 import time
 from difflib import unified_diff
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from rich import box
 from rich.markdown import Markdown as RichMarkdown
@@ -51,7 +51,7 @@ class ToolCallPanelSyntax(Static):
         self.finished_line_number_range = None
         self._buffer = ""
         self._formatted = False
-        self._action = ""
+        self.action_key = ""
 
     def watch_code(self, old_code: str, new_code: str) -> None:
         self.refresh(layout=True)
@@ -66,7 +66,7 @@ class ToolCallPanelSyntax(Static):
             file_path = args.get("file_path", "")
             code = args.get("content", "")
             if file_path:
-                label = ACTION_LABELS.get(self._action, self._action)
+                label = ACTION_LABELS.get(self.action_key, self.action_key)
                 self.title = f"{label} → {file_path}"
             if code:
                 self.code = code
@@ -75,7 +75,7 @@ class ToolCallPanelSyntax(Static):
         except json.JSONDecodeError:
             pass
 
-    def _finalize(self):
+    def finalize(self):
         if not self._formatted:
             try:
                 args = json.loads(self._buffer)
@@ -85,7 +85,7 @@ class ToolCallPanelSyntax(Static):
             file_path = args.get("file_path", "")
             code = args.get("content", "")
             if file_path:
-                label = ACTION_LABELS.get(self._action, self._action)
+                label = ACTION_LABELS.get(self.action_key, self.action_key)
                 self.title = f"{label} → {file_path}"
             self.code = code if code else self._buffer
             self._formatted = True
@@ -209,7 +209,7 @@ class ToolCallPanel(Static):
         except json.JSONDecodeError:
             pass
 
-    def _finalize(self):
+    def finalize(self):
         if not self._formatted:
             try:
                 args = json.loads(self._buffer)
@@ -398,7 +398,7 @@ class AgentView(VerticalScroll):
                 else f"[{action}] {description}"
             )
             panel = ToolCallPanelSyntax(title=title, lang=lang)
-            panel._action = action
+            panel.action_key = action
         else:
             title = ACTION_LABELS.get(action, action)
             panel = ToolCallPanel(title=title)
@@ -415,12 +415,12 @@ class AgentView(VerticalScroll):
         if self._streaming_panel is not None and self._last_panel_type == "tool_call":
             panel = self._streaming_panel
             if isinstance(panel, ToolCallPanelSyntax):
-                panel._finalize()
+                panel.finalize()
                 panel.finished_result = result
                 panel.finished_success = success
                 panel.end()
             else:
-                panel._finalize()
+                panel.finalize()
                 panel.content = result
                 panel.end(success=success)
         self._streaming_panel = None
