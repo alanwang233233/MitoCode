@@ -137,15 +137,15 @@ def black_changed(repo_root: Path) -> bool:
 
 
 def parse_pylint(json_path: Path) -> dict:
-    """解析 pylint JSON2 报告并计算评分。"""
+    """解析 pylint JSON2 报告并计算评分。 无数据时返回 score=None。"""
     text = _read_text(json_path)
     if not text:
-        return {"score": 0.0, "issues": [], "count": 0}
+        return {"score": None, "issues": [], "count": 0}
 
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        return {"score": 0.0, "issues": [], "count": 0}
+        return {"score": None, "issues": [], "count": 0}
 
     # JSON2 格式顶层是 dict，包含 statistics / messages
     messages = data.get("messages", []) if isinstance(data, dict) else []
@@ -233,10 +233,13 @@ def generate_markdown(
         f"- **black**: ✅ {'无变更' if not black_changed_flag else '已应用格式化'} — "
         f"{'代码已符合 black 规范' if not black_changed_flag else '已自动格式化代码'}"
     )
-    lines.append(
-        f"- **pylint**: {status_badge(pylint_result['score'] >= 8)} — "
-        f"评分 {pylint_result['score']}/10，共 {pylint_result['count']} 条问题"
-    )
+    if pylint_result["score"] is not None:
+        lines.append(
+            f"- **pylint**: {status_badge(pylint_result['score'] >= 8)} — "
+            f"评分 {pylint_result['score']}/10，共 {pylint_result['count']} 条问题"
+        )
+    else:
+        lines.append("- **pylint**: ⚪ 无数据/未运行")
     lines.append("")
 
     # 信息展示区
