@@ -103,7 +103,7 @@ jobs:
           stats = data.get('statistics', {})
           score = float(stats.get('score', 0))
           print(f'pylint score: {score:.2f}/10')
-          if score < 8:
+           if score < 9:
               print('pylint score is below 8, failing')
               sys.exit(1)
           PY
@@ -111,9 +111,8 @@ jobs:
       # ===== 7. pyright =====
       - name: Run pyright
         id: pyright
-        continue-on-error: true
         run: |
-          pyright src | tee pyright-output.txt
+          pyright src
 
       # ===== 8. eff-u-code =====
       - name: Run eff-u-code
@@ -143,7 +142,8 @@ jobs:
           github.event_name == 'pull_request' &&
           steps.pytest.outcome == 'success' &&
           steps.gitleaks.outcome == 'success' &&
-          steps.pylint.outcome == 'success'
+          steps.pylint.outcome == 'success' &&
+          steps.pyright.outcome == 'success'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

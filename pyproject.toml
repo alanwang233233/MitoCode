@@ -40,3 +40,13 @@ omit = [
     "src/mitocode/__main__.py",
     "src/mitocode/backend/chat_provider/scenario_provider.py",
 ]
+
+[tool.pyright]
+typeCheckingMode = "standard"
+reportAttributeAccessIssue = true
+reportMissingImports = true
+reportOptionalMemberAccess = true
+reportOptionalCall = true
+reportOptionalContextManager = true
+reportGeneralTypeIssues = true
+reportArgumentType = true
