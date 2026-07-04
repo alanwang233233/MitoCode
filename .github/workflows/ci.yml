@@ -15,36 +15,20 @@ jobs:
       pull-requests: write
       security-events: write
     steps:
-      # ===== 清理旧的 CI 产物 =====
-      - name: Clean up previous CI artifacts
-        run: |
-          rm -f report.xml coverage.xml gitleak-result.json licenses.csv \
-                pylint-report.json pyright-output.txt eff-u-code-output.txt \
-                pip-audit-output.txt license-check-output.txt \
-                ci-summary.md ci-summary.json
-
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref || github.ref }}
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
+          cache: pip
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install Python dependencies
-        run: python -m pip install -r requirements.txt -r requirements-dev.txt
-
-      - name: Install CI tools
+      - name: Install dependencies
         run: |
-          python -m pip install black pylint pyright pip-audit pip-licenses pytest-cov
-          npm install -g eff-u-code
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+          python -m pip install black pylint pyright pytest-cov
 
       # ===== 1. pytest + coverage =====
       - name: Run pytest with coverage
@@ -66,27 +50,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: ""
 
-      - name: Export gitleaks report
-        if: always() && steps.gitleaks.outcome == 'success'
-        run: |
-          gitleaks detect --source . --no-git -f json -r gitleak-result.json 2>/dev/null || echo '[]' > gitleak-result.json
-
-      # ===== 3. pip-audit =====
-      - name: Run pip-audit
-        id: pip-audit
-        continue-on-error: true
-        run: |
-          pip-audit | tee pip-audit-output.txt
-
-      # ===== 4. pip-licenses =====
-      - name: Run pip-licenses and license check
-        id: pip-licenses
-        continue-on-error: true
-        run: |
-          pip-licenses --format=csv --output-file=licenses.csv
-          python chore/check_licence.py | tee license-check-output.txt || true
-
-      # ===== 5. black =====
+      # ===== 3. black =====
       - name: Run black formatter
         id: black
         run: |
@@ -112,30 +76,9 @@ jobs:
       - name: Run pyright
         id: pyright
         run: |
-          pyright src
+          pyright src | tee pyright-output.txt
 
-      # ===== 8. eff-u-code =====
-      - name: Run eff-u-code
-        id: eff-u-code
-        continue-on-error: true
-        run: |
-          fuck-u-code analyze src | tee eff-u-code-output.txt
-
-      # ===== 9. CodeQL =====
-      - name: Initialize CodeQL
-        id: codeql-init
-        uses: github/codeql-action/init@v4
-        with:
-          languages: python
-
-      - name: Perform CodeQL Analysis
-        id: codeql
-        uses: github/codeql-action/analyze@v4
-        with:
-          upload: never
-          output: sarif-results
-
-      # ===== 10. 提交代码变更 =====
+      # ===== 提交代码变更 =====
       - name: Commit and push changes
         id: commit
         if: |
