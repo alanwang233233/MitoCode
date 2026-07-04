@@ -205,6 +205,7 @@ def generate_markdown(
     pyright_result: dict,
     eff_u_code_result: dict,
     commit_status: str,
+    repo_root: Path,
 ) -> str:
     """生成 PR 评论 markdown。"""
 
@@ -240,17 +241,13 @@ def generate_markdown(
 
     # 信息展示区
     lines.append("### 信息展示")
-    lines.append(
-        f"- **pip-audit**: 发现 {pip_audit_result['vulnerability_count']} 个已知漏洞"
-    )
-    lines.append(
-        f"- **pip-licenses**: {'✅ 通过' if license_result['passed'] else '⚠️ 发现风险'} — "
-        f"{license_result['count']} 个风险许可证（不阻塞）"
-    )
-    lines.append(
-        f"- **pyright**: {pyright_result['errors']} 个 error，{pyright_result['warnings']} 个 warning"
-    )
-    lines.append(f"- **eff-u-code**: 详见下方输出")
+    if (repo_root / "pip-audit-output.txt").exists():
+        lines.append("- **pip-audit**: 发现 {} 个已知漏洞".format(pip_audit_result["vulnerability_count"]))
+    if (repo_root / "licenses.csv").exists():
+        lines.append("- **pip-licenses**: {} — {} 个风险许可证".format(
+            "✅ 通过" if license_result["passed"] else "⚠️ 发现风险", license_result["count"]
+        ))
+    lines.append("- **pyright**: {} 个 error, {} 个 warning".format(pyright_result["errors"], pyright_result["warnings"]))
     lines.append("")
 
     # 详细输出
@@ -270,24 +267,13 @@ def generate_markdown(
     lines.append("</details>")
     lines.append("")
 
-    lines.append("<details>")
-    lines.append("<summary>🛡️ pip-audit 输出</summary>")
-    lines.append("")
-    lines.append(f"```text\n{pip_audit_result['output'][:3000]}\n```")
-    lines.append("</details>")
-    lines.append("")
-
-    lines.append("<details>")
-    lines.append("<summary>📜 许可证检查输出</summary>")
-    lines.append("")
-    if license_result["risks"]:
-        lines.append("```text")
-        lines.extend(license_result["risks"])
-        lines.append("```")
-    else:
-        lines.append("未发现 GPL/LGPL/AGPL 风险许可证。")
-    lines.append("</details>")
-    lines.append("")
+    if (repo_root / "pip-audit-output.txt").exists():
+        lines.append("<details>")
+        lines.append("<summary>🛡️ pip-audit 输出</summary>")
+        lines.append("")
+        lines.append(f"```text\n{pip_audit_result['output'][:3000]}\n```")
+        lines.append("</details>")
+        lines.append("")
 
     lines.append("<details>")
     lines.append("<summary>📝 pyright 输出</summary>")
@@ -296,12 +282,13 @@ def generate_markdown(
     lines.append("</details>")
     lines.append("")
 
-    lines.append("<details>")
-    lines.append("<summary>🎨 eff-u-code 输出</summary>")
-    lines.append("")
-    lines.append(f"```text\n{eff_u_code_result['output'][:3000]}\n```")
-    lines.append("</details>")
-    lines.append("")
+    if (repo_root / "eff-u-code-output.txt").exists():
+        lines.append("<details>")
+        lines.append("<summary>🎨 eff-u-code 输出</summary>")
+        lines.append("")
+        lines.append(f"```text\n{eff_u_code_result['output'][:3000]}\n```")
+        lines.append("</details>")
+        lines.append("")
 
     lines.append(f"**自动提交状态**: {commit_status}")
     lines.append("")
@@ -348,6 +335,7 @@ def main() -> int:
         pyright_result,
         eff_u_code_result,
         commit_status,
+        repo_root,
     )
 
     if args.dry_run:

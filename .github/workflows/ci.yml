@@ -134,29 +134,7 @@ jobs:
           path: |
             report.xml
             coverage.xml
-            gitleak-result.json
-            licenses.csv
             pylint-report.json
-            pip-audit-output.txt
             pyright-output.txt
-            eff-u-code-output.txt
-            license-check-output.txt
             ci-summary.md
             ci-summary.json
-
-      - name: Upload CodeQL artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: codeql-results
-          path: |
-            sarif-results/
-
-      # ===== 清理 CI 产物 =====
-      - name: Clean up CI artifacts
-        if: always()
-        run: |
-          rm -f report.xml coverage.xml gitleak-result.json licenses.csv \
-                pylint-report.json pyright-output.txt eff-u-code-output.txt \
-                pip-audit-output.txt license-check-output.txt \
-                ci-summary.md ci-summary.json
