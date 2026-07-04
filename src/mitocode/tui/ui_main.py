@@ -92,7 +92,7 @@ class ToolCallPanelSyntax(Static):
 
     def render(self):
         if self.finished:
-            self._finalize()
+            self.finalize()
             if self.finished_show_diff:
                 old_code = self.finished_diff_origin.splitlines(keepends=True)
                 new_code = self.code.splitlines(keepends=True)
