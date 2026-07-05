@@ -3,6 +3,7 @@ import json
 from typing import List, Any, Dict, Callable
 
 from loguru import logger as loguru_logger
+
 from mitocode.backend.tool.tool_manager import ToolManager
 
 logger = loguru_logger.bind(name=__name__)
@@ -151,9 +152,9 @@ class AgentSession:
     def append_assistant_delta(self, delta: str):
         """Appends streaming text chunks to the latest assistant message."""
         if (
-            not self.messages
-            or not isinstance(self.messages[-1], _PlainTextMessageBlock)
-            or self.messages[-1].role != "assistant"
+                not self.messages
+                or not isinstance(self.messages[-1], _PlainTextMessageBlock)
+                or self.messages[-1].role != "assistant"
         ):
             self.messages.append(_PlainTextMessageBlock("assistant", delta))
         else:

@@ -1,14 +1,9 @@
 # Re-export message block primitives so existing importers keep working.
 # pylint: disable=unused-import
+from .agent_runtime import AgentRuntime
 from .agent_session import (
-    _MessageBlock,
-    _PlainTextMessageBlock,
-    _ToolCallMessageBlock,
-    _ToolResultMessageBlock,
     AgentSession,
 )
-from .agent_runtime import AgentRuntime
-from .session_factory import SessionFactory
 
 
 class LegacyAgent:

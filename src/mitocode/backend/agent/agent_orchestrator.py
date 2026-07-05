@@ -2,12 +2,12 @@ import asyncio
 import copy
 from typing import Dict, List
 
+from . import AgentNode
+from .agent import Agent, AgentState
 from .agent_runtime import AgentRuntime
 from .agent_session import AgentSession
-from .agent_node import AgentNode
-from .managed_agent import Agent, AgentState
 from ..bridge.event_adapter import EventBridge
-from ..chat_provider._sample_chat_provider import SampleChatProvider
+from ..chat_provider.sample_chat_provider import SampleChatProvider
 from ..chat_provider.scenario_provider import ScenarioProvider
 from ..tool.tool_manager import ToolManager
 
@@ -26,9 +26,9 @@ class AgentOrchestrator:
     """
 
     def __init__(
-        self,
-        tool_manager: ToolManager | None = None,
-        default_provider: SampleChatProvider | ScenarioProvider | None = None,
+            self,
+            tool_manager: ToolManager | None = None,
+            default_provider: SampleChatProvider | ScenarioProvider | None = None,
     ):
         self._agents: Dict[int, Agent] = {}
         self._counter: int = 0
@@ -44,12 +44,12 @@ class AgentOrchestrator:
     # ------------------------------------------------------------------
 
     def create_agent(
-        self,
-        name: str,
-        provider: SampleChatProvider | ScenarioProvider | None = None,
-        description: str = "",
-        parent_id: int | None = None,
-        **session_kwargs,
+            self,
+            name: str,
+            provider: SampleChatProvider | ScenarioProvider | None = None,
+            description: str = "",
+            parent_id: int | None = None,
+            **session_kwargs,
     ) -> int:
         """Create and register a new agent.
 
