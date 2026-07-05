@@ -104,7 +104,7 @@ class AgentRuntime:
                                 ]
 
                         if getattr(tool_call_chunk, "function", None) and getattr(
-                                tool_call_chunk.function, "name", None
+                            tool_call_chunk.function, "name", None
                         ):
                             tool_calls_dict[index][
                                 "name"
@@ -130,7 +130,7 @@ class AgentRuntime:
                                 ]
 
                         if getattr(tool_call_chunk, "function", None) and getattr(
-                                tool_call_chunk.function, "arguments", None
+                            tool_call_chunk.function, "arguments", None
                         ):
                             arg_delta = tool_call_chunk.function.arguments
                             if index in active_tool_blocks:

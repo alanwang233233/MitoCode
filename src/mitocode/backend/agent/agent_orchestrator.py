@@ -26,9 +26,9 @@ class AgentOrchestrator:
     """
 
     def __init__(
-            self,
-            tool_manager: ToolManager | None = None,
-            default_provider: SampleChatProvider | ScenarioProvider | None = None,
+        self,
+        tool_manager: ToolManager | None = None,
+        default_provider: SampleChatProvider | ScenarioProvider | None = None,
     ):
         self._agents: Dict[int, Agent] = {}
         self._counter: int = 0
@@ -44,12 +44,12 @@ class AgentOrchestrator:
     # ------------------------------------------------------------------
 
     def create_agent(
-            self,
-            name: str,
-            provider: SampleChatProvider | ScenarioProvider | None = None,
-            description: str = "",
-            parent_id: int | None = None,
-            **session_kwargs,
+        self,
+        name: str,
+        provider: SampleChatProvider | ScenarioProvider | None = None,
+        description: str = "",
+        parent_id: int | None = None,
+        **session_kwargs,
     ) -> int:
         """Create and register a new agent.
 

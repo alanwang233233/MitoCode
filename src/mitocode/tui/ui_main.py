@@ -378,7 +378,7 @@ class AgentView(VerticalScroll):
             self._scroll_if_was_at_bottom(was_at_bottom)
 
     async def start_tool_call(
-            self, action: str, description: str, additional: str
+        self, action: str, description: str, additional: str
     ) -> None:
         self._streaming_panel = None
 
@@ -498,8 +498,8 @@ class AgentTree(Tree):
             self.select_node(node)
             current_time = time.time()
             if (
-                    current_time - self._last_click_time < 0.4
-                    and node == self._last_click_node
+                current_time - self._last_click_time < 0.4
+                and node == self._last_click_node
             ):
                 node.toggle()
                 self._last_click_time = 0
@@ -890,8 +890,8 @@ class VibeFrontend(App):
         if self.chat_input is None:
             return
         if (
-                self.active_agent_id is not None
-                and self.active_agent_id in self.agent_treenodes
+            self.active_agent_id is not None
+            and self.active_agent_id in self.agent_treenodes
         ):
             node = self.agent_treenodes[self.active_agent_id]
             name = node.data.get("name", "") if node.data else ""

@@ -23,12 +23,12 @@ class Agent:
     """
 
     def __init__(
-            self,
-            agent_id: int,
-            name: str,
-            session: AgentSession,
-            description: str = "",
-            parent_id: int | None = None,
+        self,
+        agent_id: int,
+        name: str,
+        session: AgentSession,
+        description: str = "",
+        parent_id: int | None = None,
     ):
         self.id: int = agent_id
         self.name: str = name
