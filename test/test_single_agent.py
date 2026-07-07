@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mitocode.backend.agent.agent import Agent
+from mitocode.backend.agent.legacy_agent import LegacyAgent
 from mitocode.backend.agent.agent_session import (
     _PlainTextMessageBlock,
     _ToolResultMessageBlock,
@@ -142,7 +142,7 @@ class TestToolResultMessageBlock:
 class TestSingleAgentInit:
     def test_init_with_provider_only(self):
         provider = mock.MagicMock()
-        agent = Agent(provider=provider)
+        agent = LegacyAgent(provider=provider)
         assert agent.provider is provider
         assert agent.messages == []
         assert agent.tools_map == {}
@@ -155,7 +155,7 @@ class TestSingleAgentInit:
         tool_schemas = [{"name": "tool1"}]
         on_end = mock.MagicMock()
 
-        agent = Agent(
+        agent = LegacyAgent(
             provider=provider,
             tools_map=tools_map,
             tool_schemas=tool_schemas,
@@ -168,13 +168,13 @@ class TestSingleAgentInit:
 
     def test_init_without_provider_raises_error(self):
         with pytest.raises(ValueError, match="Provider is required"):
-            Agent()
+            LegacyAgent()
 
 
 class TestSingleAgentCancel:
     def test_cancel_sets_event(self):
         provider = mock.MagicMock()
-        agent = Agent(provider=provider)
+        agent = LegacyAgent(provider=provider)
         assert agent._cancel_event.is_set() is False
         agent.cancel()
         assert agent._cancel_event.is_set() is True
@@ -183,7 +183,7 @@ class TestSingleAgentCancel:
 class TestSingleAgentAppendUserPrompt:
     def test_append_user_prompt_adds_message_and_clears_cancel(self):
         provider = mock.MagicMock()
-        agent = Agent(provider=provider)
+        agent = LegacyAgent(provider=provider)
         agent.cancel()  # Set cancel event
         agent.append_user_prompt("hello")
         assert len(agent.messages) == 1
@@ -196,7 +196,7 @@ class TestSingleAgentAppendUserPrompt:
 class TestSingleAgentAppendAssistantDelta:
     def test_append_assistant_delta_creates_new_block_if_none(self):
         provider = mock.MagicMock()
-        agent = Agent(provider=provider)
+        agent = LegacyAgent(provider=provider)
         agent.append_assistant_delta("hello")
         assert len(agent.messages) == 1
         assert isinstance(agent.messages[0], _PlainTextMessageBlock)
@@ -205,7 +205,7 @@ class TestSingleAgentAppendAssistantDelta:
 
     def test_append_assistant_delta_appends_to_existing(self):
         provider = mock.MagicMock()
-        agent = Agent(provider=provider)
+        agent = LegacyAgent(provider=provider)
         agent.append_assistant_delta("hello")
         agent.append_assistant_delta(" world")
         assert len(agent.messages) == 1
@@ -213,7 +213,7 @@ class TestSingleAgentAppendAssistantDelta:
 
     def test_append_assistant_delta_creates_new_if_last_is_user(self):
         provider = mock.MagicMock()
-        agent = Agent(provider=provider)
+        agent = LegacyAgent(provider=provider)
         agent.append_user_prompt("user message")
         agent.append_assistant_delta("assistant message")
         assert len(agent.messages) == 2
@@ -225,13 +225,13 @@ class TestSingleAgentAppendAssistantDelta:
 class TestSingleAgentBuildStandardContext:
     def test_empty_messages(self):
         provider = mock.MagicMock()
-        agent = Agent(provider=provider)
+        agent = LegacyAgent(provider=provider)
         context = agent.build_standard_context()
         assert context == []
 
     def test_only_finished_blocks(self):
         provider = mock.MagicMock()
-        agent = Agent(provider=provider)
+        agent = LegacyAgent(provider=provider)
         agent.append_user_prompt("hello")
         agent.append_assistant_delta("world")
         context = agent.build_standard_context()
@@ -242,7 +242,7 @@ class TestSingleAgentBuildStandardContext:
 
     def test_skips_unfinished_blocks(self):
         provider = mock.MagicMock()
-        agent = Agent(provider=provider)
+        agent = LegacyAgent(provider=provider)
         agent.append_user_prompt("hello")
         # Add an unfinished tool call block
         tool_block = _ToolCallMessageBlock("tool", "id1")
@@ -253,7 +253,7 @@ class TestSingleAgentBuildStandardContext:
 
     def test_tool_calls_grouped_correctly(self):
         provider = mock.MagicMock()
-        agent = Agent(provider=provider)
+        agent = LegacyAgent(provider=provider)
         agent.append_user_prompt("hello")
 
         # Add a finished tool call
@@ -279,7 +279,7 @@ class TestSingleAgentBuildStandardContext:
 
     def test_trailing_tool_calls_at_end(self):
         provider = mock.MagicMock()
-        agent = Agent(provider=provider)
+        agent = LegacyAgent(provider=provider)
         agent.append_user_prompt("hello")
 
         # Add a finished tool call without result
@@ -317,7 +317,7 @@ class TestSingleAgentRun:
 
     @pytest.fixture
     def agent(self, provider):
-        return Agent(provider=provider)
+        return LegacyAgent(provider=provider)
 
     @pytest.mark.asyncio
     async def test_run_yields_cancelled_when_pre_cancelled(self, agent):

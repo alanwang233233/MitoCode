@@ -1,4 +1,6 @@
-from .agent import Agent
+from mitocode.backend.tool.tool_manager import ToolManager, ToolSpec, declare_tool
+from .agent import AgentState, Agent, AgentNode
+from .agent_orchestrator import AgentOrchestrator
 from .agent_runtime import AgentRuntime
 from .agent_session import (
     AgentSession,
@@ -7,13 +9,17 @@ from .agent_session import (
     _ToolCallMessageBlock,
     _ToolResultMessageBlock,
 )
+from .legacy_agent import LegacyAgent
 from .session_factory import SessionFactory
-from mitocode.backend.tool.tool_manager import ToolManager, ToolSpec, declare_tool
 
 __all__ = [
-    "Agent",
+    "LegacyAgent",
+    "AgentNode",
+    "AgentOrchestrator",
     "AgentRuntime",
     "AgentSession",
+    "AgentState",
+    "Agent",
     "SessionFactory",
     "ToolManager",
     "ToolSpec",

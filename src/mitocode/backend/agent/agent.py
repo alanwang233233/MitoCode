@@ -1,105 +1,77 @@
-# Re-export message block primitives so existing importers keep working.
-from .agent_session import (
-    _MessageBlock,
-    _PlainTextMessageBlock,
-    _ToolCallMessageBlock,
-    _ToolResultMessageBlock,
-    AgentSession,
-)
-from .agent_runtime import AgentRuntime
-from .session_factory import SessionFactory
+import asyncio
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import List
+
+from .agent_session import AgentSession
+
+
+class AgentState(Enum):
+    IDLE = "idle"
+    RUNNING = "running"
+    FINISHED = "finished"
+    CANCELLED = "cancelled"
+    ERROR = "error"
 
 
 class Agent:
-    """
-    Backward-compatible wrapper that composes :class:`AgentSession` and
-    :class:`AgentRuntime`.
+    """Wraps an :class:`AgentSession` with lifecycle metadata.
 
-    All stateful attributes (``provider``, ``messages``, ``tools_map``,
-    ``tool_schemas``, ``tool_manager``, ``on_end``, ``_cancel_event``) are
-    transparently forwarded to the underlying :class:`AgentSession` so that
-    existing code continues to work without modification.
-
-    The :meth:`run` async-generator delegates execution to the shared
-    :class:`AgentRuntime` singleton.
+    Each ``ManagedAgent`` is owned by :class:`AgentOrchestrator` and tracked
+    by a unique numeric id.  The orchestrator is responsible for mutating
+    ``state``, ``parent_id``, and ``sub_agent_ids``.
     """
 
-    # Attributes that belong to Agent itself and must NOT be forwarded to the
-    # session.
-    # _OWN_ATTRS = frozenset({"_session", "_runtime"})
-    _OWN_ATTRS = frozenset({"_session"})
+    def __init__(
+        self,
+        agent_id: int,
+        name: str,
+        session: AgentSession,
+        description: str = "",
+        parent_id: int | None = None,
+    ):
+        self.id: int = agent_id
+        self.name: str = name
+        self.description: str = description
+        self.parent_id: int | None = parent_id
+        self.sub_agent_ids: List[int] = []
+        self.session: AgentSession = session
+        self.state: AgentState = AgentState.IDLE
+        self.task: asyncio.Task | None = None
 
-    def __init__(self, **settings):
-        # Use object.__setattr__ to bypass our custom __setattr__.
-        object.__setattr__(self, "_session", AgentSession(**settings))
-        # object.__setattr__(self, "_runtime", AgentRuntime.get_instance())
 
-    # ------------------------------------------------------------------
-    # Transparent attribute forwarding to the session
-    # ------------------------------------------------------------------
+@dataclass
+class AgentNode:
+    """Pure data model for the agent tree, consumed by the TUI.
 
-    def __getattr__(self, name: str):
-        # __getattr__ is only called when normal lookup fails, so _session and
-        # _runtime are never routed through here.
-        return getattr(object.__getattribute__(self, "_session"), name)
+    New instances are created on demand from :class:`ManagedAgent` via
+    :meth:`from_managed` — never stored persistently.
+    """
 
-    def __setattr__(self, name: str, value):
-        if name in type(self)._OWN_ATTRS:
-            object.__setattr__(self, name, value)
-        else:
-            setattr(object.__getattribute__(self, "_session"), name, value)
+    id: int
+    name: str
+    description: str = ""
+    parent_id: int | None = None
+    sub_agent_ids: List[int] = field(default_factory=list)
+    state: str = "idle"
 
-    # ------------------------------------------------------------------
-    # Explicit delegation for the public API
-    # ------------------------------------------------------------------
+    @classmethod
+    def from_managed(cls, managed: "Agent") -> "AgentNode":
+        return cls(
+            id=managed.id,
+            name=managed.name,
+            description=managed.description,
+            parent_id=managed.parent_id,
+            sub_agent_ids=list(managed.sub_agent_ids),
+            state=managed.state.value,
+        )
 
-    def cancel(self):
-        """Signals the agent to halt its current run stream."""
-        object.__getattribute__(self, "_session").cancel()
-
-    def append_user_prompt(self, prompt: str):
-        """Adds a user prompt to the context and clears any prior cancellation."""
-        object.__getattribute__(self, "_session").append_user_prompt(prompt)
-
-    def append_assistant_delta(self, delta: str):
-        """Appends streaming text chunks to the latest assistant message."""
-        object.__getattribute__(self, "_session").append_assistant_delta(delta)
-
-    def build_standard_context(self):
-        """Compiles internal message blocks into a provider-compatible JSON list."""
-        return object.__getattribute__(self, "_session").build_standard_context()
-
-    async def run(self):
-        """
-        Main interaction loop: streams responses, handles tools, and yields events.
-
-        Delegates to :class:`AgentRuntime` while passing the underlying
-        :class:`AgentSession` as the state container.  Refer to
-        :meth:`AgentRuntime.run` for a full description of yielded events.
-
-        The ``on_end`` callback (if any) receives *this* ``Agent`` wrapper as its
-        first argument to preserve backward compatibility with callers that relied
-        on ``agent.run()`` being available from within the callback.
-        """
-        session = object.__getattribute__(self, "_session")
-        runtime = AgentRuntime
-
-        # Wrap on_end so callers receive the Agent wrapper (which exposes the
-        # full public API including run()) rather than the bare AgentSession.
-        original_on_end = session.on_end
-        if original_on_end is not None:
-            agent_self = self
-
-            def _wrap(orig):
-                def _agent_on_end(sess, messages):
-                    return orig(agent_self, messages)
-
-                return _agent_on_end
-
-            session.on_end = _wrap(original_on_end)
-
-        try:
-            async for event in runtime.run(session):
-                yield event
-        finally:
-            session.on_end = original_on_end
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "parent_id": self.parent_id,
+            "sub_agent": list(self.sub_agent_ids),
+            "state": self.state,
+        }

@@ -3,6 +3,7 @@ import json
 from typing import List, Any, Dict, Callable
 
 from loguru import logger as loguru_logger
+
 from mitocode.backend.tool.tool_manager import ToolManager
 
 logger = loguru_logger.bind(name=__name__)
@@ -12,7 +13,7 @@ class _MessageBlock:
     """Base class for all message elements in the conversation history."""
 
     def __init__(self):
-        self.finished = False
+        self.finished: bool = False
 
 
 class _PlainTextMessageBlock(_MessageBlock):
@@ -20,10 +21,10 @@ class _PlainTextMessageBlock(_MessageBlock):
 
     def __init__(self, role: str, message: str = ""):
         super().__init__()
-        self.role = role
+        self.role: str = role
         self.message: str = message
         # Text blocks are considered valid for context building immediately
-        self.finished = True
+        self.finished: bool = True
 
     def append(self, delta: str):
         self.message += delta
@@ -83,18 +84,10 @@ class _ToolResultMessageBlock(_MessageBlock):
 
 
 class AgentSession:
-    """
-    Strong-state container for a single agent conversation session.
-
-    Holds all mutable conversation state: the message history, the provider,
-    tool bindings, and the cancellation event.  One ``AgentSession`` object
-    represents one independent conversation thread.
-    """
-
     def __init__(self, **settings):
         provider = settings.get("provider", None)
-        tools_map = settings.get("tools_map", {})
-        tool_schemas = settings.get("tool_schemas", [])
+        user_tools_map = settings.get("tools_map", {})
+        user_tool_schemas = settings.get("tool_schemas", [])
         tool_manager = settings.get("tool_manager", None)
         on_end = settings.get("on_end", None)
 
@@ -106,20 +99,23 @@ class AgentSession:
         if tool_manager:
             managed_map = tool_manager.tools_map()
             managed_schemas = tool_manager.tool_schemas("agent")
-            tools_map = {**managed_map, **tools_map}
+            tools_map = {**managed_map, **user_tools_map}
 
-            merged_schemas = {
+            merged = {
                 s["function"]["name"]: s
                 for s in managed_schemas
                 if "function" in s and "name" in s["function"]
             }
-            for schema in tool_schemas:
+            for schema in user_tool_schemas:
                 name = schema.get("function", {}).get("name")
                 if name:
-                    merged_schemas[name] = schema
+                    merged[name] = schema
                 else:
-                    merged_schemas[id(schema)] = schema
-            tool_schemas = list(merged_schemas.values())
+                    merged[id(schema)] = schema
+            tool_schemas = list(merged.values())
+        else:
+            tools_map = user_tools_map
+            tool_schemas = user_tool_schemas
 
         self.provider = provider
         self.messages: List[_MessageBlock] = []
@@ -128,7 +124,6 @@ class AgentSession:
         self.tool_manager: ToolManager | None = tool_manager
         self.on_end = on_end
 
-        # Asyncio event to handle cancellation signals safely
         self._cancel_event = asyncio.Event()
 
     def get_tool_docs_for_human(self) -> Dict[str, str]:
@@ -144,6 +139,10 @@ class AgentSession:
     def cancel(self):
         """Signals the session to halt its current run stream."""
         self._cancel_event.set()
+
+    def is_cancelled(self) -> bool:
+        """Return True if cancellation has been requested for this session."""
+        return self._cancel_event.is_set()
 
     def append_user_prompt(self, prompt: str):
         """Adds a user prompt to the context and clears any prior cancellation."""

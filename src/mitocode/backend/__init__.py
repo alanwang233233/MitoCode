@@ -1,17 +1,27 @@
 from mitocode.backend.agent import (
-    Agent,
+    LegacyAgent,
+    AgentNode,
+    AgentOrchestrator,
     AgentRuntime,
     AgentSession,
+    AgentState,
+    Agent,
     SessionFactory,
     ToolManager,
     ToolSpec,
     declare_tool,
 )
+from mitocode.backend.bridge import EventBridge
 
 __all__ = [
-    "Agent",
+    "LegacyAgent",
+    "AgentNode",
+    "AgentOrchestrator",
     "AgentRuntime",
     "AgentSession",
+    "AgentState",
+    "EventBridge",
+    "Agent",
     "SessionFactory",
     "ToolManager",
     "ToolSpec",

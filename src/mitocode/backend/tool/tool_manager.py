@@ -147,6 +147,8 @@ class ToolSpec:
     human_doc: str
     agent_doc: str
     parameters_schema: Dict[str, Any]
+    display_action: str = ""
+    display_param: str = ""
 
 
 class ToolManager:
@@ -159,9 +161,18 @@ class ToolManager:
         *,
         human_doc: Optional[str] = None,
         agent_doc: Optional[str] = None,
+        display_action: Optional[str] = None,
+        display_param: Optional[str] = None,
     ):
         def _decorator(func: Callable):
-            self.register(func, name=name, human_doc=human_doc, agent_doc=agent_doc)
+            self.register(
+                func,
+                name=name,
+                human_doc=human_doc,
+                agent_doc=agent_doc,
+                display_action=display_action,
+                display_param=display_param,
+            )
             return func
 
         return _decorator
@@ -173,6 +184,8 @@ class ToolManager:
         name: Optional[str] = None,
         human_doc: Optional[str] = None,
         agent_doc: Optional[str] = None,
+        display_action: Optional[str] = None,
+        display_param: Optional[str] = None,
     ) -> ToolSpec:
         meta = getattr(func, "__mitocode_tool_meta__", {})
 
@@ -181,6 +194,8 @@ class ToolManager:
             human_doc or meta.get("human_doc") or inspect.getdoc(func) or ""
         )
         agent_description = agent_doc or meta.get("agent_doc") or human_description
+        display = display_action or meta.get("display_action") or ""
+        param = display_param or meta.get("display_param") or ""
 
         spec = ToolSpec(
             name=tool_name,
@@ -188,12 +203,17 @@ class ToolManager:
             human_doc=human_description,
             agent_doc=agent_description,
             parameters_schema=_build_parameters_schema(func),
+            display_action=display,
+            display_param=param,
         )
         self._tools[tool_name] = spec
         return spec
 
     def tools_map(self) -> Dict[str, Callable]:
         return {name: spec.func for name, spec in self._tools.items()}
+
+    def get_spec(self, name: str) -> ToolSpec | None:
+        return self._tools.get(name)
 
     def tool_schemas(self, audience: str = "agent") -> List[Dict[str, Any]]:
         use_agent_doc = audience != "human"
