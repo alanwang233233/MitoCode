@@ -246,3 +246,6 @@ class Workspace:
     def reload(self):
         # TODO
         return True
+
+    def is_outdated(self):
+        # TODO: check if the workspace object is outdated from the actual dictionary
