@@ -288,3 +288,192 @@ class TestValidateWithinWorkspace:
             link_target = existing_workspace.path / "agent" / "escape_link"
             if link_target.exists() or link_target.is_symlink():
                 link_target.unlink()
+
+
+# ──────────────────────────────────────────────
+# validate
+# ──────────────────────────────────────────────
+
+
+class TestValidate:
+    """Tests for the validate method."""
+
+    def test_valid_workspace_returns_true(self, existing_workspace):
+        """A properly initialized workspace should validate successfully."""
+        assert existing_workspace.validate() is True
+
+    def test_validate_fails_when_path_missing(self, existing_workspace):
+        """Validation should fail if the workspace path no longer exists."""
+        import shutil
+
+        try:
+            shutil.rmtree(existing_workspace.path)
+            with pytest.raises(MitoCodeWorkspaceInitError, match="does not exist"):
+                existing_workspace.validate()
+        finally:
+            # Restore the workspace for other tests
+            existing_workspace.path.mkdir(exist_ok=True)
+            existing_workspace.config_path.mkdir(exist_ok=True)
+            existing_workspace.dump()
+
+    def test_validate_fails_when_config_dir_missing(self, existing_workspace):
+        """Validation should fail if .mitocode directory is missing."""
+        import shutil
+
+        try:
+            shutil.rmtree(existing_workspace.config_path)
+            with pytest.raises(MitoCodeWorkspaceInitError, match="does not exist"):
+                existing_workspace.validate()
+        finally:
+            # Restore for other tests
+            existing_workspace.config_path.mkdir(exist_ok=True)
+            existing_workspace.dump()
+
+    def test_validate_fails_when_config_file_missing(self, existing_workspace):
+        """Validation should fail if config.json is missing."""
+        try:
+            existing_workspace.config_file.unlink()
+            with pytest.raises(MitoCodeWorkspaceInitError, match="does not exist"):
+                existing_workspace.validate()
+        finally:
+            # Restore for other tests
+            existing_workspace.dump()
+
+    def test_validate_fails_when_config_empty(self, existing_workspace):
+        """Validation should fail if config.json is empty or invalid."""
+        try:
+            existing_workspace.config_file.write_text("{}")
+            with pytest.raises(MitoCodeWorkspaceInitError, match="empty or invalid"):
+                existing_workspace.validate()
+        finally:
+            # Restore for other tests
+            existing_workspace.dump()
+
+    def test_validate_fails_when_name_missing(self, existing_workspace):
+        """Validation should fail if name field is missing."""
+        try:
+            import json
+
+            with open(existing_workspace.config_file, "w") as f:
+                json.dump({"version": 1}, f)
+            with pytest.raises(
+                MitoCodeWorkspaceInitError, match="missing required 'name'"
+            ):
+                existing_workspace.validate()
+        finally:
+            # Restore for other tests
+            existing_workspace.dump()
+
+    def test_validate_fails_when_version_missing(self, existing_workspace):
+        """Validation should fail if version field is missing."""
+        try:
+            import json
+
+            with open(existing_workspace.config_file, "w") as f:
+                json.dump({"name": "test"}, f)
+            with pytest.raises(
+                MitoCodeWorkspaceInitError, match="missing required 'version'"
+            ):
+                existing_workspace.validate()
+        finally:
+            # Restore for other tests
+            existing_workspace.dump()
+
+
+# ──────────────────────────────────────────────
+# reload
+# ──────────────────────────────────────────────
+
+
+class TestReload:
+    """Tests for the reload method."""
+
+    def test_reload_updates_config(self, existing_workspace):
+        """Reload should update in-memory config from disk."""
+        # First, modify the config on disk
+        with open(existing_workspace.config_file, "w") as f:
+            json.dump(
+                {
+                    "name": "reloaded-name",
+                    "description": "reloaded description",
+                    "version": 1,
+                },
+                f,
+            )
+        # Reload
+        assert existing_workspace.reload() is True
+        # Verify in-memory config was updated
+        assert existing_workspace.config["name"] == "reloaded-name"
+        assert existing_workspace.config["description"] == "reloaded description"
+
+    def test_reload_fails_when_config_file_missing(self, existing_workspace):
+        """Reload should fail if config.json is missing."""
+        try:
+            existing_workspace.config_file.unlink()
+            with pytest.raises(MitoCodeWorkspaceInitError, match="does not exist"):
+                existing_workspace.reload()
+        finally:
+            # Restore for other tests
+            existing_workspace.dump()
+
+    def test_reload_fails_when_config_invalid(self, existing_workspace):
+        """Reload should fail if config.json is invalid."""
+        try:
+            existing_workspace.config_file.write_text("not json")
+            with pytest.raises(MitoCodeWorkspaceInitError):
+                existing_workspace.reload()
+        finally:
+            # Restore for other tests
+            existing_workspace.dump()
+
+    def test_reload_fails_when_config_empty(self, existing_workspace):
+        """Reload should fail if config.json is empty."""
+        try:
+            existing_workspace.config_file.write_text("{}")
+            with pytest.raises(MitoCodeWorkspaceInitError, match="empty or invalid"):
+                existing_workspace.reload()
+        finally:
+            # Restore for other tests
+            existing_workspace.dump()
+
+
+# ──────────────────────────────────────────────
+# is_outdated
+# ──────────────────────────────────────────────
+
+
+class TestIsOutdated:
+    """Tests for the is_outdated method."""
+
+    def test_not_outdated_when_same(self, existing_workspace):
+        """Should return False when in-memory and disk configs match."""
+        assert existing_workspace.is_outdated() is False
+
+    def test_outdated_when_different(self, existing_workspace):
+        """Should return True when in-memory and disk configs differ."""
+        # Modify disk config
+        with open(existing_workspace.config_file, "w") as f:
+            json.dump(
+                {
+                    "name": "different-name",
+                    "description": "different description",
+                    "version": 1,
+                },
+                f,
+            )
+        assert existing_workspace.is_outdated() is True
+
+    def test_outdated_after_memory_change(self, existing_workspace):
+        """Should return True after changing in-memory config without dumping."""
+        existing_workspace.config["name"] = "changed-in-memory"
+        assert existing_workspace.is_outdated() is True
+
+    def test_is_outdated_fails_when_config_file_missing(self, existing_workspace):
+        """Should raise error if config.json is missing."""
+        try:
+            existing_workspace.config_file.unlink()
+            with pytest.raises(MitoCodeWorkspaceInitError, match="does not exist"):
+                existing_workspace.is_outdated()
+        finally:
+            # Restore for other tests
+            existing_workspace.dump()
