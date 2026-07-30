@@ -7,7 +7,7 @@
 ## 高优先级
 
 - [ ] 移除Herobrine
-- [ ] 完成Workspace.validate()，Workspace.reload()的具体实现
+- [x] 完成Workspace.validate()，Workspace.reload()的具体实现
 - [x] 重构Agent对外接口 (Agent → AgentSession/AgentRuntime/AgentOrchestrator 三层分离)
 - [ ] 添加上下文管理功能
 - [ ] 添加索引功能
