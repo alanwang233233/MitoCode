@@ -13,7 +13,7 @@ def _register_tools(tool_manager: ToolManager):
         agent_doc="Execute a bash command and return its output",
         display_action="bash",
     )
-    def bash(command: str) -> str:
+    async def bash(command: str) -> str:
         return f"$ {command}\n[bash] command executed successfully"
 
     @tool_manager.tool(
@@ -22,7 +22,7 @@ def _register_tools(tool_manager: ToolManager):
         display_action="file.read",
         display_param="file_path",
     )
-    def read_file(file_path: str) -> str:
+    async def read_file(file_path: str) -> str:
         return (
             "def bubble_sort(arr):\n"
             "    n = len(arr)\n"
@@ -43,7 +43,7 @@ def _register_tools(tool_manager: ToolManager):
         display_action="file.write",
         display_param="file_path",
     )
-    def write_file(file_path: str, content: str) -> str:
+    async def write_file(file_path: str, content: str) -> str:
         return f"Successfully wrote {len(content)} bytes to {file_path}"
 
 
