@@ -1,6 +1,7 @@
+import asyncio
 import json
 from pathlib import Path
-from typing import Union, Callable
+from typing import Union, Callable, Awaitable
 from mitocode import APP_VERSION, MITOCODE_CONFIG_PATH
 from mitocode.backend.exception.mitocode_exception import (
     MitoCodeWorkspaceInitError,
@@ -13,14 +14,43 @@ LATEST_VERSION = APP_VERSION
 
 
 class BasicMigration:
+    @staticmethod
+    def _has_running_loop() -> bool:
+        try:
+            asyncio.get_running_loop()
+            return True
+        except RuntimeError:
+            return False
+
+    @staticmethod
+    async def _read_json(path: Path) -> dict:
+        def _read() -> dict:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+
+        return await asyncio.to_thread(_read)
+
+    @staticmethod
+    async def _write_json(path: Path, content: dict) -> None:
+        def _write() -> None:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(content, f)
+
+        await asyncio.to_thread(_write)
+
     @classmethod
-    def migrate(cls, path: Union[Path, str]) -> bool:
+    def migrate(cls, path: Union[Path, str]) -> bool | Awaitable[bool]:
+        if cls._has_running_loop():
+            return cls._migrate_async(path)
+        return asyncio.run(cls._migrate_async(path))
+
+    @classmethod
+    async def _migrate_async(cls, path: Union[Path, str]) -> bool:
         try:
             # noinspection PyProtectedMember
             path: Path = Workspace._convert_to_path(path)
-            with open(path / MITOCODE_CONFIG_PATH / "config.json", "r") as f:
-                config: dict = json.load(f)
-                version: int = int(config["version"])
+            config: dict = await cls._read_json(path / MITOCODE_CONFIG_PATH / "config.json")
+            version: int = int(config["version"])
         except (
             OSError,
             json.JSONDecodeError,
@@ -44,7 +74,9 @@ class BasicMigration:
             next_version: int = current_version + 1
             migrate_func: Callable = cls._get_migrate_func(next_version)
             try:
-                migrate_func(path)
+                migrate_ret = migrate_func(path)
+                if asyncio.iscoroutine(migrate_ret):
+                    await migrate_ret
             except (
                 OSError,
                 json.JSONDecodeError,
@@ -57,15 +89,13 @@ class BasicMigration:
             current_version = next_version
         try:
             config_file_path = path / MITOCODE_CONFIG_PATH / "config.json"
-            if not config_file_path.exists():
+            if not await asyncio.to_thread(config_file_path.exists):
                 raise MitoCodeMigrateError(
                     "Configuration file 'config.json' was lost or deleted during migration."
                 )
-            with open(config_file_path, "r") as f:
-                config = json.load(f)
-            with open(config_file_path, "w") as f:
-                config["version"] = LATEST_VERSION
-                json.dump(config, f)
+            config = await cls._read_json(config_file_path)
+            config["version"] = LATEST_VERSION
+            await cls._write_json(config_file_path, config)
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as e:
             raise MitoCodeWorkspaceInitError(str(e)) from e
         # print("success")

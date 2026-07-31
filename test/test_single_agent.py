@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import unittest.mock as mock
 
 import pytest
@@ -421,6 +422,48 @@ class TestSingleAgentRun:
         # Should also have final finish event
         finish_events = [e for e in events if e["event"] == "system.finished.standard"]
         assert len(finish_events) == 1
+
+    @pytest.mark.asyncio
+    async def test_run_executes_sync_tool_off_event_loop_thread(self, agent, provider):
+        chunk1 = mock.MagicMock()
+        chunk1.choices = [mock.MagicMock()]
+        chunk1.choices[0].delta.content = None
+        chunk1.choices[0].delta.tool_calls = [mock.MagicMock()]
+        chunk1.choices[0].delta.tool_calls[0].index = 0
+        chunk1.choices[0].delta.tool_calls[0].id = "call_1"
+        chunk1.choices[0].delta.tool_calls[0].function.name = "thread_probe"
+        chunk1.choices[0].delta.tool_calls[0].function.arguments = "{}"
+        chunk1.choices[0].finish_reason = "tool_calls"
+
+        chunk2 = mock.MagicMock()
+        chunk2.choices = [mock.MagicMock()]
+        chunk2.choices[0].delta.content = "done"
+        chunk2.choices[0].finish_reason = "stop"
+
+        call_count = [0]
+
+        async def mock_chat(**kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return AsyncIterator([chunk1])
+            return AsyncIterator([chunk2])
+
+        provider.chat = mock_chat
+        main_thread_id = threading.get_ident()
+
+        def thread_probe():
+            return threading.get_ident()
+
+        agent.tools_map = {"thread_probe": thread_probe}
+
+        events = []
+        async for event in agent.run():
+            events.append(event)
+
+        result_events = [e for e in events if e["event"] == "agent.tool_call.result"]
+        assert len(result_events) == 1
+        tool_thread_id = int(result_events[0]["result"])
+        assert tool_thread_id != main_thread_id
 
     @pytest.mark.asyncio
     async def test_run_handles_tool_not_registered(self, agent, provider):
