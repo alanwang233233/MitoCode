@@ -126,7 +126,9 @@ class Workspace:
         return new_workspace
 
     @classmethod
-    def init_from_path(cls, path: Union[str, Path]) -> "Workspace | Awaitable[Workspace]":
+    def init_from_path(
+        cls, path: Union[str, Path]
+    ) -> "Workspace | Awaitable[Workspace]":
         if cls._has_running_loop():
             return cls._init_from_path_async(path)
         return asyncio.run(cls._init_from_path_async(path))
@@ -172,7 +174,9 @@ class Workspace:
                         f"got {version_raw}"
                     ) from e
                 if version > APP_VERSION:
-                    raise MitoCodeAppTooOldError("App need upgrade to open the workspace")
+                    raise MitoCodeAppTooOldError(
+                        "App need upgrade to open the workspace"
+                    )
                 if version < APP_VERSION:
                     raise MitoCodeWorkspaceTooOldError(
                         "Workspace need migrate to be opened"
@@ -213,7 +217,9 @@ class Workspace:
             MitoCodeWorkspaceDumpError: If there is an error writing the
                 configuration file or the required directories do not exist.
         """
-        if await self._path_is_dir(self.config_path) and await self._path_is_dir(self.path):
+        if await self._path_is_dir(self.config_path) and await self._path_is_dir(
+            self.path
+        ):
             try:
                 await self._write_json(self.config_path / "config.json", self.config)
                 return True
@@ -389,6 +395,7 @@ class Workspace:
             return self.config != disk_config
         except (OSError, json.JSONDecodeError) as e:
             raise MitoCodeWorkspaceInitError(str(e)) from e
+
     @staticmethod
     def _has_running_loop() -> bool:
         try:
@@ -410,7 +417,9 @@ class Workspace:
         return await asyncio.to_thread(path.is_file)
 
     @staticmethod
-    async def _mkdir(path: Path, *, parents: bool = False, exist_ok: bool = False) -> None:
+    async def _mkdir(
+        path: Path, *, parents: bool = False, exist_ok: bool = False
+    ) -> None:
         await asyncio.to_thread(path.mkdir, parents=parents, exist_ok=exist_ok)
 
     @staticmethod

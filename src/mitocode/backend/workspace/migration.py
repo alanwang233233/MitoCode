@@ -49,7 +49,9 @@ class BasicMigration:
         try:
             # noinspection PyProtectedMember
             path: Path = Workspace._convert_to_path(path)
-            config: dict = await cls._read_json(path / MITOCODE_CONFIG_PATH / "config.json")
+            config: dict = await cls._read_json(
+                path / MITOCODE_CONFIG_PATH / "config.json"
+            )
             version: int = int(config["version"])
         except (
             OSError,

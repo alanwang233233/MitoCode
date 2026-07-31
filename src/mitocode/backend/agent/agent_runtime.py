@@ -194,7 +194,9 @@ class AgentRuntime:
                     elif func_name in session.tools_map:
                         tool_func = session.tools_map[func_name]
                         try:
-                            result = await AgentRuntime._invoke_tool(tool_func, func_args)
+                            result = await AgentRuntime._invoke_tool(
+                                tool_func, func_args
+                            )
                             result_str = str(result)
                             success = True
                         except TypeError as e:
