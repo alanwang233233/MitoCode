@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 
 from mitocode.backend.agent.agent_orchestrator import AgentOrchestrator
 from mitocode.backend.chat_provider.scenario_provider import ScenarioProvider
@@ -64,9 +65,11 @@ def main():
     orchestrator = AgentOrchestrator(
         tool_manager=tool_manager, default_provider=provider
     )
-    orchestrator.create_agent(
-        name="Main",
-        description="Chief orchestrator",
+    asyncio.run(
+        orchestrator.create_agent(
+            name="Main",
+            description="Chief orchestrator",
+        )
     )
 
     app = VibeFrontend(orchestrator=orchestrator)

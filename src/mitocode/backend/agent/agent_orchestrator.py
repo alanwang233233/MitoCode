@@ -43,7 +43,7 @@ class AgentOrchestrator:
     # Agent lifecycle
     # ------------------------------------------------------------------
 
-    def create_agent(
+    async def create_agent(
         self,
         name: str,
         provider: SampleChatProvider | ScenarioProvider | None = None,
@@ -97,10 +97,10 @@ class AgentOrchestrator:
 
         self._agents[agent_id] = managed
 
-        self._push_tree_sync()
+        await self._push_tree_sync()
         return agent_id
 
-    def destroy_agent(self, agent_id: int, _sync: bool = True) -> None:
+    async def destroy_agent(self, agent_id: int, _sync: bool = True) -> None:
         """Remove an agent and all of its descendants.
 
         Args:
@@ -111,7 +111,7 @@ class AgentOrchestrator:
         managed = self._agents.get(agent_id)
         if managed is None:
             return
-        self.cancel_agent(agent_id, cascade=True)
+        await self.cancel_agent(agent_id, cascade=True)
 
         parent_id = managed.parent_id
         if parent_id is not None and parent_id in self._agents:
@@ -120,13 +120,13 @@ class AgentOrchestrator:
                 parent.sub_agent_ids.remove(agent_id)
 
         for sub_id in list(managed.sub_agent_ids):
-            self.destroy_agent(sub_id, _sync=False)
+            await self.destroy_agent(sub_id, _sync=False)
 
         self._agents.pop(agent_id, None)
         if _sync:
-            self._push_tree_sync()
+            await self._push_tree_sync()
 
-    def cancel_agent(self, agent_id: int, cascade: bool = True) -> None:
+    async def cancel_agent(self, agent_id: int, cascade: bool = True) -> None:
         """Request cancellation for an agent (and optionally its children).
 
         Sets the session cancel event and, if an asyncio Task is associated,
@@ -141,7 +141,7 @@ class AgentOrchestrator:
             return
         if cascade:
             for sub_id in managed.sub_agent_ids:
-                self.cancel_agent(sub_id, cascade=True)
+                await self.cancel_agent(sub_id, cascade=True)
         managed.session.cancel()
         if managed.task is not None:
             managed.task.cancel()
@@ -173,7 +173,7 @@ class AgentOrchestrator:
 
         managed.session.append_user_prompt(message)
         managed.state = AgentState.RUNNING
-        self._push_tree_sync()
+        await self._push_tree_sync()
 
         task = asyncio.create_task(self._run_agent(managed))
         managed.task = task
@@ -187,10 +187,10 @@ class AgentOrchestrator:
         """Return the current agent tree as a list of dicts for TUI rendering."""
         return [AgentNode.from_managed(m).to_dict() for m in self._agents.values()]
 
-    def _push_tree_sync(self) -> None:
+    async def _push_tree_sync(self) -> None:
         snapshot = self.get_tree_snapshot()
         try:
-            self.event_queue.put_nowait((-1, {"type": "sync", "agents": snapshot}))
+            await self.event_queue.put((-1, {"type": "sync", "agents": snapshot}))
         except asyncio.QueueFull:
             pass
 
@@ -217,4 +217,4 @@ class AgentOrchestrator:
         finally:
             if managed.task is asyncio.current_task():
                 managed.task = None
-            self._push_tree_sync()
+            await self._push_tree_sync()

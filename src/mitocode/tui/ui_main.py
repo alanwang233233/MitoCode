@@ -668,12 +668,12 @@ class VibeFrontend(App):
         self.print_log("Refreshing layout...")
         self.refresh(layout=True)
 
-    def action_cancel_agent(self) -> None:
+    async def action_cancel_agent(self) -> None:
         if self.chat_input and self.chat_input.has_focus and self.chat_input.value:
             self.chat_input.value = ""
             return
         if self.active_agent_id is not None:
-            self.orchestrator.cancel_agent(self.active_agent_id, cascade=True)
+            await self.orchestrator.cancel_agent(self.active_agent_id, cascade=True)
             self.print_log(f"Cancelled Agent {self.active_agent_id}")
 
     def action_focus_previous(self) -> None:
@@ -778,7 +778,7 @@ class VibeFrontend(App):
 
         if event.input == self.quick_create:
             parent_id = self.active_agent_id
-            self.orchestrator.create_agent(
+            await self.orchestrator.create_agent(
                 name=text,
                 provider=None,
                 description="",
