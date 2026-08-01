@@ -10,6 +10,26 @@ from .agent_session import (
 
 class AgentRuntime:
     @staticmethod
+    async def _invoke_tool(tool_func, func_args):
+        if asyncio.iscoroutinefunction(tool_func):
+            return await tool_func(**func_args)
+
+        result = await asyncio.to_thread(tool_func, **func_args)
+        if asyncio.iscoroutine(result):
+            return await result
+        return result
+
+    @staticmethod
+    async def _invoke_on_end(on_end, session, messages):
+        if asyncio.iscoroutinefunction(on_end):
+            await on_end(session, messages)
+            return
+
+        ret = await asyncio.to_thread(on_end, session, messages)
+        if ret and asyncio.iscoroutine(ret):
+            await ret
+
+    @staticmethod
     async def run(session: AgentSession) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Main interaction loop for *session*: streams responses, handles tool
@@ -174,11 +194,9 @@ class AgentRuntime:
                     elif func_name in session.tools_map:
                         tool_func = session.tools_map[func_name]
                         try:
-                            result_raw = tool_func(**func_args)
-                            if asyncio.iscoroutine(result_raw):
-                                result = await result_raw
-                            else:
-                                result = result_raw
+                            result = await AgentRuntime._invoke_tool(
+                                tool_func, func_args
+                            )
                             result_str = str(result)
                             success = True
                         except TypeError as e:
@@ -207,9 +225,9 @@ class AgentRuntime:
             # Standard Stops
             if stream_finished_reason in ["stop", "length", "content_filter"]:
                 if session.on_end:
-                    ret = session.on_end(session, session.messages)
-                    if ret and asyncio.iscoroutine(ret):
-                        await ret
+                    await AgentRuntime._invoke_on_end(
+                        session.on_end, session, session.messages
+                    )
 
                 yield {
                     "event": "system.finished.standard",

@@ -53,7 +53,7 @@ class EchoProvider:
 @pytest.mark.asyncio
 async def test_orchestrator_create_and_send_message():
     orchestrator = AgentOrchestrator(default_provider=EchoProvider())
-    agent_id = orchestrator.create_agent(name="TestAgent")
+    agent_id = await orchestrator.create_agent(name="TestAgent")
 
     snapshot = orchestrator.get_tree_snapshot()
     assert len(snapshot) == 1
@@ -90,10 +90,10 @@ async def test_orchestrator_create_and_send_message():
 @pytest.mark.asyncio
 async def test_orchestrator_cancel_agent():
     orchestrator = AgentOrchestrator(default_provider=EchoProvider())
-    agent_id = orchestrator.create_agent(name="CancelTest")
+    agent_id = await orchestrator.create_agent(name="CancelTest")
 
     await orchestrator.send_message(agent_id, "test")
-    orchestrator.cancel_agent(agent_id)
+    await orchestrator.cancel_agent(agent_id)
 
     agent = orchestrator._agents[agent_id]
     assert agent.session._cancel_event.is_set()
@@ -102,8 +102,8 @@ async def test_orchestrator_cancel_agent():
 @pytest.mark.asyncio
 async def test_orchestrator_parent_child_tree():
     orchestrator = AgentOrchestrator(default_provider=EchoProvider())
-    parent_id = orchestrator.create_agent(name="Parent")
-    child_id = orchestrator.create_agent(name="Child", parent_id=parent_id)
+    parent_id = await orchestrator.create_agent(name="Parent")
+    child_id = await orchestrator.create_agent(name="Child", parent_id=parent_id)
 
     snapshot = orchestrator.get_tree_snapshot()
     assert len(snapshot) == 2

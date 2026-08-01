@@ -1,11 +1,10 @@
-"""
-Workspace manager module for MitoCode.
-"""
+"""Workspace manager module for MitoCode."""
 
+import asyncio
 import json
 import shutil
 from pathlib import Path
-from typing import Union
+from typing import Union, Awaitable
 
 from mitocode import MITOCODE_CONFIG_PATH, APP_VERSION
 from mitocode.backend.exception.mitocode_exception import (
@@ -62,6 +61,30 @@ class Workspace:
         name: str,
         description: str = "",
         override=True,
+    ) -> "Workspace | Awaitable[Workspace]":
+        if cls._has_running_loop():
+            return cls._new_workspace_async(
+                workspace_path=workspace_path,
+                name=name,
+                description=description,
+                override=override,
+            )
+        return asyncio.run(
+            cls._new_workspace_async(
+                workspace_path=workspace_path,
+                name=name,
+                description=description,
+                override=override,
+            )
+        )
+
+    @classmethod
+    async def _new_workspace_async(
+        cls,
+        workspace_path: Union[str, Path],
+        name: str,
+        description: str = "",
+        override=True,
     ) -> "Workspace":
         """Create a new workspace at the specified path.
 
@@ -86,26 +109,32 @@ class Workspace:
             MitoCodeWorkspaceInitError: If the workspace path does not exist.
         """
         workspace_path_resolved: Path = cls._convert_to_path(workspace_path)
-        if not workspace_path_resolved.exists():
+        if not await cls._path_exists(workspace_path_resolved):
             raise MitoCodeWorkspaceInitError(
                 "Workspace path does not exist: " + str(workspace_path_resolved)
             )
 
-        if (workspace_path_resolved / MITOCODE_CONFIG_PATH).exists():
+        config_path = workspace_path_resolved / MITOCODE_CONFIG_PATH
+        if await cls._path_exists(config_path):
             if not override:
-                return cls.init_from_path(workspace_path_resolved)
-            # log
-            shutil.rmtree(workspace_path_resolved / MITOCODE_CONFIG_PATH)
+                return await cls._init_from_path_async(workspace_path_resolved)
+            await cls._rmtree(config_path)
 
-        (workspace_path_resolved / MITOCODE_CONFIG_PATH).mkdir(
-            parents=False, exist_ok=True
-        )
+        await cls._mkdir(config_path, parents=False, exist_ok=True)
         new_workspace = cls(workspace_path_resolved, name, APP_VERSION, description)
-        new_workspace.dump()
+        await new_workspace._dump_async()
         return new_workspace
 
     @classmethod
-    def init_from_path(cls, path: Union[str, Path]) -> "Workspace":
+    def init_from_path(
+        cls, path: Union[str, Path]
+    ) -> "Workspace | Awaitable[Workspace]":
+        if cls._has_running_loop():
+            return cls._init_from_path_async(path)
+        return asyncio.run(cls._init_from_path_async(path))
+
+    @classmethod
+    async def _init_from_path_async(cls, path: Union[str, Path]) -> "Workspace":
         """Initialize a Workspace instance from an existing workspace path.
 
         This class method loads an existing workspace configuration from the specified path.
@@ -125,48 +154,43 @@ class Workspace:
             path_resolved: Path = cls._convert_to_path(path)
             config_path: Path = path_resolved / MITOCODE_CONFIG_PATH
             if (
-                path_resolved.exists()
-                and (path_resolved / MITOCODE_CONFIG_PATH).exists()
-                and (config_path / "config.json").is_file()
+                await cls._path_exists(path_resolved)
+                and await cls._path_exists(path_resolved / MITOCODE_CONFIG_PATH)
+                and await cls._path_is_file(config_path / "config.json")
             ):
-                with open(
-                    path_resolved / MITOCODE_CONFIG_PATH / "config.json",
-                    "r",
-                    encoding="utf-8",
-                ) as f:
-                    config: dict = json.load(f)
-                    if not isinstance(config, dict) or not config:
-                        raise MitoCodeWorkspaceInitError("config is empty")
-                    version_raw = config.get("version")
-                    if version_raw is None:
-                        raise MitoCodeWorkspaceInitError(
-                            "Configuration file is invalid: 'version' field is missing"
-                        )
-                    try:
-                        version = int(version_raw)
-                    except (ValueError, TypeError) as e:
-                        raise MitoCodeWorkspaceInitError(
-                            f"Configuration file is invalid: 'version' must be an integer, "
-                            f"got {version_raw}"
-                        ) from e
-                    if version > APP_VERSION:
-                        raise MitoCodeAppTooOldError(
-                            "App need upgrade to open the workspace"
-                        )
-                    if version < APP_VERSION:
-                        raise MitoCodeWorkspaceTooOldError(
-                            "Workspace need migrate to be opened"
-                        )
-                    if not config.get("name"):
-                        raise MitoCodeWorkspaceInitError("config invalid")
-                    workspace = Workspace(
-                        path_resolved,
-                        config["name"],
-                        version,
-                        config.get("description", ""),
+                config: dict = await cls._read_json(config_path / "config.json")
+                if not isinstance(config, dict) or not config:
+                    raise MitoCodeWorkspaceInitError("config is empty")
+                version_raw = config.get("version")
+                if version_raw is None:
+                    raise MitoCodeWorkspaceInitError(
+                        "Configuration file is invalid: 'version' field is missing"
                     )
-                    workspace.config["version"] = config.get("version")
-                    return workspace
+                try:
+                    version = int(version_raw)
+                except (ValueError, TypeError) as e:
+                    raise MitoCodeWorkspaceInitError(
+                        f"Configuration file is invalid: 'version' must be an integer, "
+                        f"got {version_raw}"
+                    ) from e
+                if version > APP_VERSION:
+                    raise MitoCodeAppTooOldError(
+                        "App need upgrade to open the workspace"
+                    )
+                if version < APP_VERSION:
+                    raise MitoCodeWorkspaceTooOldError(
+                        "Workspace need migrate to be opened"
+                    )
+                if not config.get("name"):
+                    raise MitoCodeWorkspaceInitError("config invalid")
+                workspace = Workspace(
+                    path_resolved,
+                    config["name"],
+                    version,
+                    config.get("description", ""),
+                )
+                workspace.config["version"] = config.get("version")
+                return workspace
             else:
                 raise MitoCodeWorkspaceInitError(
                     "Workspace configuration not found at: " + str(path_resolved)
@@ -175,7 +199,12 @@ class Workspace:
         except (OSError, json.JSONDecodeError, KeyError) as e:
             raise MitoCodeWorkspaceInitError(str(e)) from e
 
-    def dump(self) -> bool:
+    def dump(self) -> bool | Awaitable[bool]:
+        if self._has_running_loop():
+            return self._dump_async()
+        return asyncio.run(self._dump_async())
+
+    async def _dump_async(self) -> bool:
         """Save the workspace configuration to disk.
 
         Writes the current configuration dictionary to the config.json file
@@ -188,10 +217,11 @@ class Workspace:
             MitoCodeWorkspaceDumpError: If there is an error writing the
                 configuration file or the required directories do not exist.
         """
-        if self.config_path.is_dir() and self.path.is_dir():
+        if await self._path_is_dir(self.config_path) and await self._path_is_dir(
+            self.path
+        ):
             try:
-                with open(self.config_path / "config.json", "w", encoding="utf-8") as f:
-                    json.dump(self.config, f)
+                await self._write_json(self.config_path / "config.json", self.config)
                 return True
             except (OSError, TypeError, ValueError) as e:
                 raise MitoCodeWorkspaceDumpError(str(e)) from e
@@ -243,7 +273,12 @@ class Workspace:
             )
         return full_path
 
-    def validate(self) -> bool:
+    def validate(self) -> bool | Awaitable[bool]:
+        if self._has_running_loop():
+            return self._validate_async()
+        return asyncio.run(self._validate_async())
+
+    async def _validate_async(self) -> bool:
         """Validate the workspace configuration.
 
         This method checks if the workspace is still valid by verifying:
@@ -259,20 +294,19 @@ class Workspace:
             MitoCodeWorkspaceInitError: If any validation step fails.
         """
         try:
-            if not self.path.exists():
+            if not await self._path_exists(self.path):
                 raise MitoCodeWorkspaceInitError(
                     f"Workspace path does not exist: {self.path}"
                 )
-            if not self.config_path.exists():
+            if not await self._path_exists(self.config_path):
                 raise MitoCodeWorkspaceInitError(
                     f"Configuration directory does not exist: {self.config_path}"
                 )
-            if not self.config_file.is_file():
+            if not await self._path_is_file(self.config_file):
                 raise MitoCodeWorkspaceInitError(
                     f"Configuration file does not exist: {self.config_file}"
                 )
-            with open(self.config_file, "r", encoding="utf-8") as f:
-                config = json.load(f)
+            config = await self._read_json(self.config_file)
             if not isinstance(config, dict) or not config:
                 raise MitoCodeWorkspaceInitError(
                     "Configuration file is empty or invalid"
@@ -289,7 +323,12 @@ class Workspace:
         except (OSError, json.JSONDecodeError) as e:
             raise MitoCodeWorkspaceInitError(str(e)) from e
 
-    def reload(self) -> bool:
+    def reload(self) -> bool | Awaitable[bool]:
+        if self._has_running_loop():
+            return self._reload_async()
+        return asyncio.run(self._reload_async())
+
+    async def _reload_async(self) -> bool:
         """Reload the workspace configuration from disk.
 
         This method re-reads the config.json file and updates the in-memory
@@ -303,12 +342,11 @@ class Workspace:
             MitoCodeWorkspaceInitError: If the configuration cannot be read or is invalid.
         """
         try:
-            if not self.config_file.is_file():
+            if not await self._path_is_file(self.config_file):
                 raise MitoCodeWorkspaceInitError(
                     f"Configuration file does not exist: {self.config_file}"
                 )
-            with open(self.config_file, "r", encoding="utf-8") as f:
-                config = json.load(f)
+            config = await self._read_json(self.config_file)
             if not isinstance(config, dict) or not config:
                 raise MitoCodeWorkspaceInitError(
                     "Configuration file is empty or invalid"
@@ -326,7 +364,12 @@ class Workspace:
         except (OSError, json.JSONDecodeError) as e:
             raise MitoCodeWorkspaceInitError(str(e)) from e
 
-    def is_outdated(self) -> bool:
+    def is_outdated(self) -> bool | Awaitable[bool]:
+        if self._has_running_loop():
+            return self._is_outdated_async()
+        return asyncio.run(self._is_outdated_async())
+
+    async def _is_outdated_async(self) -> bool:
         """Check if the in-memory configuration is outdated compared to disk.
 
         This method compares the current in-memory configuration with the
@@ -340,12 +383,11 @@ class Workspace:
             MitoCodeWorkspaceInitError: If the configuration cannot be read from disk.
         """
         try:
-            if not self.config_file.is_file():
+            if not await self._path_is_file(self.config_file):
                 raise MitoCodeWorkspaceInitError(
                     f"Configuration file does not exist: {self.config_file}"
                 )
-            with open(self.config_file, "r", encoding="utf-8") as f:
-                disk_config = json.load(f)
+            disk_config = await self._read_json(self.config_file)
             if not isinstance(disk_config, dict) or not disk_config:
                 raise MitoCodeWorkspaceInitError(
                     "Configuration file is empty or invalid"
@@ -353,3 +395,49 @@ class Workspace:
             return self.config != disk_config
         except (OSError, json.JSONDecodeError) as e:
             raise MitoCodeWorkspaceInitError(str(e)) from e
+
+    @staticmethod
+    def _has_running_loop() -> bool:
+        try:
+            asyncio.get_running_loop()
+            return True
+        except RuntimeError:
+            return False
+
+    @staticmethod
+    async def _path_exists(path: Path) -> bool:
+        return await asyncio.to_thread(path.exists)
+
+    @staticmethod
+    async def _path_is_dir(path: Path) -> bool:
+        return await asyncio.to_thread(path.is_dir)
+
+    @staticmethod
+    async def _path_is_file(path: Path) -> bool:
+        return await asyncio.to_thread(path.is_file)
+
+    @staticmethod
+    async def _mkdir(
+        path: Path, *, parents: bool = False, exist_ok: bool = False
+    ) -> None:
+        await asyncio.to_thread(path.mkdir, parents=parents, exist_ok=exist_ok)
+
+    @staticmethod
+    async def _rmtree(path: Path) -> None:
+        await asyncio.to_thread(shutil.rmtree, path)
+
+    @staticmethod
+    async def _read_json(path: Path) -> dict:
+        def _read() -> dict:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+
+        return await asyncio.to_thread(_read)
+
+    @staticmethod
+    async def _write_json(path: Path, content: dict) -> None:
+        def _write() -> None:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(content, f)
+
+        await asyncio.to_thread(_write)
