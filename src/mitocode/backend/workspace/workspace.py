@@ -245,7 +245,8 @@ class Workspace:
         if str_path:
             if isinstance(str_path, str):
                 return Path(str_path)
-            return str_path
+            if isinstance(str_path, Path):
+                return str_path
         raise MitoCodePathConvertError("Fail :" + str(str_path))
 
     def _validate_within_workspace(self, target: Path) -> Path:
