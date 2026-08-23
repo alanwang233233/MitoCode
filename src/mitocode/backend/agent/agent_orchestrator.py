@@ -245,7 +245,10 @@ class AgentOrchestrator:
     # ------------------------------------------------------------------
 
     async def _run_session(self, agent_id: int) -> None:
-        session = self._sessions[agent_id]
+        session = self._sessions.get(agent_id)
+        if session is None:
+            # The session was destroyed before this task got scheduled.
+            return
         try:
             async for raw_event in AgentRuntime.run(session):
                 adapted = self._bridge.adapt(raw_event, agent_id)
