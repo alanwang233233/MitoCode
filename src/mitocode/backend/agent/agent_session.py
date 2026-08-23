@@ -6,6 +6,8 @@ from loguru import logger as loguru_logger
 
 from mitocode.backend.tool.tool_manager import ToolManager
 
+from agent_state import AgentState
+
 logger = loguru_logger.bind(name=__name__)
 
 
@@ -90,6 +92,7 @@ class AgentSession:
         user_tool_schemas = settings.get("tool_schemas", [])
         tool_manager = settings.get("tool_manager", None)
         on_end = settings.get("on_end", None)
+        self.state: AgentState = AgentState.DEFAULT
 
         if not provider:
             raise ValueError("Provider is required.")
@@ -199,3 +202,6 @@ class AgentSession:
             )
 
         return context
+
+    def to_agent_node(self):
+
