@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from mitocode.backend.agent.agent_runtime import AgentRuntime
 from mitocode.backend.agent.agent_session import AgentSession
 from mitocode.backend.agent.agent_orchestrator import AgentOrchestrator
-from mitocode.backend.agent.agent import AgentState
+from mitocode.backend.agent.agent_state import AgentState
 from mitocode.backend.bridge.event_adapter import EventBridge
 from mitocode.backend.tool.tool_manager import ToolManager
 
@@ -95,8 +95,8 @@ async def test_orchestrator_cancel_agent():
     await orchestrator.send_message(agent_id, "test")
     await orchestrator.cancel_agent(agent_id)
 
-    agent = orchestrator._agents[agent_id]
-    assert agent.session._cancel_event.is_set()
+    session = orchestrator._sessions[agent_id]
+    assert session.is_cancelled()
 
 
 @pytest.mark.asyncio
@@ -111,6 +111,56 @@ async def test_orchestrator_parent_child_tree():
     parent = next(a for a in snapshot if a["id"] == parent_id)
     child = next(a for a in snapshot if a["id"] == child_id)
     assert child_id in parent["sub_agent"]
+
+
+@pytest.mark.asyncio
+async def test_create_session_registers_and_returns_session():
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+
+    session = await orchestrator.create_session(name="Worker", description="does work")
+
+    assert isinstance(session, AgentSession)
+    assert session.agent_id == 0
+    assert session.name == "Worker"
+    assert session.description == "does work"
+    assert session.parent_id is None
+    assert orchestrator.get_session(session.agent_id) is session
+
+    snapshot = orchestrator.get_tree_snapshot()
+    assert len(snapshot) == 1
+    assert snapshot[0]["id"] == session.agent_id
+    assert snapshot[0]["name"] == "Worker"
+    assert snapshot[0]["description"] == "does work"
+
+
+@pytest.mark.asyncio
+async def test_create_session_links_child_to_parent():
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    parent = await orchestrator.create_session(name="Parent")
+    child = await orchestrator.create_session(name="Child", parent_id=parent.agent_id)
+
+    assert child.parent_id == parent.agent_id
+    assert child.agent_id in parent.sub_agent_ids
+
+    snapshot = orchestrator.get_tree_snapshot()
+    parent_node = next(a for a in snapshot if a["id"] == parent.agent_id)
+    assert child.agent_id in parent_node["sub_agent"]
+
+
+@pytest.mark.asyncio
+async def test_create_session_without_provider_raises():
+    orchestrator = AgentOrchestrator()
+    with pytest.raises(ValueError):
+        await orchestrator.create_session()
+
+
+@pytest.mark.asyncio
+async def test_create_agent_alias_matches_create_session_id():
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    agent_id = await orchestrator.create_agent(name="Alias")
+    session = orchestrator.get_session(agent_id)
+    assert session is not None
+    assert session.name == "Alias"
 
 
 def test_event_bridge_token():

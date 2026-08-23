@@ -6,7 +6,8 @@ from loguru import logger as loguru_logger
 
 from mitocode.backend.tool.tool_manager import ToolManager
 
-from agent_state import AgentState
+from .agent_node import AgentNode
+from .agent_state import AgentState
 
 logger = loguru_logger.bind(name=__name__)
 
@@ -86,12 +87,35 @@ class _ToolResultMessageBlock(_MessageBlock):
 
 
 class AgentSession:
+    @staticmethod
+    def factory(**settings) -> "AgentSession":
+        """
+        Create and return a new :class:`AgentSession`.
+
+        Keyword arguments override the factory-level defaults set in
+        :meth:`__init__`.
+
+        Args:
+            **settings: Settings accepted by :class:`AgentSession`, e.g.
+                ``provider``, ``tools_map``, ``tool_schemas``,
+                ``tool_manager``, ``on_end``.
+
+        Returns:
+            AgentSession: A freshly constructed session instance.
+        """
+        return AgentSession(**settings)
+
     def __init__(self, **settings):
         provider = settings.get("provider", None)
         user_tools_map = settings.get("tools_map", {})
         user_tool_schemas = settings.get("tool_schemas", [])
         tool_manager = settings.get("tool_manager", None)
         on_end = settings.get("on_end", None)
+        self.agent_id: int = settings.get("agent_id", -1)
+        self.name: str = settings.get("name", "")
+        self.description: str = settings.get("description", "")
+        self.parent_id: int | None = settings.get("parent_id", None)
+        self.sub_agent_ids: List[int] = []
         self.state: AgentState = AgentState.DEFAULT
 
         if not provider:
@@ -203,5 +227,13 @@ class AgentSession:
 
         return context
 
-    def to_agent_node(self):
-
+    def to_agent_node(self) -> AgentNode:
+        """Builds a pure-data :class:`AgentNode` snapshot for TUI rendering."""
+        return AgentNode(
+            id=self.agent_id,
+            name=self.name,
+            description=self.description,
+            parent_id=self.parent_id,
+            sub_agent_ids=list(self.sub_agent_ids),
+            state=self.state.value,
+        )
