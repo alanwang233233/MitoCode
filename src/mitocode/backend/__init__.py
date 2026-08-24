@@ -1,3 +1,5 @@
+"""Backend layer for MitoCode"""
+
 from mitocode.backend.agent import (
     LegacyAgent,
     AgentNode,

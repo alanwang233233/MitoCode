@@ -1,3 +1,9 @@
+"""Agent subsystem for MitoCode.
+
+Provides session/state containers, the streaming runtime, the orchestrator,
+and the session factory used to build agent sessions.
+"""
+
 from mitocode.backend.tool.tool_manager import ToolManager, ToolSpec, declare_tool
 from .agent_node import AgentNode
 from .agent_orchestrator import AgentOrchestrator
