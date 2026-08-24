@@ -47,6 +47,21 @@ class SampleChatProvider:
         default_messages: Optional[List[Dict[str, Any]]] = None,
         settings: Optional[Dict[str, Any]] = None,
     ):
+        """Initialise the mock chat provider.
+
+        Args:
+            default_model: Model identifier to use when no model is
+                specified in :meth:`chat`.  Must be present in the
+                list returned by :meth:`get_model_list`.
+            default_messages: System-level messages prepended to every
+                conversation.  Defaults to a single system message.
+            settings: Provider-specific configuration dict.  Schema is
+                described by :meth:`get_settings_schema`.
+
+        Raises:
+            ValueError: If *default_model* is not in the model list
+                or if *settings* fails validation.
+        """
         if default_messages is None:
             default_messages = [
                 {"role": "system", "content": "You are a helpful assistant."}
@@ -67,13 +82,16 @@ class SampleChatProvider:
 
     @staticmethod
     def get_model_list() -> List[str]:
+        """Return the model identifiers accepted by this provider."""
         return ["mock-model"]
 
     def init(self) -> None:
+        """Hook invoked after settings validation; subclasses set up clients here."""
         return None
 
     @classmethod
     def get_settings_schema(cls) -> Dict[str, Any]:
+        """Return the JSON Schema describing accepted settings."""
         return {
             "type": "object",
             "properties": {
@@ -85,6 +103,7 @@ class SampleChatProvider:
 
     @staticmethod
     def check_settings_schema(settings) -> bool:
+        """Validate that *settings* is a dict; any keys are allowed."""
         return isinstance(settings, dict)
 
     @staticmethod
@@ -93,6 +112,20 @@ class SampleChatProvider:
         messages: Optional[List[Dict[str, Any]]],
         user_messages: str,
     ) -> List[Dict[str, Any]]:
+        """Merge default, additional, and user messages into a single list.
+
+        The resulting list preserves ordering: default messages first,
+        then any additional *messages*, and finally the user's text
+        appended as a ``"user"`` role entry.
+
+        Args:
+            default_messages: Base conversation (typically system messages).
+            messages: Optional extra messages to append after defaults.
+            user_messages: The user's latest text input.
+
+        Returns:
+            A new list of message dicts ready to send to the LLM.
+        """
         current_messages: List[Dict[str, Any]] = list(default_messages)
         if messages:
             current_messages.extend(messages)
@@ -107,6 +140,26 @@ class SampleChatProvider:
         on_token,
         on_stop,
     ):
+        """Iterate over *stream* chunks and fire callbacks.
+
+        For each chunk that contains a text delta, *on_token* is called.
+        When the stream finishes (or errors), *on_stop* is called with
+        the final finish reason.
+
+        Args:
+            stream: An async iterable of chunk objects (e.g. OpenAI
+                streaming response chunks).
+            current_messages: The full message history; passed through
+                to callbacks for context.
+            on_token: Callable ``(content: str, messages: List[Dict]) -> None``
+                invoked for every text delta.
+            on_stop: Callable ``(finish_reason: str, messages: List[Dict]) -> None``
+                invoked when the stream ends or on error.
+
+        Yields:
+            Each chunk from the underlying *stream*, allowing callers
+            to consume the raw data as well.
+        """
         finish_reason = "unknown"
         try:
             async for chunk in stream:
@@ -135,6 +188,14 @@ class SampleChatProvider:
         on_tool_call=lambda _, __: None,
         on_stop=lambda _, __: None,
     ):
+        """Stream a mock reply that echoes the latest user message.
+
+        Merges ``default_messages`` with *messages* and *user_messages*,
+        then yields ``_MockChunk`` instances shaped like OpenAI stream
+        chunks: text split into fixed-size deltas followed by a final
+        chunk with finish reason ``stop``. Tool arguments are accepted for
+        interface compatibility but ignored.
+        """
         # TODO: Add tool call mock
         del tools, tool_call, on_tool_call
 
