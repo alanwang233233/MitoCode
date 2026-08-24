@@ -1,5 +1,4 @@
-"""WIP
-"""
+"""WIP"""
 
 import argparse
 import asyncio
