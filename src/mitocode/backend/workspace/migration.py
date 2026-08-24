@@ -1,3 +1,5 @@
+"""Workspace configuration version migration support."""
+
 import asyncio
 import json
 from pathlib import Path
@@ -14,6 +16,13 @@ LATEST_VERSION = APP_VERSION
 
 
 class BasicMigration:
+    """Step-by-step migrator that upgrades workspace configs to ``LATEST_VERSION``.
+
+    Migration steps are resolved dynamically as methods named
+    ``_migrate_from_<from>_to_<to>``; each step advances exactly one version
+    until the configuration reaches the latest supported version.
+    """
+
     @staticmethod
     def _has_running_loop() -> bool:
         try:
@@ -40,6 +49,24 @@ class BasicMigration:
 
     @classmethod
     def migrate(cls, path: Union[Path, str]) -> bool | Awaitable[bool]:
+        """Upgrade the workspace at *path* to ``LATEST_VERSION``.
+
+        Sync-or-async wrapper around :meth:`_migrate_async`: returns the
+        coroutine when called inside a running event loop, otherwise runs it
+        to completion.
+
+        Args:
+            path: Root path of the workspace to migrate.
+
+        Returns:
+            True when no migration was needed or all steps succeeded; an
+            awaitable resolving to that value when a loop is already running.
+
+        Raises:
+            MitoCodeWorkspaceInitError: If the configuration cannot be loaded.
+            MitoCodeMigrateError: If the config is newer than supported or a
+                migration step fails.
+        """
         if cls._has_running_loop():
             return cls._migrate_async(path)
         return asyncio.run(cls._migrate_async(path))

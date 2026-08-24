@@ -1,47 +1,60 @@
+"""Custom exception hierarchy for MitoCode.
+
+All application errors derive from :class:`MitoCodeBaseError`, organized
+into workspace-related and tool-related branches.
+"""
+
 import builtins
 
 
 class MitoCodeBaseError(builtins.Exception):
+    """Base class for all MitoCode-specific errors."""
+
     def __init__(self, message="Unknown Error") -> None:
+        """Initialise the error with an optional human-readable message.
+
+        Args:
+            message: Description of the error (default ``"Unknown Error"``).
+        """
         self.message = message
         super().__init__(self.message)
 
 
 class MitoCodePathConvertError(MitoCodeBaseError):
-    pass
+    """Raised when a path argument cannot be converted to a ``Path``."""
 
 
 class MitoCodeWorkspaceError(MitoCodeBaseError):
-    pass
+    """Base class for workspace-related errors."""
 
 
 class MitoCodeWorkspaceInitError(MitoCodeWorkspaceError):
-    pass
+    """Raised when a workspace cannot be loaded or initialized."""
 
 
 class MitoCodeWorkspaceCreateError(MitoCodeWorkspaceError):
-    pass
+    """Raised when creating a new workspace fails."""
 
 
 class MitoCodeWorkspaceDumpError(MitoCodeWorkspaceError):
-    pass
+    """Raised when persisting the workspace configuration fails."""
 
 
 class MitoCodeWorkspaceTooOldError(MitoCodeWorkspaceError):
-    pass
+    """Raised when the workspace version is older than supported and must be migrated."""
 
 
 class MitoCodeAppTooOldError(MitoCodeBaseError):
-    pass
+    """Raised when the workspace is newer than this app; an upgrade is required."""
 
 
 class MitoCodeMigrateError(MitoCodeWorkspaceError):
-    pass
+    """Raised when a workspace configuration migration step fails."""
 
 
 class MitoCodeToolError(MitoCodeBaseError):
-    pass
+    """Base class for tool-related errors."""
 
 
 class MitoCodeToolDefinitionError(MitoCodeToolError):
-    pass
+    """Raised when a tool definition or its type annotations are invalid."""

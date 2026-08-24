@@ -1,3 +1,5 @@
+"""Adapter translating agent runtime events into TUI-ready dicts."""
+
 from typing import Any, Dict
 
 from ..tool.tool_manager import ToolManager
@@ -14,6 +16,12 @@ class EventBridge:
     """
 
     def __init__(self, tool_manager: ToolManager | None = None):
+        """Initialise the bridge, optionally enriched with tool metadata.
+
+        Args:
+            tool_manager: If provided, tool-call headers are enriched with
+                display action and description from registered tool specs.
+        """
         self._tool_manager = tool_manager
 
     def adapt(self, event: Dict[str, Any], agent_id: int) -> Dict[str, Any] | None:
