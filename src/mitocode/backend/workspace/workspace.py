@@ -43,7 +43,7 @@ class Workspace:
             workspace_path: The root path of the workspace, either as a string or Path object.
             name: The name of the workspace.
             description: Optional description of the workspace. Defaults to empty string.
-            version: Optional version of the workspace configuration. Defaults to "0.0.1".
+            version: Required version of the workspace configuration as an integer.
         """
         self.path: Path = self._convert_to_path(workspace_path)
         self.config_path: Path = self.path / MITOCODE_CONFIG_PATH
@@ -62,6 +62,12 @@ class Workspace:
         description: str = "",
         override=True,
     ) -> "Workspace | Awaitable[Workspace]":
+        """Create a new workspace at the given path.
+
+        Sync-or-async wrapper around :meth:`_new_workspace_async`: returns the
+        coroutine when called inside a running event loop, otherwise runs it
+        to completion. See :meth:`_new_workspace_async` for details.
+        """
         if cls._has_running_loop():
             return cls._new_workspace_async(
                 workspace_path=workspace_path,
@@ -129,6 +135,12 @@ class Workspace:
     def init_from_path(
         cls, path: Union[str, Path]
     ) -> "Workspace | Awaitable[Workspace]":
+        """Load an existing workspace from the given path.
+
+        Sync-or-async wrapper around :meth:`_init_from_path_async`: returns
+        the coroutine when called inside a running event loop, otherwise runs
+        it to completion. See :meth:`_init_from_path_async` for details.
+        """
         if cls._has_running_loop():
             return cls._init_from_path_async(path)
         return asyncio.run(cls._init_from_path_async(path))
@@ -200,6 +212,12 @@ class Workspace:
             raise MitoCodeWorkspaceInitError(str(e)) from e
 
     def dump(self) -> bool | Awaitable[bool]:
+        """Save the workspace configuration to disk.
+
+        Sync-or-async wrapper around :meth:`_dump_async`: returns the
+        coroutine when called inside a running event loop, otherwise runs it
+        to completion. See :meth:`_dump_async` for details.
+        """
         if self._has_running_loop():
             return self._dump_async()
         return asyncio.run(self._dump_async())
@@ -274,6 +292,12 @@ class Workspace:
         return full_path
 
     def validate(self) -> bool | Awaitable[bool]:
+        """Validate the workspace configuration on disk.
+
+        Sync-or-async wrapper around :meth:`_validate_async`: returns the
+        coroutine when called inside a running event loop, otherwise runs it
+        to completion. See :meth:`_validate_async` for details.
+        """
         if self._has_running_loop():
             return self._validate_async()
         return asyncio.run(self._validate_async())
@@ -324,6 +348,12 @@ class Workspace:
             raise MitoCodeWorkspaceInitError(str(e)) from e
 
     def reload(self) -> bool | Awaitable[bool]:
+        """Reload the workspace configuration from disk.
+
+        Sync-or-async wrapper around :meth:`_reload_async`: returns the
+        coroutine when called inside a running event loop, otherwise runs it
+        to completion. See :meth:`_reload_async` for details.
+        """
         if self._has_running_loop():
             return self._reload_async()
         return asyncio.run(self._reload_async())
@@ -365,6 +395,12 @@ class Workspace:
             raise MitoCodeWorkspaceInitError(str(e)) from e
 
     def is_outdated(self) -> bool | Awaitable[bool]:
+        """Check whether the in-memory config differs from disk.
+
+        Sync-or-async wrapper around :meth:`_is_outdated_async`: returns the
+        coroutine when called inside a running event loop, otherwise runs it
+        to completion. See :meth:`_is_outdated_async` for details.
+        """
         if self._has_running_loop():
             return self._is_outdated_async()
         return asyncio.run(self._is_outdated_async())
