@@ -1,3 +1,5 @@
+"""Core streaming loop that drives a single agent session."""
+
 import asyncio
 import inspect
 from typing import AsyncGenerator, Dict, Any
@@ -10,6 +12,12 @@ from .agent_session import (
 
 
 class AgentRuntime:
+    """Stateless executor that streams LLM responses and runs tool calls.
+
+    All methods are static; mutable state lives entirely in the
+    :class:`AgentSession` passed to :meth:`run`.
+    """
+
     @staticmethod
     async def _invoke_tool(tool_func, func_args):
         if inspect.iscoroutinefunction(tool_func):

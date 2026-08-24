@@ -1,3 +1,5 @@
+"""Factory for constructing configured agent sessions."""
+
 from .agent_session import AgentSession
 
 

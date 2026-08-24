@@ -1,3 +1,5 @@
+"""Pure-data node model used to render the agent tree in the TUI."""
+
 from dataclasses import dataclass, field
 from typing import List
 
@@ -18,6 +20,7 @@ class AgentNode:
     state: str = "idle"
 
     def to_dict(self) -> dict:
+        """Serialize this node to the dict shape consumed by the TUI tree."""
         return {
             "id": self.id,
             "name": self.name,

@@ -1,3 +1,5 @@
+"""Central coordinator that owns agent sessions, tasks, and event routing."""
+
 import asyncio
 import copy
 from typing import Dict, List
