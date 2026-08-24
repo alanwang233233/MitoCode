@@ -1,3 +1,6 @@
+"""WIP
+"""
+
 import argparse
 import asyncio
 
@@ -8,6 +11,8 @@ from mitocode.tui.ui_main import VibeFrontend
 
 
 def _register_tools(tool_manager: ToolManager):
+    """Register built-in demo tools (bash, read_file, write_file) on the manager."""
+
     @tool_manager.tool(
         human_doc="Run a shell command",
         agent_doc="Execute a bash command and return its output",
@@ -48,6 +53,7 @@ def _register_tools(tool_manager: ToolManager):
 
 
 def main():
+    """Parse CLI arguments and launch the MitoCode TUI application."""
     parser = argparse.ArgumentParser(description="MitoCode")
     parser.add_argument(
         "--speed",
