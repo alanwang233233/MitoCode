@@ -5,6 +5,15 @@ on:
     branches: ["main"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      pr_number:
+        required: false
+        type: string
+        description: "PR number to report results to (set when triggered via run-ci)"
+      head_ref:
+        required: false
+        type: string
+        description: "Branch to check out (set when triggered via run-ci)"
 
 jobs:
   ci:
@@ -18,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref || github.ref }}
+          ref: ${{ inputs.head_ref || github.head_ref || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -88,7 +97,7 @@ jobs:
       - name: Commit and push changes
         id: commit
         if: |
-          github.event_name == 'pull_request' &&
+          (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.pr_number != '')) &&
           steps.pytest.outcome == 'success' &&
           steps.pylint.outcome == 'success' &&
           steps.pyright.outcome == 'success'
@@ -101,7 +110,7 @@ jobs:
             echo "committed=false" >> "$GITHUB_OUTPUT"
           else
             git commit -m "ci: auto-format code"
-            git push origin HEAD:${{ github.head_ref }}
+            git push origin HEAD:${{ inputs.head_ref || github.head_ref }}
             echo "committed=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -117,18 +126,22 @@ jobs:
 
       # ===== 发布 PR 评论 =====
       - name: Publish PR comment
-        if: always() && github.event_name == 'pull_request'
+        if: >-
+          always() &&
+          (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.pr_number != ''))
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             const body = fs.readFileSync('ci-summary.md', 'utf8');
             github.rest.issues.createComment({
-              issue_number: context.issue.number,
+              issue_number: Number(process.env.PR_NUMBER || context.issue.number),
               owner: context.repo.owner,
               repo: context.repo.repo,
               body: body
             });
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
 
       # ===== 上传 CI 产物 =====
       - name: Upload CI artifacts
