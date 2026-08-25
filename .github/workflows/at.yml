@@ -68,10 +68,7 @@ jobs:
             await github.rest.actions.createWorkflowDispatch({
               owner, repo,
               workflow_id: 'ci.yml',
-              ref: 'main',
-              inputs: {
-                trigger_secret: process.env.TRIGGER_SECRET
-              }
+              ref: 'main'
             });
             await github.rest.issues.createComment({
               owner, repo,
