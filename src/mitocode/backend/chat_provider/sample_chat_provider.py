@@ -1,18 +1,27 @@
-"""
-用于对接AI平台API的接口，其他类需实现这个接口
+"""Abstract base class for chat providers.
+
+This module defines the interface that all chat provider implementations must follow.
+Subclasses implement provider-specific logic for connecting to LLM APIs.
 """
 from abc import abstractmethod, ABC
-from typing import List, Dict
+from typing import List, Dict, Optional, Callable, Any
+
+from mitocode.backend.exception.mitocode_exception import (
+    MitoCodeChatProviderConfigError,
+    MitoCodeChatProviderModelError,
+)
 
 
-class _SampleChatProvider(ABC) :
+class _SampleChatProvider(ABC):
     @classmethod
-    def factory(cls, *args, **kwargs) -> "_SampleChatProvider" :
-        return cls(*args, **kwargs)
+    async def factory(cls, *args, **kwargs) -> "_SampleChatProvider":
+        ins = cls(*args, **kwargs)
+        await ins.init()
+        return ins
 
     def __init__(
         self,
-        default_model : str = "",
+        default_model: str = "",
         default_messages=None,
         settings=None
     ):
@@ -25,43 +34,41 @@ class _SampleChatProvider(ABC) :
                     "content": "You are a helpful assistant."
                 }
             ]
-        if default_model == "" : raise Exception
-        if not self.check_settings_schema(settings) : raise Exception
+        if default_model == "":
+            raise MitoCodeChatProviderConfigError("default_model cannot be empty") from None
+        if not type(self).check_settings_schema(settings):
+            raise MitoCodeChatProviderConfigError("settings schema validation failed") from None
         self.model_list = self.get_model_list()
-        if default_model not in self.model_list :
-            raise Exception
+        if default_model not in self.model_list:
+            raise MitoCodeChatProviderModelError(f"Model '{default_model}' not in available models: {self.model_list}") from None
         self.default_model = default_model
         self.default_messages = default_messages
         self.settings = settings
 
-    @staticmethod
     @abstractmethod
-    def get_model_list() -> List[str] : pass
+    def get_model_list(self) -> List[str]: pass
 
     @abstractmethod
-    def init(self) -> None : pass
+    async def init(self) -> None: pass
 
     @classmethod
     @abstractmethod
-    def get_settings_schema(cls) -> Dict : pass
+    def get_settings_schema(cls) -> Dict: pass
 
-    @staticmethod
+    @classmethod
     @abstractmethod
-    def check_settings_schema(settings) -> bool: pass
+    def check_settings_schema(cls, settings) -> bool: pass
 
     @abstractmethod
     async def chat(
         self,
-        user_messages : str = '',
-        model : str = '',
-        tools : dict = None, # 符合OpenAI规范的工具列表
-        messages : List[Dict] = None, # 符合OpenAI规范的上下文
-        # 开始前运行的回调函数，传入以下参数：
-        # on_start(user_messages : str, current_messages : List[Dict])
-        # user_messages为用户输入的消息，current_messages为当前的完整上下文
-        on_start = lambda _,__ : None,
-        # 输出完成时调用的回调函数
-        # on_stop(reason : str = 'finish', current_messages)
-        # reason有stop, length, content_filter, tool_calls,
-        on_stop = lambda _,__ : None
-    ) -> Dict : pass
+        user_messages: str = '',
+        model: str = '',
+        tools: Optional[Dict] = None,
+        messages: Optional[List[Dict]] = None,
+        on_start: Callable[[str, List[Dict]], None] = lambda _, __: None,
+        on_stop: Callable[[str, List[Dict]], None] = lambda _, __: None,
+    ) -> Dict: pass
+
+
+SampleChatProvider = _SampleChatProvider
