@@ -58,3 +58,19 @@ class MitoCodeToolError(MitoCodeBaseError):
 
 class MitoCodeToolDefinitionError(MitoCodeToolError):
     """Raised when a tool definition or its type annotations are invalid."""
+
+
+class MitoCodeChatProviderError(MitoCodeBaseError):
+    """Base class for chat provider related errors."""
+
+
+class MitoCodeChatProviderConfigError(MitoCodeChatProviderError):
+    """Raised when chat provider configuration is invalid."""
+
+
+class MitoCodeChatProviderModelError(MitoCodeChatProviderError):
+    """Raised when requested model is not available."""
+
+
+class MitoCodeChatProviderInitError(MitoCodeChatProviderError):
+    """Raised when chat provider initialization fails."""
