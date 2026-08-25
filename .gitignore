@@ -179,3 +179,4 @@ venv.bak/
 .webassets-cache
 wheels/
 #  you could uncomment the following to ignore the entire vscode folder
+/AGENTS.md
