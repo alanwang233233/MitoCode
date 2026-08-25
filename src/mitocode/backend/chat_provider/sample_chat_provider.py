@@ -6,6 +6,10 @@ from typing import List, Dict
 
 
 class _SampleChatProvider(ABC) :
+    @classmethod
+    def factory(cls, *args, **kwargs) -> "_SampleChatProvider" :
+        return cls(*args, **kwargs)
+
     def __init__(
         self,
         default_model : str = "",
@@ -29,7 +33,6 @@ class _SampleChatProvider(ABC) :
         self.default_model = default_model
         self.default_messages = default_messages
         self.settings = settings
-        self.init()
 
     @staticmethod
     @abstractmethod
@@ -55,20 +58,10 @@ class _SampleChatProvider(ABC) :
         messages : List[Dict] = None, # 符合OpenAI规范的上下文
         # 开始前运行的回调函数，传入以下参数：
         # on_start(user_messages : str, current_messages : List[Dict])
-        # current_messages为当前的完整上下文
+        # user_messages为用户输入的消息，current_messages为当前的完整上下文
         on_start = lambda _,__ : None,
-        # 生成100 token时调用的回调参数
-        # 开始前运行的回调函数，传入以下参数：
-        # on_start(user_messages : str, current_messages : List[Dict])
-        # current_messages为当前的完整上下文
-        on_token = lambda _,__ : None,
-        tool_call = lambda _,__ : None, # 工具调用时调用的回调函数
-                 # tool_call(tool_name, params)
-                 # 返回值传给AI
-        on_tool_call = lambda _,__ : None, # 工具调用时调用的回调函数
-                    # on_tool_call(tool_name, params)
-                    # 返回值不用管
-        on_stop = lambda _,__ : None, # 输出完成时调用的回调函数
-                # on_stop(reason : str = 'finish', current_messages)
-                # reason有finish, network-error, api-error, unknown四种形式
+        # 输出完成时调用的回调函数
+        # on_stop(reason : str = 'finish', current_messages)
+        # reason有stop, length, content_filter, tool_calls,
+        on_stop = lambda _,__ : None
     ) -> Dict : pass
