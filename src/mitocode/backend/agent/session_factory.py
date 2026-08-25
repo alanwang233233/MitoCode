@@ -1,3 +1,5 @@
+"""Factory for constructing configured agent sessions."""
+
 from .agent_session import AgentSession
 
 
@@ -9,11 +11,6 @@ class SessionFactory:
     need to import or instantiate ``AgentSession`` directly.  Default settings
     can be embedded in a factory subclass or instance, and individual
     :meth:`create_session` calls may override any of them.
-
-    Example usage::
-
-        factory = SessionFactory(provider=my_provider)
-        session = factory.create_session(tools_map={"greet": greet_fn})
     """
 
     def __init__(self, **defaults):
@@ -30,14 +27,5 @@ class SessionFactory:
 
         Keyword arguments override the factory-level defaults set in
         :meth:`__init__`.
-
-        Args:
-            **settings: Settings accepted by :class:`AgentSession`, e.g.
-                ``provider``, ``tools_map``, ``tool_schemas``,
-                ``tool_manager``, ``on_end``.
-
-        Returns:
-            AgentSession: A freshly constructed session instance.
         """
-        merged = {**self._defaults, **settings}
-        return AgentSession(**merged)
+        return AgentSession.factory(**{**self._defaults, **settings})

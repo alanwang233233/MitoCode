@@ -1,3 +1,5 @@
+"""Backend layer for MitoCode"""
+
 from mitocode.backend.agent import (
     LegacyAgent,
     AgentNode,
@@ -5,7 +7,6 @@ from mitocode.backend.agent import (
     AgentRuntime,
     AgentSession,
     AgentState,
-    Agent,
     SessionFactory,
     ToolManager,
     ToolSpec,
@@ -21,7 +22,6 @@ __all__ = [
     "AgentSession",
     "AgentState",
     "EventBridge",
-    "Agent",
     "SessionFactory",
     "ToolManager",
     "ToolSpec",

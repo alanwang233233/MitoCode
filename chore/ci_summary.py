@@ -257,7 +257,7 @@ def generate_markdown(
     lines.append("<details>")
     lines.append("<summary>📋 pytest 详细</summary>")
     lines.append("")
-    lines.append(f"```xml\n{_read_text(Path('pytest-cov-output.txt'))[:2000]}\n```")
+    lines.append(f"```xml\n{_read_text(Path('pytest-cov-output.txt'))}\n```")
     lines.append("</details>")
     lines.append("")
 
@@ -274,14 +274,14 @@ def generate_markdown(
         lines.append("<details>")
         lines.append("<summary>🛡️ pip-audit 输出</summary>")
         lines.append("")
-        lines.append(f"```text\n{pip_audit_result['output'][:3000]}\n```")
+        lines.append(f"```text\n{pip_audit_result['output']}\n```")
         lines.append("</details>")
         lines.append("")
 
     lines.append("<details>")
     lines.append("<summary>📝 pyright 输出</summary>")
     lines.append("")
-    lines.append(f"```text\n{pyright_result['output'][:3000]}\n```")
+    lines.append(f"```text\n{pyright_result['output']}\n```")
     lines.append("</details>")
     lines.append("")
 
@@ -289,7 +289,7 @@ def generate_markdown(
         lines.append("<details>")
         lines.append("<summary>🎨 eff-u-code 输出</summary>")
         lines.append("")
-        lines.append(f"```text\n{eff_u_code_result['output'][:3000]}\n```")
+        lines.append(f"```text\n{eff_u_code_result['output']}\n```")
         lines.append("</details>")
         lines.append("")
 

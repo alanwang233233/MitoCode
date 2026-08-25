@@ -1,3 +1,5 @@
+"""WIP"""
+
 APP_VERSION = 2
 MITOCODE_CONFIG_PATH = ".mitocode"
 

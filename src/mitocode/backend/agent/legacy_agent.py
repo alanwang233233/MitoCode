@@ -1,3 +1,5 @@
+"""Backward-compatible agent facade over :class:`AgentSession`."""
+
 # Re-export message block primitives so existing importers keep working.
 # pylint: disable=unused-import
 from .agent_runtime import AgentRuntime

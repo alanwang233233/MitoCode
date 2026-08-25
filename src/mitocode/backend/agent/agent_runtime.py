@@ -1,4 +1,7 @@
+"""Core streaming loop that drives a single agent session."""
+
 import asyncio
+import inspect
 from typing import AsyncGenerator, Dict, Any
 
 from .agent_session import (
@@ -9,9 +12,15 @@ from .agent_session import (
 
 
 class AgentRuntime:
+    """Stateless executor that streams LLM responses and runs tool calls.
+
+    All methods are static; mutable state lives entirely in the
+    :class:`AgentSession` passed to :meth:`run`.
+    """
+
     @staticmethod
     async def _invoke_tool(tool_func, func_args):
-        if asyncio.iscoroutinefunction(tool_func):
+        if inspect.iscoroutinefunction(tool_func):
             return await tool_func(**func_args)
 
         result = await asyncio.to_thread(tool_func, **func_args)
@@ -21,7 +30,7 @@ class AgentRuntime:
 
     @staticmethod
     async def _invoke_on_end(on_end, session, messages):
-        if asyncio.iscoroutinefunction(on_end):
+        if inspect.iscoroutinefunction(on_end):
             await on_end(session, messages)
             return
 

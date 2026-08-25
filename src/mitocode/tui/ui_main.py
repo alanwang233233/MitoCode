@@ -1,3 +1,10 @@
+"""Textual-based TUI for MitoCode.
+
+Renders the agent tree on the left, one or more :class:`AgentView` chat
+panels in a dynamic grid, and routes streaming events from the
+:class:`AgentOrchestrator` into the focused view.
+"""
+
 import json
 import time
 from difflib import unified_diff
@@ -32,6 +39,13 @@ ACTION_LABELS = {
 
 
 class ToolCallPanelSyntax(Static):
+    """Streaming code panel for file-writing tool calls.
+
+    Buffers streamed JSON tool arguments until they parse, extracts the
+    file path and code, then renders syntax-highlighted code — or a
+    unified diff against the original content once the call finishes.
+    """
+
     code = reactive("")
     panel_type = "tool_call"
 
@@ -54,9 +68,16 @@ class ToolCallPanelSyntax(Static):
         self.action_key = ""
 
     def watch_code(self, old_code: str, new_code: str) -> None:
+        """Re-render with layout when streamed code updates the reactive."""
         self.refresh(layout=True)
 
     def append_code(self, content):
+        """Buffer a streamed JSON chunk and extract code once parseable.
+
+        On first successful parse of the buffered arguments, updates the
+        title with ``label → file_path`` and stores the extracted code.
+        Later chunks are ignored.
+        """
         if self._formatted:
             return
         self._buffer += content
@@ -76,6 +97,11 @@ class ToolCallPanelSyntax(Static):
             pass
 
     def finalize(self):
+        """Force-parse buffered arguments if the stream never yielded valid JSON.
+
+        Called before final rendering; on parse failure the raw buffer is
+        shown as-is.
+        """
         if not self._formatted:
             try:
                 args = json.loads(self._buffer)
@@ -174,11 +200,18 @@ class ToolCallPanelSyntax(Static):
         )
 
     def end(self, success: bool = True, show_line_number: bool = False):
+        """Mark the panel as finished and trigger a layout refresh."""
         self.finished = True
         self.refresh(layout=True)
 
 
 class ToolCallPanel(Static):
+    """Compact panel showing a one-line preview of non-file tool calls.
+
+    Buffers streamed JSON arguments, then displays the ``command`` or
+    ``file_path`` value once it can be parsed.
+    """
+
     panel_type = "tool_call"
 
     def __init__(self, title: str):
@@ -191,6 +224,11 @@ class ToolCallPanel(Static):
         self._formatted = False
 
     def append_code(self, delta: str):
+        """Buffer a streamed JSON chunk and show command/file once parseable.
+
+        On first successful parse, displays ``$ <command>`` or the file
+        path; later chunks are ignored.
+        """
         if self._formatted:
             return
         self._buffer += delta
@@ -210,6 +248,7 @@ class ToolCallPanel(Static):
             pass
 
     def finalize(self):
+        """Force-parse buffered arguments if streaming never yielded valid JSON."""
         if not self._formatted:
             try:
                 args = json.loads(self._buffer)
@@ -254,12 +293,15 @@ class ToolCallPanel(Static):
         )
 
     def end(self, success: bool = True):
+        """Mark the panel finished and apply success/failure styling."""
         self.finished = True
         self.finished_success = success
         self.refresh(layout=True)
 
 
 class UserMessagePanel(Static):
+    """Panel displaying a verbatim user prompt bubble."""
+
     panel_type = "user"
 
     def __init__(self, text: str):
@@ -278,10 +320,13 @@ class UserMessagePanel(Static):
 
 
 class PlainTextPanel(Static):
+    """Streaming markdown panel for assistant text output."""
+
     panel_type = "plain_text"
     content = reactive("", layout=True)
 
     def append(self, delta: str):
+        """Append a streaming delta to the markdown content."""
         self.content += delta
 
     def render(self):
@@ -295,10 +340,13 @@ class PlainTextPanel(Static):
 
 
 class ReasoningTextPanel(Static):
+    """Streaming markdown panel for assistant reasoning traces."""
+
     panel_type = "reasoning_text"
     content = reactive("", layout=True)
 
     def append(self, delta: str):
+        """Append a streaming delta to the markdown content."""
         self.content += delta
 
     def render(self):
@@ -313,6 +361,12 @@ class ReasoningTextPanel(Static):
 
 
 class AgentView(VerticalScroll):
+    """Scrollable per-agent chat view assembling message and tool panels.
+
+    Tracks the currently streaming panel so consecutive text/tool deltas
+    are appended to the same widget instead of mounting new ones.
+    """
+
     def __init__(self, agent_id: int, agent_name: str = ""):
         super().__init__()
         self.agent_id = agent_id
@@ -322,10 +376,12 @@ class AgentView(VerticalScroll):
         self._streaming_panel: Optional[Static] = None
 
     def on_mount(self):
+        """Enable auto vertical scrolling with a stable scrollbar gutter."""
         self.styles.overflow_y = "auto"
         self.styles.scrollbar_gutter = "stable"
 
     def set_active(self, active: bool):
+        """Highlight (or reset) the border indicating the focused agent."""
         if active:
             self.styles.border = ("heavy", "gold")
         else:
@@ -348,12 +404,19 @@ class AgentView(VerticalScroll):
             self._scroll_to_bottom()
 
     async def append_user_message(self, text: str) -> None:
+        """Mount a new user-message panel and scroll to it."""
         self._streaming_panel = None
         panel = UserMessagePanel(text)
         await self.mount(panel)
         self._scroll_to_bottom()
 
     async def append_plain_text(self, delta: str) -> None:
+        """Stream assistant text deltas into a shared plain-text panel.
+
+        Mounts a fresh panel when the previous streaming panel is not
+        plain text, otherwise appends in place; keeps the view pinned to
+        the bottom only if the user was already there.
+        """
         if self._last_panel_type != "plain_text":
             self._streaming_panel = None
             panel = PlainTextPanel()
@@ -366,6 +429,7 @@ class AgentView(VerticalScroll):
             self._scroll_if_was_at_bottom(was_at_bottom)
 
     async def append_reasoning(self, delta: str) -> None:
+        """Stream reasoning deltas into a shared reasoning-text panel."""
         if self._last_panel_type != "reasoning_text":
             self._streaming_panel = None
             panel = ReasoningTextPanel()
@@ -380,6 +444,12 @@ class AgentView(VerticalScroll):
     async def start_tool_call(
         self, action: str, description: str, additional: str
     ) -> None:
+        """Mount the appropriate tool-call panel for *action*.
+
+        ``file.write`` creates a syntax-highlighting panel with a language
+        guessed from the target file extension; other actions get a compact
+        one-line preview panel.
+        """
         self._streaming_panel = None
 
         if action in ("file.write",):
@@ -408,10 +478,12 @@ class AgentView(VerticalScroll):
         self._scroll_to_bottom()
 
     async def append_tool_content(self, content: str) -> None:
+        """Forward streamed tool argument chunks to the active tool panel."""
         if self._streaming_panel is not None and self._last_panel_type == "tool_call":
             self._streaming_panel.append_code(content)
 
     async def finish_tool_call(self, result: str, success: bool = True) -> None:
+        """Finalize the active tool-call panel with its execution result."""
         if self._streaming_panel is not None and self._last_panel_type == "tool_call":
             panel = self._streaming_panel
             if isinstance(panel, ToolCallPanelSyntax):
@@ -428,10 +500,24 @@ class AgentView(VerticalScroll):
 
 
 class DynamicGrid(Grid):
+    """Grid container arranging agent views: one large + up to three small.
+
+    With a single widget it fills the whole grid; with more, the first
+    agent spans all rows on the left and the rest stack on the right,
+    overflowing agents collapsed into an ``+ N agents`` tile.
+    """
+
     def on_mount(self):
+        """Enable grid layout for this container."""
         self.styles.layout = "grid"
 
     async def set_widgets(self, widgets):
+        """Re-layout the grid to display *widgets*.
+
+        Hides previously visible AgentViews and mounts any new ones, then
+        assigns row/column spans according to the layout rules described
+        in the class docstring.
+        """
         await self.query(".ellipsis").remove()
         for w in self.query("AgentView"):
             w.styles.display = "none"
@@ -487,12 +573,15 @@ class DynamicGrid(Grid):
 
 
 class AgentTree(Tree):
+    """Agent tree with click-to-select and double-click-to-toggle behavior."""
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._last_click_time = 0
         self._last_click_node = None
 
     def on_click(self, event) -> None:
+        """Select the clicked node; toggle expansion on rapid double click."""
         node = self.get_node_at_line(event.y)
         if node:
             self.select_node(node)
@@ -511,6 +600,14 @@ class AgentTree(Tree):
 
 
 class VibeFrontend(App):
+    """Main Textual application for MitoCode.
+
+    Composes the left-pane agent tree and quick-create input, the
+    right-pane dynamic grid of :class:`AgentView` panels plus chat input,
+    and a hidden debug log (F12). Consumes orchestrator events from a
+    background worker and routes them to the matching agent view.
+    """
+
     TITLE = "MitoCode"
 
     CSS = """
@@ -621,6 +718,7 @@ class VibeFrontend(App):
         self.log_panel: Optional[RichLog] = None
 
     def print_log(self, text):
+        """Write *text* to the debug log panel when it exists."""
         if self.log_panel:
             self.log_panel.write(text)
 
@@ -651,6 +749,7 @@ class VibeFrontend(App):
         yield Footer()
 
     def on_mount(self):
+        """Render the initial tree, start the event consumer, focus input."""
         self._update_and_render_tree(self.orchestrator.get_tree_snapshot())
         self.run_worker(self._consume_events(), group="workers", name="event_consumer")
         tree = self.agent_tree
@@ -662,13 +761,20 @@ class VibeFrontend(App):
             self.chat_input.focus()
 
     def action_toggle_debug(self) -> None:
+        """Toggle visibility of the debug log panel (F12)."""
         self.debug_mode = not self.debug_mode
 
     def action_refresh_layout(self) -> None:
+        """Force a full layout refresh (F5)."""
         self.print_log("Refreshing layout...")
         self.refresh(layout=True)
 
     async def action_cancel_agent(self) -> None:
+        """Cancel the active agent run unless the input just needs clearing.
+
+        Escape clears a non-empty chat input first; otherwise it cancels
+        the currently selected agent with cascading to sub-agents.
+        """
         if self.chat_input and self.chat_input.has_focus and self.chat_input.value:
             self.chat_input.value = ""
             return
@@ -717,6 +823,7 @@ class VibeFrontend(App):
         self.agent_tree.scroll_to_node(node)
 
     def watch_debug_mode(self, debug_mode: bool):
+        """Show/hide the debug log panel when *debug_mode* changes."""
         if self.log_panel:
             self.log_panel.styles.display = "block" if debug_mode else "none"
 
@@ -725,6 +832,7 @@ class VibeFrontend(App):
     # ------------------------------------------------------------------
 
     async def _consume_events(self):
+        """Worker loop draining the orchestrator queue into agent views."""
         while True:
             agent_id, event = await self.orchestrator.event_queue.get()
             try:
@@ -772,6 +880,13 @@ class VibeFrontend(App):
     # ------------------------------------------------------------------
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Dispatch quick-create vs chat-input submissions.
+
+        The quick-create input spawns a child agent under the currently
+        active agent; the chat input appends the user message locally and
+        forwards it to the active agent via the orchestrator (blocked
+        while that agent is still running).
+        """
         text = event.value.strip()
         if not text:
             return
@@ -864,6 +979,7 @@ class VibeFrontend(App):
     # ------------------------------------------------------------------
 
     async def on_tree_node_selected(self, event: Tree.NodeSelected):
+        """Display the selected agent and its children in the grid."""
         node = event.node
         if not node or not node.data:
             return

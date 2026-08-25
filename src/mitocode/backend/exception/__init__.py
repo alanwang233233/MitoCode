@@ -1,3 +1,5 @@
+"""Custom exception hierarchy for MitoCode."""
+
 from .mitocode_exception import (
     MitoCodeBaseError,
     MitoCodePathConvertError,

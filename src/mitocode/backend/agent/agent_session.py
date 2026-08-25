@@ -1,3 +1,5 @@
+"""Conversation state container for a single agent session."""
+
 import asyncio
 import json
 from typing import List, Any, Dict, Callable
@@ -5,6 +7,9 @@ from typing import List, Any, Dict, Callable
 from loguru import logger as loguru_logger
 
 from mitocode.backend.tool.tool_manager import ToolManager
+
+from .agent_node import AgentNode
+from .agent_state import AgentState
 
 logger = loguru_logger.bind(name=__name__)
 
@@ -27,6 +32,7 @@ class _PlainTextMessageBlock(_MessageBlock):
         self.finished: bool = True
 
     def append(self, delta: str):
+        """Append a streaming text delta to this block's message."""
         self.message += delta
 
 
@@ -43,6 +49,7 @@ class _ToolCallMessageBlock(_MessageBlock):
         self.parse_error: str | None = None
 
     def append_argument_chunk(self, delta: str):
+        """Append a streaming chunk of raw JSON tool arguments."""
         self.arguments_string += delta
 
     def finish(self):
@@ -84,12 +91,53 @@ class _ToolResultMessageBlock(_MessageBlock):
 
 
 class AgentSession:
+    """Stateful conversation container for one agent.
+
+    Holds the message history as a list of internal message blocks, merges
+    tools from an optional :class:`ToolManager` with user-supplied tools and
+    schemas, tracks tree relationships (``parent_id`` / ``sub_agent_ids``)
+    and lifecycle :class:`AgentState`, exposes cooperative cancellation, and
+    converts the history into provider-compatible dicts via
+    :meth:`build_standard_context`.
+
+    Attributes:
+        provider: The chat provider used by the runtime.
+        messages: Ordered internal message blocks forming the context.
+        tools_map: Merged name-to-callable mapping available to this agent.
+        tool_schemas: OpenAI-compatible tool schemas for ``chat`` requests.
+        state: Current lifecycle state (idle/running/finished/...).
+    """
+
+    @staticmethod
+    def factory(**settings) -> "AgentSession":
+        """
+        Create and return a new :class:`AgentSession`.
+
+        Keyword arguments override the factory-level defaults set in
+        :meth:`__init__`.
+
+        Args:
+            **settings: Settings accepted by :class:`AgentSession`, e.g.
+                ``provider``, ``tools_map``, ``tool_schemas``,
+                ``tool_manager``, ``on_end``.
+
+        Returns:
+            AgentSession: A freshly constructed session instance.
+        """
+        return AgentSession(**settings)
+
     def __init__(self, **settings):
         provider = settings.get("provider", None)
         user_tools_map = settings.get("tools_map", {})
         user_tool_schemas = settings.get("tool_schemas", [])
         tool_manager = settings.get("tool_manager", None)
         on_end = settings.get("on_end", None)
+        self.agent_id: int = settings.get("agent_id", -1)
+        self.name: str = settings.get("name", "")
+        self.description: str = settings.get("description", "")
+        self.parent_id: int | None = settings.get("parent_id", None)
+        self.sub_agent_ids: List[int] = []
+        self.state: AgentState = AgentState.DEFAULT
 
         if not provider:
             raise ValueError("Provider is required.")
@@ -127,11 +175,13 @@ class AgentSession:
         self._cancel_event = asyncio.Event()
 
     def get_tool_docs_for_human(self) -> Dict[str, str]:
+        """Return human-readable documentation for all managed tools."""
         if not self.tool_manager:
             return {}
         return self.tool_manager.human_docs()
 
     def get_tool_docs_for_agent(self) -> Dict[str, str]:
+        """Return agent-facing documentation for all managed tools."""
         if not self.tool_manager:
             return {}
         return self.tool_manager.agent_docs()
@@ -199,3 +249,14 @@ class AgentSession:
             )
 
         return context
+
+    def to_agent_node(self) -> AgentNode:
+        """Builds a pure-data :class:`AgentNode` snapshot for TUI rendering."""
+        return AgentNode(
+            id=self.agent_id,
+            name=self.name,
+            description=self.description,
+            parent_id=self.parent_id,
+            sub_agent_ids=list(self.sub_agent_ids),
+            state=self.state.value,
+        )

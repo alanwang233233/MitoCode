@@ -1,3 +1,9 @@
+"""Scripted mock provider replaying a fixed multi-turn tool-call demo.
+
+Used for offline demos and TUI development: each ``chat`` call plays back
+the next pre-recorded turn of a bubble-sort coding session.
+"""
+
 import asyncio
 import json
 from types import SimpleNamespace
@@ -9,17 +15,20 @@ def _make_chunk(
     tool_calls: Optional[List[Any]] = None,
     finish_reason: Optional[str] = None,
 ):
+    """Create a simulated OpenAI streaming chunk with optional content and tool calls."""
     delta = SimpleNamespace(content=content, tool_calls=tool_calls)
     choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
     return SimpleNamespace(choices=[choice])
 
 
 def _make_tool_call(index: int, call_id: str, name: Optional[str], arguments: str):
+    """Create a simulated tool-call object matching the OpenAI streaming format."""
     func = SimpleNamespace(name=name or "", arguments=arguments)
     return SimpleNamespace(index=index, id=call_id, function=func)
 
 
 def _finish(reason: str):
+    """Return a chunk with only a finish reason to signal end of stream."""
     return _make_chunk(finish_reason=reason)
 
 
@@ -137,15 +146,22 @@ class ScenarioProvider:
     """
 
     def __init__(self, delay: float = 0.03):
+        """Initialise the provider with an inter-chunk streaming delay.
+
+        Args:
+            delay: Seconds to sleep between yielded chunks (default 0.03).
+        """
         self.turn = 0
         self._delay = delay
 
     @staticmethod
     def get_model_list():
+        """Return the model identifiers accepted by this provider."""
         return ["scenario-model"]
 
     @classmethod
     def get_settings_schema(cls):
+        """Return the JSON Schema describing accepted settings."""
         return {
             "type": "object",
             "properties": {},
@@ -154,9 +170,11 @@ class ScenarioProvider:
 
     @staticmethod
     def check_settings_schema(settings):
+        """Validate that *settings* is a dict; any keys are allowed."""
         return isinstance(settings, dict)
 
     def init(self):
+        """No-op initialization hook kept for provider interface parity."""
         pass
 
     async def chat(
@@ -165,6 +183,13 @@ class ScenarioProvider:
         messages: Optional[List[Dict[str, Any]]] = None,
         **kwargs,
     ):
+        """Return an async stream playing back the next scripted turn.
+
+        Each invocation advances the internal turn counter: turns 0-2 emit
+        markdown text followed by bash / write_file / read_file tool calls;
+        later turns emit the final summary with finish reason ``stop``.
+        Chunks are yielded with the configured inter-chunk delay.
+        """
         turn = self.turn
         self.turn += 1
 
