@@ -134,7 +134,6 @@ class AgentSession:
         user_tools_map = settings.get("tools_map", {})
         user_tool_schemas = settings.get("tool_schemas", [])
         tool_manager = settings.get("tool_manager", None)
-        on_end = settings.get("on_end", None)
         self.agent_id: int = settings.get("agent_id", -1)
         self.name: str = settings.get("name", "")
         self.description: str = settings.get("description", "")
@@ -173,8 +172,6 @@ class AgentSession:
         self.tools_map: Dict[str, Callable] = tools_map
         self.tool_schemas = tool_schemas
         self.tool_manager: ToolManager | None = tool_manager
-        self.on_end = on_end
-
         self._cancel_event = asyncio.Event()
 
     def get_tool_docs_for_human(self) -> Dict[str, str]:
