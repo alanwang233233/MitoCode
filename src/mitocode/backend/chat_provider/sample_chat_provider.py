@@ -5,7 +5,7 @@ Subclasses implement provider-specific logic for connecting to LLM APIs.
 """
 
 from abc import abstractmethod, ABC
-from typing import List, Dict, Optional, Callable, Any
+from typing import List, Dict, Optional, Any, AsyncGenerator
 
 from mitocode.backend.exception.mitocode_exception import (
     MitoCodeChatProviderConfigError,
@@ -41,6 +41,7 @@ class _SampleChatProvider(ABC):
         default_model: str = "",
         default_messages: Optional[List[Dict]] = None,
         default_tools: Optional[List[Dict]] = None,
+        stream: bool = True,
         settings: Optional[
             Dict[str, Any]
         ] = None,
@@ -70,6 +71,7 @@ class _SampleChatProvider(ABC):
             raise MitoCodeChatProviderConfigError("default_model cannot be empty")
         if not type(self).check_settings_schema(settings):
             raise MitoCodeChatProviderConfigError("settings schema validation failed")
+        self.stream = stream
         self.default_tools = default_tools
         self.default_model = default_model
         self.default_messages = default_messages
@@ -108,7 +110,6 @@ class _SampleChatProvider(ABC):
     @abstractmethod
     async def chat(
         self,
-        user_messages: str = "",
         model: str = "",
         tools: Optional[
             Dict
@@ -116,18 +117,20 @@ class _SampleChatProvider(ABC):
         messages: Optional[
             List[Dict]
         ] = None,
-    ) -> Dict:
+        stream: bool = True,
+    ) -> AsyncGenerator | Dict:
         """Send messages to the model and return the completion result.
 
         Args:
-            user_messages: Plain-text user input appended to the conversation.
             model: Model name to use; falls back to ``default_model`` if empty.
             tools: Tool definitions in OpenAI Chat Completions API format.
             messages: Full conversation history in OpenAI Chat Completions
                 API format.
+            stream: Whether to return a streaming response (True) or a single
+                completion (False).
 
         Returns:
-            The completion response as a dict in OpenAI Chat Completions format.
+            The completion response as a dict or an AsyncGenerator in OpenAI Chat Completions format.
         """
 
 

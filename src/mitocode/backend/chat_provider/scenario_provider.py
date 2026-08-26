@@ -1,3 +1,4 @@
+"""旧实现，与现有ABC不符，已弃用，请勿参考！"""
 """Scripted mock provider replaying a fixed multi-turn tool-call demo.
 
 Used for offline demos and TUI development: each ``chat`` call plays back
