@@ -1,4 +1,5 @@
 """旧实现，与现有ABC不符，已弃用，请勿参考！"""
+
 """OpenAI Chat Completions implementation of the chat provider interface."""
 
 from typing import Any, Dict, List, Optional
@@ -10,11 +11,12 @@ from openai import AsyncOpenAI
 
 class ChatProviderOpenAI(_SampleChatProvider):
     """Provider subclass backed by OpenAI Chat Completions streaming API."""
+
     @staticmethod
     def _merge_messages(
-            default_messages: List[Dict[str, Any]],
-            messages: Optional[List[Dict[str, Any]]],
-            user_messages: str,
+        default_messages: List[Dict[str, Any]],
+        messages: Optional[List[Dict[str, Any]]],
+        user_messages: str,
     ) -> List[Dict[str, Any]]:
         """Merge default, additional, and user messages into a single list.
 
@@ -39,10 +41,10 @@ class ChatProviderOpenAI(_SampleChatProvider):
 
     @staticmethod
     async def _wrap_stream(
-            stream,
-            current_messages: List[Dict[str, Any]],
-            on_token,
-            on_stop,
+        stream,
+        current_messages: List[Dict[str, Any]],
+        on_token,
+        on_stop,
     ):
         """Iterate over *stream* chunks and fire callbacks.
 
