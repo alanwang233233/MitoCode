@@ -10,6 +10,8 @@ from mitocode.backend.tool.tool_manager import ToolManager
 
 from .agent_node import AgentNode
 from .agent_state import AgentState
+# noinspection PyProtectedMember
+from ..chat_provider.sample_chat_provider import _SampleChatProvider
 
 logger = loguru_logger.bind(name=__name__)
 
@@ -127,7 +129,7 @@ class AgentSession:
         return AgentSession(**settings)
 
     def __init__(self, **settings):
-        provider = settings.get("provider", None)
+        provider: _SampleChatProvider = settings.get("provider", None)
         user_tools_map = settings.get("tools_map", {})
         user_tool_schemas = settings.get("tool_schemas", [])
         tool_manager = settings.get("tool_manager", None)
