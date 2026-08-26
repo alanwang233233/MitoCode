@@ -3,11 +3,12 @@
 from typing import Any, AsyncGenerator, AsyncIterator, Dict, List, Optional
 
 from openai import AsyncOpenAI
+from openai.pagination import AsyncPage
+from openai.types import Model
 
 from mitocode.backend.exception.mitocode_exception import (
     MitoCodeChatProviderModelError,
 )
-
 from .sample_chat_provider import _SampleChatProvider
 
 
@@ -16,25 +17,11 @@ class ChatProviderOpenAI(_SampleChatProvider):
 
     Conforms to the current ``_SampleChatProvider`` contract: schema-driven
     settings validation performed by the base class, asynchronous client
-    initialization via :meth:`init`, and a :meth:`chat` that either streams
-    chunks through an ``AsyncGenerator`` or returns the full completion as
-    a dict in OpenAI Chat Completions format, depending on the ``stream``
-    flag.
+    initialization with dynamic model-list discovery from the OpenAI API
+    via :meth:`init`, and a :meth:`chat` that either streams chunks through
+    an ``AsyncGenerator`` or returns the full completion as a dict in
+    OpenAI Chat Completions format, depending on the ``stream`` flag.
     """
-
-    def get_model_list(self) -> List[str]:
-        """Return a list of supported OpenAI model identifiers.
-
-        Returns a curated set of GPT models. Callers can override this
-        method in a custom subclass to provide a different set.
-        """
-        # TODO: Consider fetching the model list dynamically from OpenAI's API.
-        return [
-            "gpt-4o-mini",
-            "gpt-4o",
-            "gpt-5-mini",
-            "gpt-5",
-        ]
 
     @classmethod
     def get_settings_schema(cls) -> Dict[str, Any]:
@@ -70,15 +57,37 @@ class ChatProviderOpenAI(_SampleChatProvider):
         """Initialise the ``AsyncOpenAI`` client from the current settings.
 
         Reads ``api_key``, ``base_url`` and ``timeout`` from
-        ``self.settings`` and stores the resulting client on
-        ``self.client``.
+        ``self.settings``, stores the resulting client on ``self.client``,
+        then refreshes ``model_list`` with the live model list fetched from
+        the OpenAI API.
         """
         settings: Dict[str, Any] = self.settings or {}
+        # noinspection PyAttributeOutsideInit
         self.client = AsyncOpenAI(
             api_key=settings.get("api_key", ""),
             base_url=settings.get("base_url", None),
             timeout=settings.get("timeout", 60),
         )
+        self.model_list = await self.get_model_list()
+
+    async def get_model_list(self) -> List[str]:
+        """Fetch the available model ids from the OpenAI API.
+
+        On success, ``self.model_list`` is replaced with the sorted ids
+        reported by the API. On failure (e.g. network issues or an invalid
+        key), a warning is logged and the built-in defaults returned by
+        :meth:`get_model_list` are kept so the provider remains usable.
+        """
+        try:
+            response: AsyncPage[Model] = await self.client.models.list()
+        except Exception as e:
+            raise MitoCodeChatProviderModelError(
+                "Failed to fetch OpenAI model list"
+            ) from e
+        model_ids = sorted([model.id async for model in response])
+        if model_ids:
+            self.model_list = model_ids
+        return self.model_list
 
     @staticmethod
     async def _wrap_stream(stream: AsyncIterator[Any]) -> AsyncGenerator:
@@ -127,7 +136,7 @@ class ChatProviderOpenAI(_SampleChatProvider):
                 f"Model '{current_model}' not in available models: {self.model_list}"
             )
 
-        current_messages: List[Dict[str, Any]] = messages
+        current_messages: List[Dict[str, Any]] = messages or []
 
         req: Dict[str, Any] = {
             "model": current_model,

@@ -9,7 +9,6 @@ from typing import List, Dict, Optional, Any, AsyncGenerator
 
 from mitocode.backend.exception.mitocode_exception import (
     MitoCodeChatProviderConfigError,
-    MitoCodeChatProviderModelError,
 )
 
 
@@ -39,12 +38,11 @@ class _SampleChatProvider(ABC):
     def __init__(
         self,
         default_model: str = "",
+        default_model_list: Optional[List[str]] = None,
         default_messages: Optional[List[Dict]] = None,
         default_tools: Optional[List[Dict]] = None,
         stream: bool = True,
-        settings: Optional[
-            Dict[str, Any]
-        ] = None,
+        settings: Optional[Dict[str, Any]] = None,
     ):
         """Initialize the provider with model, default messages, and settings.
 
@@ -62,7 +60,7 @@ class _SampleChatProvider(ABC):
                 among available models.
         """
         if settings is None:
-            settings = []
+            settings = {}
         if default_messages is None:
             default_messages = [
                 {"role": "system", "content": "You are a helpful assistant."}
@@ -74,16 +72,12 @@ class _SampleChatProvider(ABC):
         self.stream = stream
         self.default_tools = default_tools
         self.default_model = default_model
+        self.model_list = default_model_list
         self.default_messages = default_messages
         self.settings = settings
-        self.model_list = self.get_model_list()
-        if default_model not in self.model_list:
-            raise MitoCodeChatProviderModelError(
-                f"Model '{default_model}' not in available models: {self.model_list}"
-            )
 
     @abstractmethod
-    def get_model_list(self) -> List[str]:
+    async def get_model_list(self) -> List[str]:
         """Return the list of model names supported by this provider."""
 
     @abstractmethod
@@ -111,12 +105,8 @@ class _SampleChatProvider(ABC):
     async def chat(
         self,
         model: str = "",
-        tools: Optional[
-            Dict
-        ] = None,
-        messages: Optional[
-            List[Dict]
-        ] = None,
+        tools: Optional[Dict] = None,
+        messages: Optional[List[Dict]] = None,
         stream: bool = True,
     ) -> AsyncGenerator | Dict:
         """Send messages to the model and return the completion result.
