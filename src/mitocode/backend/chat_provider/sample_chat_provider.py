@@ -3,6 +3,7 @@
 This module defines the interface that all chat provider implementations must follow.
 Subclasses implement provider-specific logic for connecting to LLM APIs.
 """
+
 from abc import abstractmethod, ABC
 from typing import List, Dict, Optional, Callable, Any
 
@@ -13,8 +14,24 @@ from mitocode.backend.exception.mitocode_exception import (
 
 
 class _SampleChatProvider(ABC):
+    """Abstract base class for chat providers.
+
+    Defines the common lifecycle and contract shared by all provider
+    implementations: configuration validation, model listing, initialization,
+    and chat completion.
+    """
+
     @classmethod
     async def factory(cls, *args, **kwargs) -> "_SampleChatProvider":
+        """Create and initialize a provider instance asynchronously.
+
+        Args:
+            *args: Positional arguments passed to the constructor.
+            **kwargs: Keyword arguments passed to the constructor.
+
+        Returns:
+            A fully initialized provider instance.
+        """
         ins = cls(*args, **kwargs)
         await ins.init()
         return ins
@@ -22,50 +39,96 @@ class _SampleChatProvider(ABC):
     def __init__(
         self,
         default_model: str = "",
-        default_messages: Optional[List[Dict]]=None,
-        settings: Optional[Dict[str, Any]]=None # settings是一个字典，格式为{"key": "value"}
+        default_messages: Optional[List[Dict]] = None,
+        default_tools: Optional[List[Dict]] = None,
+        settings: Optional[
+            Dict[str, Any]
+        ] = None,
     ):
+        """Initialize the provider with model, default messages, and settings.
+
+        Args:
+            default_model: Name of the default model; must not be empty.
+            default_messages: Initial conversation messages in OpenAI Chat
+                Completions format. Defaults to a single system message.
+            settings: Provider-specific configuration dict validated against
+                the schema returned by ``get_settings_schema``.
+
+        Raises:
+            MitoCodeChatProviderConfigError: If the model name is empty or the
+                settings fail schema validation.
+            MitoCodeChatProviderModelError: If the default model is not listed
+                among available models.
+        """
         if settings is None:
             settings = []
         if default_messages is None:
             default_messages = [
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant."
-                }
+                {"role": "system", "content": "You are a helpful assistant."}
             ]
-        if default_model == "": raise MitoCodeChatProviderConfigError("default_model cannot be empty")
+        if default_model == "":
+            raise MitoCodeChatProviderConfigError("default_model cannot be empty")
         if not type(self).check_settings_schema(settings):
             raise MitoCodeChatProviderConfigError("settings schema validation failed")
+        self.default_tools = default_tools
         self.default_model = default_model
         self.default_messages = default_messages
         self.settings = settings
         self.model_list = self.get_model_list()
         if default_model not in self.model_list:
-            raise MitoCodeChatProviderModelError(f"Model '{default_model}' not in available models: {self.model_list}")
+            raise MitoCodeChatProviderModelError(
+                f"Model '{default_model}' not in available models: {self.model_list}"
+            )
 
     @abstractmethod
-    def get_model_list(self) -> List[str]: ...
+    def get_model_list(self) -> List[str]:
+        """Return the list of model names supported by this provider."""
 
     @abstractmethod
-    async def init(self) -> None: ...
+    async def init(self) -> None:
+        """Perform asynchronous initialization (e.g. connect to the API)."""
 
     @classmethod
     @abstractmethod
-    def get_settings_schema(cls) -> Dict: ...
+    def get_settings_schema(cls) -> Dict:
+        """Return the schema describing the expected structure of ``settings``."""
 
     @classmethod
     @abstractmethod
-    def check_settings_schema(cls, settings) -> bool: ...
+    def check_settings_schema(cls, settings) -> bool:
+        """Validate ``settings`` against the provider's schema.
+
+        Args:
+            settings: The settings dict to validate.
+
+        Returns:
+            True if the settings conform to the schema, False otherwise.
+        """
 
     @abstractmethod
     async def chat(
         self,
-        user_messages: str = '',
-        model: str = '',
-        tools: Optional[Dict] = None, # 符合OpenAI Chat Completions API的tools参数格式
-        messages: Optional[List[Dict]] = None, # 符合OpenAI Chat Completions API的messages参数格式
-    ) -> Dict: ...
+        user_messages: str = "",
+        model: str = "",
+        tools: Optional[
+            Dict
+        ] = None,
+        messages: Optional[
+            List[Dict]
+        ] = None,
+    ) -> Dict:
+        """Send messages to the model and return the completion result.
+
+        Args:
+            user_messages: Plain-text user input appended to the conversation.
+            model: Model name to use; falls back to ``default_model`` if empty.
+            tools: Tool definitions in OpenAI Chat Completions API format.
+            messages: Full conversation history in OpenAI Chat Completions
+                API format.
+
+        Returns:
+            The completion response as a dict in OpenAI Chat Completions format.
+        """
 
 
 SampleChatProvider = _SampleChatProvider
