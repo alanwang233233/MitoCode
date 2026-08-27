@@ -113,7 +113,7 @@ class _SampleChatProvider(ABC):
     async def chat(
         self,
         model: str = "",
-        tools: Optional[Dict] = None,
+        tools: Optional[List[Dict]] = None,
         messages: Optional[List[Dict]] = None,
         stream: bool = True,
     ) -> AsyncGenerator | Dict:
