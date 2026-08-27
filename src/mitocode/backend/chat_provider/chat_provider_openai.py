@@ -81,6 +81,12 @@ class ChatProviderOpenAI(_SampleChatProvider):
         try:
             response: AsyncPage[Model] = await self.client.models.list()
         except Exception as e:
+            if self.model_list is not None:
+                #self.logger.warning(
+                #   f"Failed to fetch model list from OpenAI API: {e}. "
+                #   f"Using default model list: {self.model_list}"
+                #)
+                return self.model_list
             raise MitoCodeChatProviderModelError(
                 "Failed to fetch OpenAI model list"
             ) from e
@@ -106,7 +112,7 @@ class ChatProviderOpenAI(_SampleChatProvider):
     async def chat(
         self,
         model: str = "",
-        tools: Optional[Dict] = None,
+        tools: Optional[List[Dict]] = None,
         messages: Optional[List[Dict]] = None,
         stream: bool = True,
     ) -> AsyncGenerator | Dict:

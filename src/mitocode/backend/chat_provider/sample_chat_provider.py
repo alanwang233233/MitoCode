@@ -80,6 +80,14 @@ class _SampleChatProvider(ABC):
     async def get_model_list(self) -> List[str]:
         """Return the list of model names supported by this provider."""
 
+    async def set_model_list(self, model_list: List[str]) -> None:
+        """Set the list of model names supported by this provider.
+
+        Args:
+            model_list: List of model names to set.
+        """
+        self.model_list = model_list
+
     @abstractmethod
     async def init(self) -> None:
         """Perform asynchronous initialization (e.g. connect to the API)."""
