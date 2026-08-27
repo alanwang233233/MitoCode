@@ -12,7 +12,6 @@ from typing import Any, Dict, List, Optional, AsyncGenerator
 from mitocode.backend.chat_provider.sample_chat_provider import _SampleChatProvider
 
 
-
 def _make_chunk(
     content: Optional[str] = None,
     tool_calls: Optional[List[Any]] = None,
