@@ -11,6 +11,9 @@ from mitocode.backend.tool.tool_manager import ToolManager
 from .agent_node import AgentNode
 from .agent_state import AgentState
 
+# noinspection PyProtectedMember
+from ..chat_provider.sample_chat_provider import _SampleChatProvider
+
 logger = loguru_logger.bind(name=__name__)
 
 
@@ -127,11 +130,10 @@ class AgentSession:
         return AgentSession(**settings)
 
     def __init__(self, **settings):
-        provider = settings.get("provider", None)
+        provider: _SampleChatProvider = settings.get("provider", None)
         user_tools_map = settings.get("tools_map", {})
         user_tool_schemas = settings.get("tool_schemas", [])
         tool_manager = settings.get("tool_manager", None)
-        on_end = settings.get("on_end", None)
         self.agent_id: int = settings.get("agent_id", -1)
         self.name: str = settings.get("name", "")
         self.description: str = settings.get("description", "")
@@ -141,6 +143,8 @@ class AgentSession:
 
         if not provider:
             raise ValueError("Provider is required.")
+        if not isinstance(provider, _SampleChatProvider):
+            raise TypeError("Provider must be an instance of _SampleChatProvider.")
         if tool_manager is not None and not isinstance(tool_manager, ToolManager):
             raise TypeError("tool_manager must be an instance of ToolManager.")
 
@@ -170,8 +174,6 @@ class AgentSession:
         self.tools_map: Dict[str, Callable] = tools_map
         self.tool_schemas = tool_schemas
         self.tool_manager: ToolManager | None = tool_manager
-        self.on_end = on_end
-
         self._cancel_event = asyncio.Event()
 
     def get_tool_docs_for_human(self) -> Dict[str, str]:

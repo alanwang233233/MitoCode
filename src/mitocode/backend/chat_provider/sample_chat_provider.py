@@ -1,238 +1,135 @@
-"""Default mock chat provider that can also serve as a provider base class."""
+"""Abstract base class for chat providers.
 
-from typing import List, Dict, Any, Optional
-import asyncio
+This module defines the interface that all chat provider implementations must follow.
+Subclasses implement provider-specific logic for connecting to LLM APIs.
+"""
 
+from abc import abstractmethod, ABC
+from typing import List, Dict, Optional, Any, AsyncGenerator
 
-class _MockFunction:
-    def __init__(self, name: str = "", arguments: str = ""):
-        self.name = name
-        self.arguments = arguments
-
-
-class _MockToolCallDelta:
-    def __init__(self, index: int, tool_call_id: str, name: str, arguments: str):
-        self.index = index
-        self.id = tool_call_id
-        self.function = _MockFunction(name=name, arguments=arguments)
+from mitocode.backend.exception.mitocode_exception import (
+    MitoCodeChatProviderConfigError,
+)
 
 
-class _MockDelta:
-    def __init__(
-        self,
-        content: Optional[str] = None,
-        tool_calls: Optional[List[_MockToolCallDelta]] = None,
-    ):
-        self.content = content
-        self.tool_calls = tool_calls
+class _SampleChatProvider(ABC):
+    """Abstract base class for chat providers.
 
+    Defines the common lifecycle and contract shared by all provider
+    implementations: configuration validation, model listing, initialization,
+    and chat completion.
+    """
 
-class _MockChoice:
-    def __init__(self, delta: _MockDelta, finish_reason: Optional[str] = None):
-        self.delta = delta
-        self.finish_reason = finish_reason
-
-
-class _MockChunk:
-    def __init__(self, delta: _MockDelta, finish_reason: Optional[str] = None):
-        self.choices = [_MockChoice(delta=delta, finish_reason=finish_reason)]
-
-
-class SampleChatProvider:
-    """Default provider: offline mock server, overridable for real API backends."""
-
-    def __init__(
-        self,
-        default_model: str = "mock-model",
-        default_messages: Optional[List[Dict[str, Any]]] = None,
-        settings: Optional[Dict[str, Any]] = None,
-    ):
-        """Initialise the mock chat provider.
+    @classmethod
+    async def factory(cls, *args, **kwargs) -> "_SampleChatProvider":
+        """Create and initialize a provider instance asynchronously.
 
         Args:
-            default_model: Model identifier to use when no model is
-                specified in :meth:`chat`.  Must be present in the
-                list returned by :meth:`get_model_list`.
-            default_messages: System-level messages prepended to every
-                conversation.  Defaults to a single system message.
-            settings: Provider-specific configuration dict.  Schema is
-                described by :meth:`get_settings_schema`.
+            *args: Positional arguments passed to the constructor.
+            **kwargs: Keyword arguments passed to the constructor.
+
+        Returns:
+            A fully initialized provider instance.
+        """
+        ins = cls(*args, **kwargs)
+        await ins.init()
+        return ins
+
+    def __init__(
+        self,
+        default_model: str = "",
+        default_model_list: Optional[List[str]] = None,
+        default_messages: Optional[List[Dict]] = None,
+        default_tools: Optional[List[Dict]] = None,
+        stream: bool = True,
+        settings: Optional[Dict[str, Any]] = None,
+    ):
+        """Initialize the provider with model, default messages, and settings.
+
+        Args:
+            default_model: Name of the default model; must not be empty.
+            default_messages: Initial conversation messages in OpenAI Chat
+                Completions format. Defaults to a single system message.
+            settings: Provider-specific configuration dict validated against
+                the schema returned by ``get_settings_schema``.
 
         Raises:
-            ValueError: If *default_model* is not in the model list
-                or if *settings* fails validation.
+            MitoCodeChatProviderConfigError: If the model name is empty or the
+                settings fail schema validation.
+            MitoCodeChatProviderModelError: If the default model is not listed
+                among available models.
         """
+        if settings is None:
+            settings = {}
         if default_messages is None:
             default_messages = [
                 {"role": "system", "content": "You are a helpful assistant."}
             ]
-        if settings is None:
-            settings = {}
+        if default_model == "":
+            raise MitoCodeChatProviderConfigError("default_model cannot be empty")
+        if not type(self).check_settings_schema(settings):
+            raise MitoCodeChatProviderConfigError("settings schema validation failed")
+        self.stream = stream
+        self.default_tools = default_tools
+        self.default_model = default_model
+        self.model_list = default_model_list
+        self.default_messages = default_messages
+        self.settings = settings
 
-        self.model_list = self.get_model_list()
-        if default_model not in self.model_list:
-            raise ValueError(f"Unknown model: {default_model}")
-        if not self.check_settings_schema(settings):
-            raise ValueError("Invalid settings schema")
+    @abstractmethod
+    async def get_model_list(self) -> List[str]:
+        """Return the list of model names supported by this provider."""
 
-        self.default_model: str = default_model
-        self.default_messages: List[Dict[str, Any]] = default_messages
-        self.settings: Dict[str, Any] = settings
-        self.init()
+    async def set_model_list(self, model_list: List[str]) -> None:
+        """Set the list of model names supported by this provider.
 
-    @staticmethod
-    def get_model_list() -> List[str]:
-        """Return the model identifiers accepted by this provider."""
-        return ["mock-model"]
+        Args:
+            model_list: List of model names to set.
+        """
+        self.model_list = model_list
 
-    def init(self) -> None:
-        """Hook invoked after settings validation; subclasses set up clients here."""
-        return None
+    @abstractmethod
+    async def init(self) -> None:
+        """Perform asynchronous initialization (e.g. connect to the API)."""
 
     @classmethod
-    def get_settings_schema(cls) -> Dict[str, Any]:
-        """Return the JSON Schema describing accepted settings."""
-        return {
-            "type": "object",
-            "properties": {
-                "mock_reply_prefix": {"type": "string"},
-                "chunk_size": {"type": "integer", "minimum": 1},
-            },
-            "additionalProperties": True,
-        }
+    @abstractmethod
+    def get_settings_schema(cls) -> Dict:
+        """Return the schema describing the expected structure of ``settings``."""
 
-    @staticmethod
-    def check_settings_schema(settings) -> bool:
-        """Validate that *settings* is a dict; any keys are allowed."""
-        return isinstance(settings, dict)
-
-    @staticmethod
-    def _merge_messages(
-        default_messages: List[Dict[str, Any]],
-        messages: Optional[List[Dict[str, Any]]],
-        user_messages: str,
-    ) -> List[Dict[str, Any]]:
-        """Merge default, additional, and user messages into a single list.
-
-        The resulting list preserves ordering: default messages first,
-        then any additional *messages*, and finally the user's text
-        appended as a ``"user"`` role entry.
+    @classmethod
+    @abstractmethod
+    def check_settings_schema(cls, settings) -> bool:
+        """Validate ``settings`` against the provider's schema.
 
         Args:
-            default_messages: Base conversation (typically system messages).
-            messages: Optional extra messages to append after defaults.
-            user_messages: The user's latest text input.
+            settings: The settings dict to validate.
 
         Returns:
-            A new list of message dicts ready to send to the LLM.
+            True if the settings conform to the schema, False otherwise.
         """
-        current_messages: List[Dict[str, Any]] = list(default_messages)
-        if messages:
-            current_messages.extend(messages)
-        if user_messages:
-            current_messages.append({"role": "user", "content": user_messages})
-        return current_messages
 
-    async def _wrap_stream(
-        self,
-        stream,
-        current_messages: List[Dict[str, Any]],
-        on_token,
-        on_stop,
-    ):
-        """Iterate over *stream* chunks and fire callbacks.
-
-        For each chunk that contains a text delta, *on_token* is called.
-        When the stream finishes (or errors), *on_stop* is called with
-        the final finish reason.
-
-        Args:
-            stream: An async iterable of chunk objects (e.g. OpenAI
-                streaming response chunks).
-            current_messages: The full message history; passed through
-                to callbacks for context.
-            on_token: Callable ``(content: str, messages: List[Dict]) -> None``
-                invoked for every text delta.
-            on_stop: Callable ``(finish_reason: str, messages: List[Dict]) -> None``
-                invoked when the stream ends or on error.
-
-        Yields:
-            Each chunk from the underlying *stream*, allowing callers
-            to consume the raw data as well.
-        """
-        finish_reason = "unknown"
-        try:
-            async for chunk in stream:
-                if getattr(chunk, "choices", None):
-                    choice = chunk.choices[0]
-                    delta = getattr(choice, "delta", None)
-                    if delta and getattr(delta, "content", None):
-                        on_token(delta.content, current_messages)
-                    if getattr(choice, "finish_reason", None):
-                        finish_reason = choice.finish_reason
-                yield chunk
-            on_stop(finish_reason, current_messages)
-        except Exception:
-            on_stop("network-error", current_messages)
-            raise
-
+    @abstractmethod
     async def chat(
         self,
-        user_messages: str = "",
         model: str = "",
-        tools: Optional[list] = None,
-        messages: Optional[List[Dict[str, Any]]] = None,
-        on_start=lambda _, __: None,
-        on_token=lambda _, __: None,
-        tool_call=lambda _, __: None,
-        on_tool_call=lambda _, __: None,
-        on_stop=lambda _, __: None,
-    ):
-        """Stream a mock reply that echoes the latest user message.
+        tools: Optional[List[Dict]] = None,
+        messages: Optional[List[Dict]] = None,
+        stream: bool = True,
+    ) -> AsyncGenerator | Dict:
+        """Send messages to the model and return the completion result.
 
-        Merges ``default_messages`` with *messages* and *user_messages*,
-        then yields ``_MockChunk`` instances shaped like OpenAI stream
-        chunks: text split into fixed-size deltas followed by a final
-        chunk with finish reason ``stop``. Tool arguments are accepted for
-        interface compatibility but ignored.
+        Args:
+            model: Model name to use; falls back to ``default_model`` if empty.
+            tools: Tool definitions in OpenAI Chat Completions API format.
+            messages: Full conversation history in OpenAI Chat Completions
+                API format.
+            stream: Whether to return a streaming response (True) or a single
+                completion (False).
+
+        Returns:
+            The completion response as a dict or an AsyncGenerator in OpenAI Chat Completions format.
         """
-        # TODO: Add tool call mock
-        del tools, tool_call, on_tool_call
 
-        current_model = model or self.default_model
-        if current_model not in self.model_list:
-            raise ValueError(f"Unknown model: {current_model}")
 
-        current_messages = self._merge_messages(
-            self.default_messages, messages, user_messages
-        )
-        on_start(user_messages, current_messages)
-
-        last_user = ""
-        for item in reversed(current_messages):
-            if item.get("role") == "user":
-                last_user = str(item.get("content", ""))
-                break
-
-        reply_prefix = str(self.settings.get("mock_reply_prefix", "[mock]"))
-        full_text = f"{reply_prefix} {last_user}".strip()
-        chunk_size = int(self.settings.get("chunk_size", 16))
-        if chunk_size <= 0:
-            chunk_size = 16
-
-        async def _mock_stream():
-            for i in range(0, len(full_text), chunk_size):
-                delta_text = full_text[i : i + chunk_size]
-                on_token(delta_text, current_messages)
-                yield _MockChunk(
-                    delta=_MockDelta(content=delta_text), finish_reason=None
-                )
-                await asyncio.sleep(0)
-            yield _MockChunk(delta=_MockDelta(content=None), finish_reason="stop")
-
-        async def _result_stream():
-            async for chunk in _mock_stream():
-                yield chunk
-            on_stop("stop", current_messages)
-
-        return _result_stream()
+SampleChatProvider = _SampleChatProvider

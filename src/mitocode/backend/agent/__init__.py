@@ -16,11 +16,9 @@ from .agent_session import (
     _ToolCallMessageBlock,
     _ToolResultMessageBlock,
 )
-from .legacy_agent import LegacyAgent
 from .session_factory import SessionFactory
 
 __all__ = [
-    "LegacyAgent",
     "AgentNode",
     "AgentOrchestrator",
     "AgentRuntime",

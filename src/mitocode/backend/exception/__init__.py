@@ -12,6 +12,10 @@ from .mitocode_exception import (
     MitoCodeAppTooOldError,
     MitoCodeToolError,
     MitoCodeToolDefinitionError,
+    MitoCodeChatProviderError,
+    MitoCodeChatProviderConfigError,
+    MitoCodeChatProviderModelError,
+    MitoCodeChatProviderInitError,
 )
 
 __all__ = [
@@ -26,4 +30,8 @@ __all__ = [
     "MitoCodeAppTooOldError",
     "MitoCodeToolError",
     "MitoCodeToolDefinitionError",
+    "MitoCodeChatProviderError",
+    "MitoCodeChatProviderConfigError",
+    "MitoCodeChatProviderModelError",
+    "MitoCodeChatProviderInitError",
 ]

@@ -12,6 +12,7 @@ from mitocode.backend.agent.agent_session import AgentSession
 from mitocode.backend.agent.agent_orchestrator import AgentOrchestrator
 from mitocode.backend.agent.agent_state import AgentState
 from mitocode.backend.bridge.event_adapter import EventBridge
+from mitocode.backend.chat_provider.sample_chat_provider import _SampleChatProvider
 from mitocode.backend.tool.tool_manager import ToolManager
 
 
@@ -23,7 +24,10 @@ class FakeChunk:
         self.choices[0].finish_reason = finish_reason
 
 
-class EchoProvider:
+class EchoProvider(_SampleChatProvider):
+    def __init__(self):
+        self.stream = True
+
     @staticmethod
     def get_model_list():
         return ["echo-model"]

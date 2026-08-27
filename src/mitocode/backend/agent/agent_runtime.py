@@ -29,16 +29,6 @@ class AgentRuntime:
         return result
 
     @staticmethod
-    async def _invoke_on_end(on_end, session, messages):
-        if inspect.iscoroutinefunction(on_end):
-            await on_end(session, messages)
-            return
-
-        ret = await asyncio.to_thread(on_end, session, messages)
-        if ret and asyncio.iscoroutine(ret):
-            await ret
-
-    @staticmethod
     async def run(session: AgentSession) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Main interaction loop for *session*: streams responses, handles tool
@@ -233,10 +223,6 @@ class AgentRuntime:
 
             # Standard Stops
             if stream_finished_reason in ["stop", "length", "content_filter"]:
-                if session.on_end:
-                    await AgentRuntime._invoke_on_end(
-                        session.on_end, session, session.messages
-                    )
 
                 yield {
                     "event": "system.finished.standard",
