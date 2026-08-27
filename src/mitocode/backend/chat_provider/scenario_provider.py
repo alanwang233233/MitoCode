@@ -1,5 +1,3 @@
-"""旧实现，与现有ABC不符，已弃用，请勿参考！"""
-
 """Scripted mock provider replaying a fixed multi-turn tool-call demo.
 
 Used for offline demos and TUI development: each ``chat`` call plays back
@@ -9,7 +7,10 @@ the next pre-recorded turn of a bubble-sort coding session.
 import asyncio
 import json
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, AsyncGenerator
+
+from mitocode.backend.chat_provider.sample_chat_provider import _SampleChatProvider
+
 
 
 def _make_chunk(
@@ -139,52 +140,84 @@ def _chunk_tool_call(
     return chunks
 
 
-class ScenarioProvider:
+class ScenarioProvider(_SampleChatProvider):
     """Mock provider that plays back a multi-turn tool-call scenario.
 
     Each call to :meth:`chat` advances an internal turn counter and returns
-    the next pre-recorded stream: markdown text, bash, write_file, read_file
+    the next pre-recorded stream: markdown text, bash / write_file / read_file
     tool calls with bubble sort code.
     """
 
-    def __init__(self, delay: float = 0.03):
+    def __init__(
+        self,
+        default_model: str = "scenario-model",
+        default_model_list: Optional[List[str]] = None,
+        default_messages: Optional[List[Dict]] = None,
+        default_tools: Optional[List[Dict]] = None,
+        stream: bool = True,
+        settings: Optional[Dict[str, Any]] = None,
+        delay: float = 0.03,
+    ):
         """Initialize the provider with an inter-chunk streaming delay.
 
         Args:
             delay: Seconds to sleep between yielded chunks (default 0.03).
         """
+        if default_model_list is None:
+            default_model_list = ["scenario-model"]
+        super().__init__(
+            default_model=default_model,
+            default_model_list=default_model_list,
+            default_messages=default_messages,
+            default_tools=default_tools,
+            stream=stream,
+            settings=settings,
+        )
         self.turn = 0
         self._delay = delay
 
-    @staticmethod
-    def get_model_list():
-        """Return the model identifiers accepted by this provider."""
-        return ["scenario-model"]
+    @classmethod
+    async def factory(cls, *args, **kwargs) -> "ScenarioProvider":
+        """Create and initialize a provider instance asynchronously."""
+        ins = cls(*args, **kwargs)
+        await ins.init()
+        return ins
 
     @classmethod
-    def get_settings_schema(cls):
+    def get_settings_schema(cls) -> Dict[str, Any]:
         """Return the JSON Schema describing accepted settings."""
         return {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "delay": {"type": "number", "minimum": 0, "default": 0.03},
+            },
             "additionalProperties": True,
         }
 
-    @staticmethod
-    def check_settings_schema(settings):
-        """Validate that *settings* is a dict; any keys are allowed."""
-        return isinstance(settings, dict)
+    @classmethod
+    def check_settings_schema(cls, settings: Any) -> bool:
+        """Validate that *settings* is a dict with optional delay."""
+        if not isinstance(settings, dict):
+            return False
+        delay = settings.get("delay", 0.03)
+        return isinstance(delay, (int, float)) and delay >= 0
 
-    def init(self):
+    async def get_model_list(self) -> List[str]:
+        """Return the model identifiers accepted by this provider."""
+        return ["scenario-model"]
+
+    async def init(self) -> None:
         """No-op initialization hook kept for provider interface parity."""
-        pass
+        delay = self.settings.get("delay", 0.03) if self.settings else 0.03
+        self._delay = delay
 
     async def chat(
         self,
-        tools: Optional[list] = None,
-        messages: Optional[List[Dict[str, Any]]] = None,
-        **kwargs,
-    ):
+        model: str = "",
+        tools: Optional[List[Dict]] = None,
+        messages: Optional[List[Dict]] = None,
+        stream: bool = True,
+    ) -> AsyncGenerator | Dict:
         """Return an async stream playing back the next scripted turn.
 
         Each invocation advances the internal turn counter: turns 0-2 emit
@@ -231,4 +264,23 @@ class ScenarioProvider:
                 yield c
                 await asyncio.sleep(self._delay)
 
-        return _stream()
+        if stream:
+            return _stream()
+
+        full_content = ""
+        for c in chunks:
+            if c.choices[0].delta.content:
+                full_content += c.choices[0].delta.content
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": full_content,
+                    },
+                    "finish_reason": "stop",
+                    "index": 0,
+                }
+            ],
+            "model": model or self.default_model,
+        }
