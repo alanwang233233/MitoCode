@@ -18,6 +18,11 @@
 - [ ] 实现多Agent协作编排 (LLM通过工具调用创建/分派子Agent)
 - [ ] TUI: 添加Toast通知组件 (错误/状态变化提示)
 - [ ] TUI: AgentView中添加错误块渲染 (system.error事件)
+- [ ] AgentTemplate 模版功能
+- [ ] AgentHook钩子
+- [ ] 插件系统
+- [ ] 完善异常处理
+- [ ] 还要干啥来着？算了想到了再说
 
 ## 中优先级
 
