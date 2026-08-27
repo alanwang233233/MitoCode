@@ -107,7 +107,7 @@ READ_FILE_ARGS = json.dumps({"file_path": "bubble_sort.py"})
 
 
 def _chunk_text(text: str, size: int = 4) -> List[Any]:
-    """Split markdown text into streaming chunks."""
+    """Split Markdown text into streaming chunks."""
     chunks = []
     for i in range(0, len(text), size):
         chunks.append(_make_chunk(content=text[i : i + size]))
@@ -148,7 +148,7 @@ class ScenarioProvider:
     """
 
     def __init__(self, delay: float = 0.03):
-        """Initialise the provider with an inter-chunk streaming delay.
+        """Initialize the provider with an inter-chunk streaming delay.
 
         Args:
             delay: Seconds to sleep between yielded chunks (default 0.03).
@@ -188,7 +188,7 @@ class ScenarioProvider:
         """Return an async stream playing back the next scripted turn.
 
         Each invocation advances the internal turn counter: turns 0-2 emit
-        markdown text followed by bash / write_file / read_file tool calls;
+        Markdown text followed by bash / write_file / read_file tool calls;
         later turns emit the final summary with finish reason ``stop``.
         Chunks are yielded with the configured inter-chunk delay.
         """
