@@ -22,17 +22,17 @@
 ## 中优先级
 
 - [ ] 补充migration.py，workspace.py的单元测试
-- [ ] 补充orchestrator.py，managed_agent.py，event_adapter.py的单元测试
+- [x] 补充orchestrator.py，managed_agent.py，event_adapter.py的单元测试
 - [ ] 添加日志功能 (loguru已依赖但未全局接入)
 - [ ] 完成快照功能 (snapshot.py为TODO存根)
-- [ ] 将所有raise ...改为raise ... from e，便于调试
-- [ ] 清理废弃代码 (backend/__main__.py已损坏，experiments/中多数过时)
+- [x] 将所有raise ...改为raise ... from e，便于调试
+- [x] 清理废弃代码 (backend/__main__.py已损坏，experiments/中多数过时)
 - [ ] 清理过期依赖 (移除http/SSE相关的包: httpx, httpx-sse, sse-starlette, fastapi, uvicorn)
 
 ## 低优先级
 
-- [ ] 统一补齐所有模块、类、函数docstring
+- [x] 统一补齐所有模块、类、函数docstring
 - [ ] TUI: 快速创建Agent时支持自定义provider配置
 - [ ] TUI: 支持Agent重命名 (双击树节点编辑)
 - [ ] TUI: 工具调用面板支持diff模式 (finish_tool_call时传入原始内容)
-- [ ] 将执行black，gitleaks，pip-audit，pytest-cov，pip-licenses，mutmut添加到CI，单独拆分出codeql（因为执行太慢，改成并行运行加快速度）
+- [x] 将执行black，gitleaks，pip-audit，pytest-cov，pip-licenses，mutmut添加到CI，单独拆分出codeql（因为执行太慢，改成并行运行加快速度）
