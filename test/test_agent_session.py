@@ -22,6 +22,7 @@ from mitocode.backend.agent.agent_session import (
     _ToolResultMessageBlock,
 )
 from mitocode.backend.agent.agent_state import AgentState
+from mitocode.backend.chat_provider.sample_chat_provider import _SampleChatProvider
 from mitocode.backend.tool.tool_manager import ToolManager
 
 TOOL_NAME_WEATHER = "get_weather"
@@ -99,7 +100,7 @@ def _joined_logger_message(call_args) -> str:
 @pytest.fixture
 def mock_provider() -> mock.MagicMock:
     """提供确定性 Mock LLM provider，隔离真实聊天后端."""
-    return mock.MagicMock(name="mock_provider")
+    return mock.MagicMock(name="mock_provider", spec=_SampleChatProvider)
 
 
 @pytest.fixture
@@ -397,7 +398,6 @@ class TestAgentSessionInitDefaults:
         assert session.tools_map == {}, "默认 tools_map 应为空字典"
         assert session.tool_schemas == [], "默认 tool_schemas 应为空列表"
         assert session.tool_manager is None, "默认无工具管理器"
-        assert session.on_end is None, "默认 on_end 回调应为 None"
         assert session.agent_id == -1, "默认 agent_id 应为 -1"
         assert session.name == "", "默认 name 应为空串"
         assert session.description == "", "默认 description 应为空串"
@@ -409,21 +409,18 @@ class TestAgentSessionInitDefaults:
     def test_init_custom_settings_stored_on_attributes(self, make_session):
         """传入完整自定义设置 → 各属性逐一按入参保存."""
         # Arrange
-        custom_on_end = lambda: None  # noqa: E731
         # Act
         made = make_session(
             agent_id=5,
             name="Worker",
             description="干活的代理",
             parent_id=3,
-            on_end=custom_on_end,
         )
         # Assert
         assert made.agent_id == 5, "agent_id 应按入参保存"
         assert made.name == "Worker", "name 应按入参保存"
         assert made.description == "干活的代理", "description 应按入参保存"
         assert made.parent_id == 3, "parent_id 应按入参保存"
-        assert made.on_end is custom_on_end, "on_end 应按入参原样保存"
 
 
 # ──────────────────────────────────────────────

@@ -143,6 +143,8 @@ class AgentSession:
 
         if not provider:
             raise ValueError("Provider is required.")
+        if not isinstance(provider, _SampleChatProvider):
+            raise TypeError("Provider must be an instance of _SampleChatProvider.")
         if tool_manager is not None and not isinstance(tool_manager, ToolManager):
             raise TypeError("tool_manager must be an instance of ToolManager.")
 

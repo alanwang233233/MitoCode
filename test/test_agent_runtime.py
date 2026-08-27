@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mitocode.backend.agent.agent_runtime import AgentRuntime
 from mitocode.backend.agent.agent_session import AgentSession
+from mitocode.backend.chat_provider.sample_chat_provider import _SampleChatProvider
 
 # ──────────────────────────────────────────────
 # 常量
@@ -102,7 +103,7 @@ class _Chunk:
             ]
 
 
-class _ScriptedProvider:
+class _ScriptedProvider(_SampleChatProvider):
     """按脚本逐轮回放 chunk 列表，并记录每次 chat 调用的 tools/messages 入参."""
 
     def __init__(self, rounds: List[List[_Chunk]]):
@@ -119,8 +120,22 @@ class _ScriptedProvider:
 
         return _stream()
 
+    async def get_model_list(self):
+        return []
 
-class _CancelMidStreamProvider:
+    async def init(self):
+        pass
+
+    @classmethod
+    def get_settings_schema(cls):
+        return {}
+
+    @classmethod
+    def check_settings_schema(cls, settings):
+        return True
+
+
+class _CancelMidStreamProvider(_SampleChatProvider):
     """首个 chunk 输出后立即触发 session.cancel() 的受控 provider."""
 
     def __init__(self):
@@ -138,6 +153,20 @@ class _CancelMidStreamProvider:
             yield _Chunk(finish_reason=REASON_STOP)
 
         return _stream()
+
+    async def get_model_list(self):
+        return []
+
+    async def init(self):
+        pass
+
+    @classmethod
+    def get_settings_schema(cls):
+        return {}
+
+    @classmethod
+    def check_settings_schema(cls, settings):
+        return True
 
 
 def _counting_tool(exc: Optional[Exception] = None) -> Tuple[Callable, List[dict]]:
@@ -298,7 +327,7 @@ class TestRunProviderInteraction:
     async def test_run_provider_chat_exception_propagates_to_caller(self, make_session):
         """provider.chat 抛异常 → 异常向上传播给 run() 的调用方."""
         # Arrange
-        provider = mock.MagicMock()
+        provider = mock.MagicMock(spec=_SampleChatProvider)
         provider.chat = mock.AsyncMock(side_effect=RuntimeError("llm down"))
         session = make_session(provider)
 
