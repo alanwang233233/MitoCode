@@ -68,7 +68,9 @@ def test_agent_session_can_use_tool_manager():
     def ping():
         return "pong"
 
-    session = AgentSession(provider=mock.MagicMock(spec=_SampleChatProvider), tool_manager=manager)
+    session = AgentSession(
+        provider=mock.MagicMock(spec=_SampleChatProvider), tool_manager=manager
+    )
     assert "ping" in session.tools_map
     assert session.tools_map["ping"]() == "pong"
     assert session.tool_schemas[0]["function"]["name"] == "ping"
@@ -83,7 +85,9 @@ def test_session_factory_forwards_tool_manager():
     def noop():
         return None
 
-    factory = SessionFactory(provider=mock.MagicMock(spec=_SampleChatProvider), tool_manager=manager)
+    factory = SessionFactory(
+        provider=mock.MagicMock(spec=_SampleChatProvider), tool_manager=manager
+    )
     session = factory.create_session()
     assert "noop" in session.tools_map
     assert session.tool_schemas[0]["function"]["name"] == "noop"
