@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from typing import Any, Awaitable, Coroutine, TypeVar, cast
 
 from mitocode import APP_VERSION
 from mitocode.backend.agent.agent_orchestrator import AgentOrchestrator
@@ -17,15 +18,21 @@ from mitocode.backend.workspace.migration import BasicMigration
 from mitocode.backend.workspace.workspace import Workspace
 from mitocode.tui.ui_main import VibeFrontend
 
+T = TypeVar("T")
+
+
+def _resolve_awaitable(value: T | Awaitable[T]) -> T:
+    if asyncio.iscoroutine(value):
+        return asyncio.run(cast(Coroutine[Any, Any, T], value))
+    return cast(T, value)
+
 
 def _ensure_workspace(path: Path) -> Workspace:
     try:
         workspace = Workspace.init_from_path(path)
     except Exception:
         workspace = Workspace.new_workspace(path, path.name, override=False)
-    if asyncio.iscoroutine(workspace):
-        return asyncio.run(workspace)
-    return workspace
+    return _resolve_awaitable(workspace)
 
 
 def _register_tools(tool_manager: ToolManager, workspace: Workspace) -> None:
@@ -44,7 +51,9 @@ def _register_tools(tool_manager: ToolManager, workspace: Workspace) -> None:
         stdout, stderr = await process.communicate()
         output = stdout.decode("utf-8", errors="replace")
         err_output = stderr.decode("utf-8", errors="replace")
-        combined = output if process.returncode == 0 else f"{output}{err_output}".strip()
+        combined = (
+            output if process.returncode == 0 else f"{output}{err_output}".strip()
+        )
         if process.returncode != 0:
             return f"[exit_code={process.returncode}]\n{combined}".strip()
         return combined
@@ -99,7 +108,9 @@ def run_tui(args: argparse.Namespace) -> int:
     _register_tools(tool_manager, workspace)
 
     provider = _build_provider(args)
-    orchestrator = AgentOrchestrator(tool_manager=tool_manager, default_provider=provider)
+    orchestrator = AgentOrchestrator(
+        tool_manager=tool_manager, default_provider=provider
+    )
     asyncio.run(
         orchestrator.create_agent(
             name=args.agent_name,
@@ -113,70 +124,56 @@ def run_tui(args: argparse.Namespace) -> int:
 
 
 def _workspace_init(args: argparse.Namespace) -> int:
-    ws = Workspace.new_workspace(
-        workspace_path=Path(args.path).resolve(),
-        name=args.name,
-        description=args.description,
-        override=args.override,
+    ws = _resolve_awaitable(
+        Workspace.new_workspace(
+            workspace_path=Path(args.path).resolve(),
+            name=args.name,
+            description=args.description,
+            override=args.override,
+        )
     )
-    if asyncio.iscoroutine(ws):
-        ws = asyncio.run(ws)
     print(f"Workspace created: {ws.path}")
     return 0
 
 
 def _workspace_info(args: argparse.Namespace) -> int:
-    ws = Workspace.init_from_path(Path(args.path).resolve())
-    if asyncio.iscoroutine(ws):
-        ws = asyncio.run(ws)
+    ws = _resolve_awaitable(Workspace.init_from_path(Path(args.path).resolve()))
     print(json.dumps({"path": str(ws.path), **ws.config}, ensure_ascii=False, indent=2))
     return 0
 
 
 def _workspace_validate(args: argparse.Namespace) -> int:
-    ws = Workspace.init_from_path(Path(args.path).resolve())
-    if asyncio.iscoroutine(ws):
-        ws = asyncio.run(ws)
-    valid = ws.validate()
-    if asyncio.iscoroutine(valid):
-        valid = asyncio.run(valid)
+    ws = _resolve_awaitable(Workspace.init_from_path(Path(args.path).resolve()))
+    valid = _resolve_awaitable(ws.validate())
     print("valid" if valid else "invalid")
     return 0 if valid else 1
 
 
 def _workspace_reload(args: argparse.Namespace) -> int:
-    ws = Workspace.init_from_path(Path(args.path).resolve())
-    if asyncio.iscoroutine(ws):
-        ws = asyncio.run(ws)
-    ok = ws.reload()
-    if asyncio.iscoroutine(ok):
-        ok = asyncio.run(ok)
+    ws = _resolve_awaitable(Workspace.init_from_path(Path(args.path).resolve()))
+    ok = _resolve_awaitable(ws.reload())
     print("reloaded" if ok else "reload failed")
     return 0 if ok else 1
 
 
 def _workspace_outdated(args: argparse.Namespace) -> int:
-    ws = Workspace.init_from_path(Path(args.path).resolve())
-    if asyncio.iscoroutine(ws):
-        ws = asyncio.run(ws)
-    outdated = ws.is_outdated()
-    if asyncio.iscoroutine(outdated):
-        outdated = asyncio.run(outdated)
+    ws = _resolve_awaitable(Workspace.init_from_path(Path(args.path).resolve()))
+    outdated = _resolve_awaitable(ws.is_outdated())
     print("true" if outdated else "false")
     return 0
 
 
 def _workspace_migrate(args: argparse.Namespace) -> int:
-    result = BasicMigration.migrate(Path(args.path).resolve())
-    if asyncio.iscoroutine(result):
-        result = asyncio.run(result)
+    result = _resolve_awaitable(BasicMigration.migrate(Path(args.path).resolve()))
     print("migrated" if result else "migration failed")
     return 0 if result else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MitoCode CLI")
-    parser.add_argument("--version", action="version", version=f"mitocode {APP_VERSION}")
+    parser.add_argument(
+        "--version", action="version", version=f"mitocode {APP_VERSION}"
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -199,7 +196,9 @@ def build_parser() -> argparse.ArgumentParser:
     ws_init.add_argument("--path", default=".")
     ws_init.add_argument("--name", default="workspace")
     ws_init.add_argument("--description", default="")
-    ws_init.add_argument("--override", action=argparse.BooleanOptionalAction, default=True)
+    ws_init.add_argument(
+        "--override", action=argparse.BooleanOptionalAction, default=True
+    )
     ws_init.set_defaults(func=_workspace_init)
 
     ws_info = ws_subparsers.add_parser("info", help="Show workspace configuration")
@@ -210,7 +209,9 @@ def build_parser() -> argparse.ArgumentParser:
     ws_validate.add_argument("--path", default=".")
     ws_validate.set_defaults(func=_workspace_validate)
 
-    ws_reload = ws_subparsers.add_parser("reload", help="Reload workspace configuration")
+    ws_reload = ws_subparsers.add_parser(
+        "reload", help="Reload workspace configuration"
+    )
     ws_reload.add_argument("--path", default=".")
     ws_reload.set_defaults(func=_workspace_reload)
 

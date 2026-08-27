@@ -22,6 +22,7 @@ def test_workspace_init_and_info_commands(tmp_path, capsys):
     )
     assert exit_code == 0
     assert (tmp_path / ".mitocode" / "config.json").exists()
+    capsys.readouterr()
 
     exit_code = cli.main(["workspace", "info", "--path", str(tmp_path)])
     assert exit_code == 0
@@ -55,7 +56,8 @@ def test_workspace_validate_and_outdated_commands(tmp_path, capsys):
 
 def test_workspace_migrate_command(tmp_path, capsys):
     assert (
-        cli.main(["workspace", "init", "--path", str(tmp_path), "--name", "migrate"]) == 0
+        cli.main(["workspace", "init", "--path", str(tmp_path), "--name", "migrate"])
+        == 0
     )
     assert cli.main(["workspace", "migrate", "--path", str(tmp_path)]) == 0
     assert "migrated" in capsys.readouterr().out
