@@ -2,9 +2,13 @@
 
 import argparse
 import asyncio
+from pyexpat.errors import messages
+
+from httpx import stream
 
 from mitocode.backend.agent.agent_orchestrator import AgentOrchestrator
 from mitocode.backend.chat_provider.scenario_provider import ScenarioProvider
+from mitocode.backend.chat_provider.chat_provider_openai import ChatProviderOpenAI
 from mitocode.backend.tool.tool_manager import ToolManager
 from mitocode.tui.ui_main import VibeFrontend
 
@@ -65,7 +69,28 @@ def main():
     tool_manager = ToolManager()
     _register_tools(tool_manager)
 
-    provider = ScenarioProvider(delay=args.speed)
+    provider = asyncio.run(ChatProviderOpenAI.factory(
+        default_model= "nvidia/nemotron-3.5-lightning:free",
+        default_model_list= None,
+        default_messages= None,
+        default_tools= None,
+        stream= True,
+        settings={
+            "api_key": "sk-别看了这次我不会再把key提交到仓库了！",
+            "base_url": "https://openrouter.ai/api/v1",
+            "timeout": 60,
+        })
+    )
+
+    # print(asyncio.run(provider.chat(
+    #     model ="nvidia/nemotron-3.5-lightning:free",
+    #     tools =None,
+    #     messages = [
+    #         {"role": "system", "content": "You are a helpful assistant."},
+    #         {"role": "user", "content": "Hello!"}
+    #     ],
+    #     stream = False
+    # )))
 
     orchestrator = AgentOrchestrator(
         tool_manager=tool_manager, default_provider=provider
