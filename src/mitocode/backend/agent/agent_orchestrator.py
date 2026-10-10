@@ -264,18 +264,8 @@ class AgentOrchestrator:
         except asyncio.CancelledError:
             session.state = AgentState.CANCELLED
             raise
-        except Exception as e:  # pylint: disable=broad-exception-caught
+        except Exception:  # pylint: disable=broad-exception-caught
             session.state = AgentState.ERROR
-            await self.event_queue.put(
-                (
-                    agent_id,
-                    {
-                        "type": "error",
-                        "agent_id": agent_id,
-                        "message": str(e) or "Unknown runtime error",
-                    },
-                )
-            )
         finally:
             if self._tasks.get(agent_id) is asyncio.current_task():
                 self._tasks[agent_id] = None

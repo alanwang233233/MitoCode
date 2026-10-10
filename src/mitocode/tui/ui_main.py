@@ -360,47 +360,6 @@ class ReasoningTextPanel(Static):
         )
 
 
-class WelcomePanel(Static):
-    """Startup panel shown before first message is sent."""
-
-    panel_type = "welcome"
-
-    def render(self):
-        return Panel(
-            RichMarkdown(
-                "## 欢迎使用 MitoCode TUI\n\n"
-                "- 在左侧选择 Agent\n"
-                "- 在下方输入框发送消息\n"
-                "- 使用 `Quick create` 快速创建子 Agent\n"
-                "- `F12` 打开调试日志"
-            ),
-            title="[bold cyan]Welcome[/bold cyan]",
-            border_style="",
-            box=box.SIMPLE,
-            padding=(1, 1),
-        )
-
-
-class ErrorPanel(Static):
-    """Error panel used for runtime/system errors."""
-
-    panel_type = "error"
-
-    def __init__(self, text: str):
-        super().__init__()
-        self.error_text = text
-
-    def render(self):
-        return Panel(
-            self.error_text,
-            title="[bold red]Error[/bold red]",
-            border_style="red",
-            box=box.SIMPLE,
-            style="on #3a1f1f",
-            padding=(0, 1),
-        )
-
-
 class AgentView(VerticalScroll):
     """Scrollable per-agent chat view assembling message and tool panels.
 
@@ -415,19 +374,11 @@ class AgentView(VerticalScroll):
         self.border_title = f"Agent {agent_id}"
         self.styles.border = ("solid", "cyan")
         self._streaming_panel: Optional[Static] = None
-        self._welcome_panel: Optional[WelcomePanel] = None
 
-    async def on_mount(self):
+    def on_mount(self):
         """Enable auto vertical scrolling with a stable scrollbar gutter."""
         self.styles.overflow_y = "auto"
         self.styles.scrollbar_gutter = "stable"
-        self._welcome_panel = WelcomePanel()
-        await self.mount(self._welcome_panel)
-
-    async def _hide_welcome(self):
-        if self._welcome_panel is not None:
-            await self._welcome_panel.remove()
-            self._welcome_panel = None
 
     def set_active(self, active: bool):
         """Highlight (or reset) the border indicating the focused agent."""
@@ -454,7 +405,6 @@ class AgentView(VerticalScroll):
 
     async def append_user_message(self, text: str) -> None:
         """Mount a new user-message panel and scroll to it."""
-        await self._hide_welcome()
         self._streaming_panel = None
         panel = UserMessagePanel(text)
         await self.mount(panel)
@@ -467,7 +417,6 @@ class AgentView(VerticalScroll):
         plain text, otherwise appends in place; keeps the view pinned to
         the bottom only if the user was already there.
         """
-        await self._hide_welcome()
         if self._last_panel_type != "plain_text":
             self._streaming_panel = None
             panel = PlainTextPanel()
@@ -481,7 +430,6 @@ class AgentView(VerticalScroll):
 
     async def append_reasoning(self, delta: str) -> None:
         """Stream reasoning deltas into a shared reasoning-text panel."""
-        await self._hide_welcome()
         if self._last_panel_type != "reasoning_text":
             self._streaming_panel = None
             panel = ReasoningTextPanel()
@@ -502,7 +450,6 @@ class AgentView(VerticalScroll):
         guessed from the target file extension; other actions get a compact
         one-line preview panel.
         """
-        await self._hide_welcome()
         self._streaming_panel = None
 
         if action in ("file.write",):
@@ -549,14 +496,6 @@ class AgentView(VerticalScroll):
                 panel.content = result
                 panel.end(success=success)
         self._streaming_panel = None
-        self._scroll_to_bottom()
-
-    async def append_error(self, message: str) -> None:
-        """Mount a runtime error panel."""
-        await self._hide_welcome()
-        self._streaming_panel = None
-        panel = ErrorPanel(message)
-        await self.mount(panel)
         self._scroll_to_bottom()
 
 
@@ -935,8 +874,6 @@ class VibeFrontend(App):
             result = event.get("result", "")
             success = event.get("success", False)
             await agent_view.finish_tool_call(result, success)
-        elif event_type == "error":
-            await agent_view.append_error(event.get("message", "Unknown error"))
 
     # ------------------------------------------------------------------
     # Quick create & chat input

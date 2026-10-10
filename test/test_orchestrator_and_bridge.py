@@ -54,29 +54,6 @@ class EchoProvider(_SampleChatProvider):
         return _stream()
 
 
-class FailingProvider(_SampleChatProvider):
-    def __init__(self):
-        self.stream = True
-
-    @staticmethod
-    def get_model_list():
-        return ["failing-model"]
-
-    @classmethod
-    def get_settings_schema(cls):
-        return {"type": "object", "properties": {}, "additionalProperties": True}
-
-    @staticmethod
-    def check_settings_schema(settings):
-        return True
-
-    def init(self):
-        pass
-
-    async def chat(self, tools=None, messages=None, **kwargs):
-        raise RuntimeError("provider exploded")
-
-
 @pytest.mark.asyncio
 async def test_orchestrator_create_and_send_message():
     orchestrator = AgentOrchestrator(default_provider=EchoProvider())
@@ -188,24 +165,6 @@ async def test_create_agent_alias_matches_create_session_id():
     session = orchestrator.get_session(agent_id)
     assert session is not None
     assert session.name == "Alias"
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_emits_error_event_on_runtime_failure():
-    orchestrator = AgentOrchestrator(default_provider=FailingProvider())
-    agent_id = await orchestrator.create_agent(name="Broken")
-    task = await orchestrator.send_message(agent_id, "hello")
-    assert task is not None
-    await task
-
-    got_error_event = False
-    while not orchestrator.event_queue.empty():
-        aid, event = await orchestrator.event_queue.get()
-        if aid == agent_id and event.get("type") == "error":
-            got_error_event = True
-            assert "provider exploded" in event.get("message", "")
-            break
-    assert got_error_event is True
 
 
 def test_event_bridge_token():
