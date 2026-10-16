@@ -13,6 +13,33 @@ Two properties are load-bearing beyond "it raises on bad input":
 * no exception message ever echoes a value from a secret-bearing field
   (``url``, ``args``, ``env``, ``headers``), because those messages end up in
   the TUI error pane and in logs.
+
+Known limitations, deliberately unpinned
+----------------------------------------
+
+The credential guarantee above is scoped to *exception messages raised while
+validating*.  These neighbouring behaviours are accepted by the module and are
+deliberately not pinned here, because pinning them would lock in a decision
+that belongs to the module's owner, not to this suite:
+
+* **Shallow immutability.**  ``frozen=True`` blocks field *assignment* only.
+  ``config.args``, ``config.env`` and ``config.headers`` remain mutable in
+  place, and ``build_transport`` hands those live containers to fastmcp by
+  reference — mutating them afterwards changes what a later connection uses.
+* **The auto-generated ``repr`` is not covered by the guarantee.**  The
+  dataclass ``repr`` prints every field, ``url`` included, so ``log(config)``
+  or a traceback that formats the config can still echo an embedded URL
+  password.
+* **``float("inf")`` is accepted as a timeout.**  ``inf > 0`` holds, so an
+  infinite timeout parses and then hangs the caller forever.
+* **``"http://"`` with no host is accepted.**  The scheme check is a
+  ``startswith`` prefix test, not a URL parse, so a hostless URL reaches
+  fastmcp and fails later at connect time rather than at config time.
+* **A credential placed in an entry *key* is echoed.**
+  ``_read_str_mapping`` names the offending key on purpose, and
+  ``parse``/``parse_config`` list entry keys via ``sorted(map(str, ...))``, so
+  ``env: {"sk-live-XXXX": 8080}`` puts the token in the message.  Only the
+  *values* are guaranteed silent; that is the documented contract.
 """
 
 import os
@@ -470,6 +497,23 @@ def test_parse_rejects_a_nan_timeout(field):
         McpServerConfig.parse("files", {"command": "npx", field: float("nan")})
 
 
+@pytest.mark.parametrize("field", ["timeout", "connect_timeout"])
+@pytest.mark.parametrize(
+    ("bad_timeout", "expected_repr"),
+    [(0, "0"), (0.0, "0.0"), (-1, "-1")],
+    ids=["int-zero", "float-zero", "negative"],
+)
+def test_parse_rejects_a_timeout_at_the_zero_boundary(
+    field, bad_timeout, expected_repr
+):
+    """The bound is strict: zero is refused, not accepted as a 0-second timeout."""
+    with pytest.raises(
+        MitoCodeMcpConfigError,
+        match=f"'{field}' must be a positive number, got {re.escape(expected_repr)}$",
+    ):
+        McpServerConfig.parse("files", {"command": "npx", field: bad_timeout})
+
+
 def test_parse_rejects_a_non_numeric_timeout():
     """A quoted timeout is a typo, not a string that coerces later."""
     with pytest.raises(
@@ -684,3 +728,18 @@ def test_build_transport_passes_none_for_unset_headers():
         config.build_transport()
 
     transport_cls.assert_called_once_with(url=HTTP_ENDPOINT, headers=None)
+
+
+def test_build_transport_carries_populated_headers_into_the_http_transport():
+    """Configured auth headers must survive the hand-off to fastmcp."""
+    config = McpServerConfig.parse(
+        "weather",
+        {"url": HTTP_ENDPOINT, "headers": {"Authorization": SECRET_HEADER}},
+    )
+
+    with patch.object(mcp_config, "StreamableHttpTransport") as transport_cls:
+        config.build_transport()
+
+    transport_cls.assert_called_once_with(
+        url=HTTP_ENDPOINT, headers={"Authorization": SECRET_HEADER}
+    )
