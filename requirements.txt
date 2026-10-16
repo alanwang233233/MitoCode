@@ -13,3 +13,4 @@ httpx-sse
 textual
 fastapi
 jsonschema
+fastmcp>=4.1,<5

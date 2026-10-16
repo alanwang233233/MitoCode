@@ -74,3 +74,19 @@ class MitoCodeChatProviderModelError(MitoCodeChatProviderError):
 
 class MitoCodeChatProviderInitError(MitoCodeChatProviderError):
     """Raised when chat provider initialization fails."""
+
+
+class MitoCodeMcpError(MitoCodeBaseError):
+    """Base class for MCP-related errors."""
+
+
+class MitoCodeMcpConfigError(MitoCodeMcpError):
+    """Raised when an MCP server configuration entry is invalid."""
+
+
+class MitoCodeMcpConnectionError(MitoCodeMcpError):
+    """Raised when an MCP server connection cannot be established or is lost."""
+
+
+class MitoCodeMcpToolCallError(MitoCodeMcpError):
+    """Raised when an MCP tool call fails or returns an error result."""
