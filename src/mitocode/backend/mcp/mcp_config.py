@@ -206,6 +206,10 @@ class McpServerConfig:  # pylint: disable=too-many-instance-attributes
 def _invalid(name: str, key: str, expected: str, value: Any) -> NoReturn:
     """Report one configuration field that failed validation.
 
+    ``value`` is rendered into the message, so this helper is only for fields
+    that cannot carry credentials.  Secret-bearing fields must raise their own
+    error naming just the offending entry's key — see :func:`_read_str_mapping`.
+
     Args:
         name: Name of the offending MCP server.
         key: The configuration key that failed validation.
@@ -223,6 +227,10 @@ def _invalid(name: str, key: str, expected: str, value: Any) -> NoReturn:
 def _read_http_url(name: str, value: Any) -> str:
     """Validate the ``url`` field of a remote server entry.
 
+    Only the scheme is reported on failure.  A URL may legitimately carry a
+    credential in its userinfo or query string, so the rest of the value must
+    not reach an exception message either.
+
     Args:
         name: Name of the MCP server, used in the error message.
         value: The raw ``url`` value.
@@ -233,12 +241,18 @@ def _read_http_url(name: str, value: Any) -> str:
     Raises:
         MitoCodeMcpConfigError: If ``value`` is not an http(s) endpoint.
     """
-    if not isinstance(value, str) or not value.startswith(("http://", "https://")):
-        raise MitoCodeMcpConfigError(
-            f"MCP server '{name}': 'url' must be an http:// or https:// "
-            f"endpoint, got {value!r}"
-        )
-    return value
+    if isinstance(value, str):
+        if value.startswith(("http://", "https://")):
+            return value
+        if "://" in value:
+            detail = f"got scheme {value.split('://', 1)[0]!r}"
+        else:
+            detail = "got no http:// or https:// scheme"
+    else:
+        detail = f"got {type(value).__name__}"
+    raise MitoCodeMcpConfigError(
+        f"MCP server '{name}': 'url' must be an http:// or https:// endpoint, {detail}"
+    )
 
 
 def _read_stdio_command(name: str, value: Any) -> str:
@@ -285,6 +299,10 @@ def _read_str(name: str, raw: dict, key: str) -> str:
 def _read_str_list(name: str, raw: dict, key: str) -> List[str]:
     """Read an optional list-of-strings field, defaulting to an empty list.
 
+    A malformed element is reported by index and type, never by value.  ``args``
+    routinely carries command-line credentials such as ``--token <secret>``, and
+    a message naming the offending position is what makes the mistake fixable.
+
     Args:
         name: Name of the MCP server, used in the error message.
         raw: The raw server entry.
@@ -295,16 +313,31 @@ def _read_str_list(name: str, raw: dict, key: str) -> List[str]:
         cannot reach the frozen configuration.
 
     Raises:
-        MitoCodeMcpConfigError: If the value is not a list of strings.
+        MitoCodeMcpConfigError: If the value is not a list of strings.  The
+            message names the field and the bad element's index, but no values.
     """
     value = raw.get(key, [])
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        _invalid(name, key, "a list of strings", value)
+    if not isinstance(value, list):
+        raise MitoCodeMcpConfigError(
+            f"MCP server '{name}': '{key}' must be a list of strings, "
+            f"got {type(value).__name__}"
+        )
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise MitoCodeMcpConfigError(
+                f"MCP server '{name}': '{key}[{index}]' must be a string, "
+                f"got {type(item).__name__}"
+            )
     return list(value)
 
 
 def _read_str_mapping(name: str, raw: dict, key: str) -> Dict[str, str]:
     """Read an optional string-to-string mapping, defaulting to an empty dict.
+
+    Only the offending entry's *key* is ever reported, never the mapping and
+    never any of its values.  ``env`` and ``headers`` routinely carry
+    credentials, and exception messages end up in the TUI error pane and in
+    logs, so a rejected entry must not echo the token sitting next to the typo.
 
     Args:
         name: Name of the MCP server, used in the error message.
@@ -316,14 +349,21 @@ def _read_str_mapping(name: str, raw: dict, key: str) -> Dict[str, str]:
         cannot reach the frozen configuration.
 
     Raises:
-        MitoCodeMcpConfigError: If the value is not a mapping of strings.
+        MitoCodeMcpConfigError: If the value is not a mapping of strings.  The
+            message names the field and the bad entry's key, but no values.
     """
     value = raw.get(key, {})
     if not isinstance(value, dict):
-        _invalid(name, key, "an object mapping strings to strings", value)
+        raise MitoCodeMcpConfigError(
+            f"MCP server '{name}': '{key}' must be an object mapping strings to "
+            f"strings, got {type(value).__name__}"
+        )
     for entry_key, entry_value in value.items():
         if not isinstance(entry_key, str) or not isinstance(entry_value, str):
-            _invalid(name, key, "an object mapping strings to strings", value)
+            raise MitoCodeMcpConfigError(
+                f"MCP server '{name}': '{key}' entry {entry_key!r} must map a "
+                "string to a string"
+            )
     return dict(value)
 
 

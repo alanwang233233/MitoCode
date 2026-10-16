@@ -117,3 +117,61 @@ def test_build_transport_returns_stdio_transport():
     assert isinstance(transport, StdioTransport)
     assert transport.command == "npx"
     assert transport.args == ["-y", "f"]
+
+
+def test_parse_error_message_never_echoes_header_values():
+    secret = "Bearer sk-live-DO-NOT-LEAK"
+    with pytest.raises(MitoCodeMcpConfigError) as excinfo:
+        McpServerConfig.parse(
+            "weather",
+            {
+                "url": "https://weather.example.com/mcp",
+                "headers": {"Authorization": secret, "X-Retry": 5},
+            },
+        )
+    message = str(excinfo.value)
+    assert "X-Retry" in message
+    assert secret not in message
+
+
+def test_parse_error_message_never_echoes_env_values():
+    secret = "env-token-DO-NOT-LEAK"
+    with pytest.raises(MitoCodeMcpConfigError) as excinfo:
+        McpServerConfig.parse(
+            "files", {"command": "npx", "env": {"MCP_TOKEN": secret, "PORT": 8080}}
+        )
+    message = str(excinfo.value)
+    assert "PORT" in message
+    assert secret not in message
+
+
+def test_parse_error_message_never_echoes_a_bare_header_string():
+    secret = "sk-live-BARE-DO-NOT-LEAK"
+    with pytest.raises(MitoCodeMcpConfigError) as excinfo:
+        McpServerConfig.parse(
+            "weather",
+            {"url": "https://weather.example.com/mcp", "headers": secret},
+        )
+    message = str(excinfo.value)
+    assert "headers" in message
+    assert secret not in message
+
+
+def test_parse_error_message_never_echoes_a_url_credential():
+    secret = "url-password-DO-NOT-LEAK"
+    with pytest.raises(MitoCodeMcpConfigError) as excinfo:
+        McpServerConfig.parse("weather", {"url": f"ftp://user:{secret}@x/mcp"})
+    message = str(excinfo.value)
+    assert "ftp" in message
+    assert secret not in message
+
+
+def test_parse_error_message_never_echoes_argv_credentials():
+    secret = "argv-token-DO-NOT-LEAK"
+    with pytest.raises(MitoCodeMcpConfigError) as excinfo:
+        McpServerConfig.parse(
+            "files", {"command": "npx", "args": ["-y", "--token", secret, 3]}
+        )
+    message = str(excinfo.value)
+    assert "args[3]" in message
+    assert secret not in message
