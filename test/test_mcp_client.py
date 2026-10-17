@@ -5,6 +5,7 @@ from typing import Optional
 
 import pytest
 from fastmcp import Client, FastMCP
+from fastmcp.exceptions import ToolError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -80,6 +81,74 @@ class _StackRecorder:
         self.closed = True
         if self.error is not None:
             raise self.error
+
+
+class _HandshakeHangingClient:
+    """Fake client whose handshake never completes and whose close is slow.
+
+    The slow ``close`` is the whole point: it opens a window in which a second
+    cancellation can land while the teardown started by the first one is still
+    awaiting, which is the only way to tell a shielded teardown from an
+    unshielded one.
+    """
+
+    def __init__(self) -> None:
+        """Arm the events a test needs to synchronise on."""
+        self.entered = asyncio.Event()
+        self.close_started = asyncio.Event()
+        self.close_finished = asyncio.Event()
+
+    async def __aenter__(self):
+        """Announce that the handshake started, then wait forever."""
+        self.entered.set()
+        await asyncio.Event().wait()
+
+    async def __aexit__(self, *exc_info):
+        """Never claim to have suppressed anything."""
+        return False
+
+    async def close(self) -> None:
+        """Record that teardown began, yield to the loop, then record it ended."""
+        self.close_started.set()
+        await asyncio.sleep(0.05)
+        self.close_finished.set()
+
+
+class _ShutdownSignal(BaseException):
+    """A shutdown request that is neither an ``Exception`` nor a cancellation.
+
+    Stand-in for the third ``BaseException`` an awaited operation can raise: a
+    framework's own "stop everything" signal.  ``KeyboardInterrupt`` and
+    ``SystemExit`` cannot be used here because asyncio re-raises those out of
+    the event loop itself instead of delivering them to the awaiting coroutine.
+    """
+
+
+async def _cancel_twice_during_teardown(
+    client: McpClient, built: _HandshakeHangingClient
+) -> None:
+    """Cancel a hanging ``connect`` again while its own teardown is in flight.
+
+    The second cancellation is timed off ``close_started`` so it cannot race
+    the teardown: without it the test would pass whether or not the teardown is
+    shielded.
+
+    Args:
+        client: The client whose :meth:`connect` must be cancelled twice.
+        built: The fake transport installed as the client's build seam.
+    """
+    task = asyncio.ensure_future(client.connect())
+    await asyncio.wait_for(built.entered.wait(), timeout=5)
+    task.cancel()
+
+    async def _cancel_mid_teardown() -> None:
+        await asyncio.wait_for(built.close_started.wait(), timeout=5)
+        task.cancel()
+
+    canceller = asyncio.ensure_future(_cancel_mid_teardown())
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(canceller, timeout=5)
 
 
 @pytest.mark.asyncio
@@ -632,3 +701,482 @@ async def test_connect_recovers_when_no_handle_was_ever_created(monkeypatch):
     assert client._client is None
     assert client._stack is None
     assert client.tools == []
+
+
+@pytest.mark.asyncio
+async def test_connect_repeat_cancellation_still_completes_the_transport_teardown():
+    """A second cancellation must not abort the teardown the first one started.
+
+    ``connect`` runs its cleanup outside the timed-out await and shields it, so
+    a repeat cancellation -- a second Ctrl-C, or an enclosing ``wait_for``
+    firing in the same tick -- cannot interrupt ``Client.close()`` midway and
+    leave stdio's detached connect task holding the child process alive.  Only
+    the fact that ``close`` *ran to completion* distinguishes the shield from a
+    plain await; both leave the handles cleared.
+    """
+    client = McpClient(_in_memory_config())
+    built = _HandshakeHangingClient()
+    client._build_fastmcp_client = lambda: built
+
+    await _cancel_twice_during_teardown(client, built)
+
+    await asyncio.wait_for(built.close_finished.wait(), timeout=5)
+    assert client._client is None
+    assert client._stack is None
+    assert client.tools == []
+
+
+@pytest.mark.asyncio
+async def test_connect_repeat_cancellation_skips_the_failed_bookkeeping():
+    """A repeat cancellation propagates before ``connect`` records the failure.
+
+    The cancellation is re-raised out of the shielded await, so the two
+    statements that would set ``FAILED`` and record the error never run.  The
+    object is still consistent -- no client, no stack, no tools -- but a reader
+    of :attr:`last_error` must not expect to find the cancellation logged here.
+    """
+    client = McpClient(_in_memory_config())
+    built = _HandshakeHangingClient()
+    client._build_fastmcp_client = lambda: built
+
+    await _cancel_twice_during_teardown(client, built)
+
+    assert client.state is McpConnectionState.DISCONNECTED
+    assert client.last_error == ""
+
+
+@pytest.mark.asyncio
+async def test_connect_shutdown_signal_closes_the_transport_and_still_propagates():
+    """A ``BaseException`` that is not an ``Exception`` must be cleaned up after.
+
+    ``CancelledError`` is only the best-known member of that family.  Catching
+    ``(Exception, CancelledError)`` would pass every cancellation test while
+    leaving an application shutdown signal to orphan the subprocess, so the
+    handler has to be keyed on ``BaseException`` itself.
+    """
+    client = McpClient(_in_memory_config())
+
+    class _ShuttingDownClient:
+        """Client whose handshake fails with a shutdown signal."""
+
+        def __init__(self) -> None:
+            """Start with the transport still open."""
+            self.closed = False
+
+        async def __aenter__(self):
+            """Abort the handshake the way a framework shutdown would."""
+            raise _ShutdownSignal("application is shutting down")
+
+        async def __aexit__(self, *exc_info):
+            """Never claim to have suppressed anything."""
+            return False
+
+        async def close(self) -> None:
+            """Record that the transport was released."""
+            self.closed = True
+
+    built = _ShuttingDownClient()
+    client._build_fastmcp_client = lambda: built
+
+    with pytest.raises(_ShutdownSignal):
+        await client.connect()
+
+    assert built.closed is True, "shutdown signal orphaned the transport"
+    assert client.state is McpConnectionState.FAILED
+    assert client.last_error == "_ShutdownSignal: application is shutting down"
+    assert client._client is None
+    assert client._stack is None
+    assert client.tools == []
+
+
+@pytest.mark.asyncio
+async def test_connect_failure_reports_the_handshake_error_not_the_teardown_error():
+    """A failing teardown must not replace the error that explains the failure.
+
+    ``_force_close`` records cleanup problems in ``last_error`` and ``connect``
+    then overwrites it with the exception that caused the failure.  The message a
+    user reads is therefore the handshake error alone; the fact that teardown
+    *also* failed is only visible in the teardown's own effects.
+    """
+    client = McpClient(_in_memory_config())
+
+    class _ExplodingHandshake:
+        """Client that fails to connect and cannot be closed either."""
+
+        def __init__(self) -> None:
+            """Start with the transport still open."""
+            self.closed = False
+
+        async def __aenter__(self):
+            """Refuse the handshake."""
+            raise RuntimeError("handshake exploded")
+
+        async def __aexit__(self, *exc_info):
+            """Never claim to have suppressed anything."""
+            return False
+
+        async def close(self) -> None:
+            """Attempt the teardown, which fails."""
+            self.closed = True
+            raise OSError("process group wedged")
+
+    built = _ExplodingHandshake()
+    client._build_fastmcp_client = lambda: built
+
+    assert await client.connect() is False
+
+    assert built.closed is True
+    assert client.last_error == "RuntimeError: handshake exploded"
+    assert client.state is McpConnectionState.FAILED
+
+
+@pytest.mark.asyncio
+async def test_connect_after_a_failure_clears_the_stale_error(monkeypatch):
+    """A successful retry must not leave the previous failure in the report."""
+    client = McpClient(_in_memory_config())
+
+    class _ExplodingHandshake:
+        """Client that never completes a handshake."""
+
+        async def __aenter__(self):
+            """Refuse the handshake."""
+            raise RuntimeError("transient outage")
+
+        async def __aexit__(self, *exc_info):
+            """Never claim to have suppressed anything."""
+            return False
+
+        async def close(self) -> None:
+            """Succeed at the teardown."""
+            return None
+
+    client._build_fastmcp_client = lambda: _ExplodingHandshake()
+    assert await client.connect() is False
+    assert client.last_error == "RuntimeError: transient outage"
+
+    server = FastMCP("probe")
+
+    @server.tool
+    def ping() -> str:
+        """Report that the server is alive."""
+        return "pong"
+
+    monkeypatch.setattr(client, "_build_fastmcp_client", lambda: Client(server))
+
+    assert await client.connect() is True
+    assert client.state is McpConnectionState.CONNECTED
+    assert client.last_error == ""
+    assert sorted(t.name for t in client.tools) == ["ping"]
+    await client.disconnect()
+
+
+def test_redaction_cuts_the_payload_up_to_the_last_injected_type_marker():
+    """A value carrying pydantic's own suffix text is cut up to that decoy.
+
+    The pattern consumes a payload up to ``, input_type=``; when the argument
+    itself contains that text the greedy match runs to the *last* occurrence on
+    the line.  Everything before the decoy is cut, which is the guarantee the
+    module documents: text after the marker is indistinguishable from the
+    framework's suffix and is deliberately kept so the report stays readable.
+    """
+    redacted = _redact_arguments("input_value='sk-PART1\", input_type=sk-PART2LEAK'")
+
+    assert "sk-PART1" not in redacted
+    assert redacted == "input_value=<redacted>, input_type=sk-PART2LEAK'"
+
+
+def test_redaction_keeps_the_report_after_an_injected_marker():
+    """Surrounding report text must survive a payload that fakes the suffix.
+
+    Redaction that eats the sentence, the field name and the expected type
+    would make the error undiagnosable -- and a test asserting only "the
+    secret is gone" would pass just as happily against such an implementation.
+    """
+    redacted = _redact_arguments(
+        "tool 'login' failed on field 'token': "
+        'input_value=sk-DECOY", input_type=str; expected a valid string]'
+    )
+
+    assert "sk-DECOY" not in redacted
+    assert redacted == (
+        "tool 'login' failed on field 'token': "
+        "input_value=<redacted>, input_type=str; expected a valid string]"
+    )
+
+
+def test_redaction_cuts_each_error_of_a_multiline_report_independently():
+    """One payload must not eat the next error's report on a following line.
+
+    ``.`` does not cross a newline, so a validation report naming two offending
+    fields loses neither of them -- and each keeps the type pydantic expected.
+    """
+    report = (
+        "2 validation errors for login\n"
+        "token\n"
+        "  Input should be a valid string [type=string_type, "
+        "input_value='sk-FIRST', input_type=str]\n"
+        "count\n"
+        "  Input should be a valid integer [type=string_type, "
+        "input_value='sk-SECOND', input_type=int]"
+    )
+
+    redacted = _redact_arguments(report)
+
+    assert redacted == (
+        "2 validation errors for login\n"
+        "token\n"
+        "  Input should be a valid string [type=string_type, "
+        "input_value=<redacted>, input_type=str]\n"
+        "count\n"
+        "  Input should be a valid integer [type=string_type, "
+        "input_value=<redacted>, input_type=int]"
+    )
+
+
+def test_redaction_handles_an_empty_payload():
+    """An ``input_value=`` with nothing after it is still a payload."""
+    assert _redact_arguments(
+        "Input should be a valid string [type=string_type, input_value=, input_type=str]"
+    ) == (
+        "Input should be a valid string [type=string_type, "
+        "input_value=<redacted>, input_type=str]"
+    )
+    assert _redact_arguments("nothing here: input_value=") == (
+        "nothing here: input_value=<redacted>"
+    )
+
+
+def test_redaction_cuts_a_suffixless_payload_to_the_end_of_its_line():
+    """With no ``, input_type=`` to stop at, the whole rest of the line is cut.
+
+    Stopping at the next space instead would leave the tail of the value -- and
+    a token is often longer than its first word.
+    """
+    assert _redact_arguments("input_value=sk-BARE extra words follow") == (
+        "input_value=<redacted>"
+    )
+    assert _redact_arguments("input_value=sk-BARE extra words follow\nnext line") == (
+        "input_value=<redacted>\nnext line"
+    )
+
+
+@pytest.mark.asyncio
+async def test_call_tool_tool_error_redacts_the_payload_and_keeps_the_report():
+    """The common validation failure must lose the value and keep everything else.
+
+    This is the ``ToolError`` branch, which the generic handler cannot see, so
+    it carries the full pydantic report: the tool, the server, the offending
+    field and the expected type all have to remain, while the rejected value
+    does not.
+    """
+    client = McpClient(_in_memory_config())
+    secret = "sk-ADVERSARIAL-DO-NOT-LEAK"
+
+    class _ValidatingCall:
+        """Client that rejects its argument the way fastmcp reports it."""
+
+        async def call_tool(self, name, arguments, **kwargs):
+            raise ToolError(
+                "1 validation error for login\n"
+                "token\n"
+                "  Input should be a valid string [type=string_type, "
+                f"input_value='{secret}\", input_type=str]"
+            )
+
+    client._client = _ValidatingCall()
+
+    with pytest.raises(MitoCodeMcpToolCallError) as excinfo:
+        await client.call_tool("login", {"token": secret})
+
+    message = str(excinfo.value)
+    assert secret not in message, f"the rejected argument leaked: {message}"
+    assert "MCP tool 'login' on server 'probe' failed" in message
+    assert "token" in message
+    assert "should be a valid string" in message
+    assert "input_type=str" in message
+
+
+@pytest.mark.asyncio
+async def test_call_tool_unexpected_error_redacts_the_payload_and_keeps_the_report():
+    """A local validation failure quotes the arguments just as a server one does.
+
+    The generic handler renders the exception type before the text, so the
+    redaction has to survive an extra prefix and must not cost the surrounding
+    report anything.
+    """
+    client = McpClient(_in_memory_config())
+    secret = "sk-LOCAL-VALIDATION-DO-NOT-LEAK"
+
+    class _LocallyValidatingCall:
+        """Client that fails locally while validating its arguments."""
+
+        async def call_tool(self, name, arguments, **kwargs):
+            raise ValueError(
+                "field 'token' rejected\n"
+                "  Input should be a valid string [type=string_type, "
+                f"input_value='{secret}', input_type=str]"
+            )
+
+    client._client = _LocallyValidatingCall()
+
+    with pytest.raises(MitoCodeMcpToolCallError) as excinfo:
+        await client.call_tool("login", {"token": secret})
+
+    message = str(excinfo.value)
+    assert secret not in message, f"the rejected argument leaked: {message}"
+    assert "MCP tool 'login' on server 'probe' raised ValueError" in message
+    assert "token" in message
+    assert "should be a valid string" in message
+    assert "input_type=str" in message
+
+
+@pytest.mark.asyncio
+async def test_call_tool_forwards_the_configured_timeout_to_the_server_call():
+    """The per-call deadline must reach the server call, not just the local wait.
+
+    The deadline is applied twice on purpose: the outer ``wait_for`` bounds the
+    local await and the ``timeout`` keyword bounds the request the transport has
+    actually sent.  Dropping the keyword leaves a hanging server unbounded
+    server-side while every local test still passes.
+    """
+    client = McpClient(
+        McpServerConfig.parse(
+            "slowtool", {"url": "https://x.invalid/mcp", "timeout": 12.5}
+        )
+    )
+    seen = {}
+
+    class _RecordingCall:
+        """Client that records how it was called."""
+
+        async def call_tool(self, name, arguments, **kwargs):
+            seen["name"] = name
+            seen["arguments"] = arguments
+            seen["timeout"] = kwargs.get("timeout", "absent")
+            return None
+
+    client._client = _RecordingCall()
+
+    await client.call_tool("echo", {"text": "hi"})
+
+    assert seen == {"name": "echo", "arguments": {"text": "hi"}, "timeout": 12.5}
+
+
+@pytest.mark.asyncio
+async def test_call_tool_keeps_non_ascii_structured_data_readable():
+    """Structured output must not be escaped into ``\\uXXXX`` noise.
+
+    ``ensure_ascii`` defaults to true, which turns a Japanese or accented field
+    into escape sequences; a result rendered that way still parses, so nothing
+    downstream notices except the reader.
+    """
+    client = McpClient(_in_memory_config())
+
+    class _Result:
+        data = {"memo": "café", "city": "東京"}
+        content = []
+
+    class _Call:
+        async def call_tool(self, name, arguments, **kwargs):
+            return _Result()
+
+    client._client = _Call()
+
+    assert await client.call_tool("echo", {}) == '{"memo": "café", "city": "東京"}'
+
+
+@pytest.mark.asyncio
+async def test_call_tool_renders_an_unserialisable_result_value_with_str():
+    """A result carrying a non-JSON value must render, not raise.
+
+    ``json.dumps`` refuses a set, a handle or a custom object, and the failure
+    would escape ``call_tool`` as a bare ``TypeError`` because rendering happens
+    outside the error handling.  ``default=str`` is what keeps that reachable.
+    """
+    client = McpClient(_in_memory_config())
+
+    class _Handle:
+        """A value the model cannot receive as JSON."""
+
+        def __str__(self) -> str:
+            return "opaque-handle"
+
+    class _Result:
+        data = {"handle": _Handle(), "ids": 3}
+        content = []
+
+    class _Call:
+        async def call_tool(self, name, arguments, **kwargs):
+            return _Result()
+
+    client._client = _Call()
+
+    assert await client.call_tool("echo", {}) == (
+        '{"handle": "opaque-handle", "ids": 3}'
+    )
+
+
+def test_redaction_cuts_the_last_payload_when_a_line_reports_several():
+    """Every payload on a line must be cut, not just the first one.
+
+    Matching greedily to the *last* ``, input_type=`` is what makes a payload
+    containing a decoy marker safe: stopping at the first marker instead would
+    leave the remainder of the line -- including the next payload -- untouched,
+    so a hostile value that merely looks like the framework's suffix would hand
+    the following argument straight back to the log.
+    """
+    redacted = _redact_arguments(
+        "probe failed: input_value=sk-FIRST, input_type=str; "
+        "input_value=sk-SECOND, input_type=int"
+    )
+
+    assert "sk-FIRST" not in redacted
+    assert "sk-SECOND" not in redacted
+    assert redacted == "probe failed: input_value=<redacted>, input_type=int"
+
+
+def test_build_fastmcp_client_wires_the_configured_transport_and_name():
+    """The real builder must use the config, not a hardcoded transport.
+
+    Every connect test swaps this method out, so without this the transport a
+    server is reached through -- HTTP versus stdio, and its command line -- is
+    never exercised at all.
+    """
+    remote = McpClient(
+        McpServerConfig.parse(
+            "remote", {"url": "https://remote.invalid/mcp", "timeout": 7.5}
+        )
+    )._build_fastmcp_client()
+    local = McpClient(
+        McpServerConfig.parse(
+            "local", {"command": "my-server", "args": ["--flag", "value"]}
+        )
+    )._build_fastmcp_client()
+
+    assert isinstance(remote, Client)
+    assert remote.name == "remote"
+    assert type(remote.transport).__name__ == "StreamableHttpTransport"
+    assert remote.transport.url == "https://remote.invalid/mcp"
+    assert isinstance(local, Client)
+    assert local.name == "local"
+    assert type(local.transport).__name__ == "StdioTransport"
+    assert local.transport.command == "my-server"
+    assert local.transport.args == ["--flag", "value"]
+
+
+@pytest.mark.asyncio
+async def test_call_tool_names_the_server_and_the_tool_when_not_connected():
+    """The not-connected report must say which server and which tool.
+
+    With several servers configured, "not connected" on its own does not say
+    which one to fix; the caller needs both halves of the address before it
+    built one.
+    """
+    client = McpClient(_in_memory_config())
+
+    with pytest.raises(MitoCodeMcpToolCallError) as excinfo:
+        await client.call_tool("echo", {"text": "hi"})
+
+    message = str(excinfo.value)
+    assert "MCP server 'probe' is not connected" in message
+    assert "cannot call tool 'echo'" in message
