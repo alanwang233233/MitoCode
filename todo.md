@@ -11,7 +11,7 @@
 - [x] 重构Agent对外接口 (Agent → AgentSession/AgentRuntime/AgentOrchestrator 三层分离)
 - [ ] 添加上下文管理功能
 - [ ] 添加索引功能
-- [ ] 添加MCP功能
+- [x] 添加MCP功能
 - [ ] 添加Agent Skills功能
 - [x] 完成TUI (TUI直接调用backend，移除HTTP/SSE层)
 - [x] 添加工具管理功能:PR #6
