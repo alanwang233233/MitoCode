@@ -2,6 +2,10 @@
 
 Converts Python type annotations into JSON Schema tool definitions and
 keeps separate human/agent-facing documentation per registered tool.
+
+A caller may also supply the schema outright, which is what tools
+discovered on an MCP server need: their arguments are described by the
+server, not by anything introspectable in this process.
 """
 
 import inspect
@@ -12,11 +16,14 @@ from typing import (
     Dict,
     List,
     Optional,
+    TYPE_CHECKING,
     Union,
     get_args,
     get_origin,
     Literal,
 )
+
+from loguru import logger as loguru_logger
 
 try:
     import types
@@ -27,6 +34,42 @@ except ImportError:
     UnionType = Union
 
 from mitocode.backend.exception.mitocode_exception import MitoCodeToolDefinitionError
+
+if TYPE_CHECKING:
+    # Imported for type checking only.  The runtime stays on duck typing so
+    # this module keeps importing in an environment without fastmcp installed.
+    from mitocode.backend.mcp.mcp_client import McpClient
+
+logger = loguru_logger.bind(name=__name__)
+
+#: Prefix every namespaced MCP tool name carries, so a remote tool is
+#: recognisably remote and cannot be confused with a built-in one.
+MCP_TOOL_PREFIX = "mcp__"
+
+#: Separator between the server name and the tool name inside that prefix.
+MCP_TOOL_SEPARATOR = "__"
+
+
+def _normalize_input_schema(raw: Any) -> Dict[str, Any]:
+    """Coerce an MCP tool's advertised input schema into a usable JSON Schema.
+
+    Servers are not required to send a complete schema.  This fills in the
+    pieces :meth:`ToolManager.tool_schemas` always needs so a malformed
+    schema cannot poison an entire LLM request.
+
+    Args:
+        raw: The ``input_schema`` value advertised by the MCP server.
+
+    Returns:
+        A dict with at least ``type`` and ``properties`` keys.
+    """
+    if not isinstance(raw, dict):
+        return {"type": "object", "properties": {}}
+    normalized = dict(raw)
+    normalized.setdefault("type", "object")
+    if not isinstance(normalized.get("properties"), dict):
+        normalized["properties"] = {}
+    return normalized
 
 
 def _annotation_to_schema(annotation: Any) -> Dict[str, Any]:
@@ -219,12 +262,13 @@ class ToolManager:
         """
         self._tools: Dict[str, ToolSpec] = {}
 
-    def tool(
+    def tool(  # pylint: disable=too-many-arguments
         self,
         name: Optional[str] = None,
         *,
         human_doc: Optional[str] = None,
         agent_doc: Optional[str] = None,
+        parameters_schema: Optional[Dict[str, Any]] = None,
         display_action: Optional[str] = None,
         display_param: Optional[str] = None,
     ):
@@ -236,6 +280,9 @@ class ToolManager:
             human_doc: Human-readable description for UI purposes.
             agent_doc: Description sent to the LLM in tool schemas.
                 Defaults to *human_doc* if not provided.
+            parameters_schema: JSON Schema of accepted arguments.
+                Defaults to one derived from the function's type
+                annotations.
             display_action: Optional action key used by the TUI for
                 styling the tool invocation.
             display_param: Parameter whose value should be highlighted
@@ -251,6 +298,7 @@ class ToolManager:
                 name=name,
                 human_doc=human_doc,
                 agent_doc=agent_doc,
+                parameters_schema=parameters_schema,
                 display_action=display_action,
                 display_param=display_param,
             )
@@ -258,13 +306,14 @@ class ToolManager:
 
         return _decorator
 
-    def register(
+    def register(  # pylint: disable=too-many-arguments
         self,
         func: Callable,
         *,
         name: Optional[str] = None,
         human_doc: Optional[str] = None,
         agent_doc: Optional[str] = None,
+        parameters_schema: Optional[Dict[str, Any]] = None,
         display_action: Optional[str] = None,
         display_param: Optional[str] = None,
     ) -> ToolSpec:
@@ -273,6 +322,12 @@ class ToolManager:
         Explicit arguments take precedence over metadata attached by
         :func:`declare_tool`, which in turn takes precedence over the
         function's own name and docstring.
+
+        ``parameters_schema`` is needed for arguments that cannot be read off
+        a signature — an MCP server advertises its own JSON Schema — so when it
+        is supplied it is used verbatim instead of being derived, with a
+        ``parameters_schema`` entry in the ``declare_tool`` metadata as the
+        fallback and annotation inference last.
 
         Returns:
             The registered :class:`ToolSpec`.
@@ -292,12 +347,91 @@ class ToolManager:
             func=func,
             human_doc=human_description,
             agent_doc=agent_description,
-            parameters_schema=_build_parameters_schema(func),
+            parameters_schema=(
+                parameters_schema
+                if parameters_schema is not None
+                else (meta.get("parameters_schema") or _build_parameters_schema(func))
+            ),
             display_action=display,
             display_param=param,
         )
         self._tools[tool_name] = spec
         return spec
+
+    def unregister(self, name: str) -> bool:
+        """Remove a tool from the registry.
+
+        Args:
+            name: The tool name to remove.
+
+        Returns:
+            True if a tool was registered under *name* and has been removed,
+            False if no such tool existed.
+        """
+        return self._tools.pop(name, None) is not None
+
+    @staticmethod
+    def build_mcp_tool_name(server_name: str, tool_name: str) -> str:
+        """Compose the namespaced MitoCode name for an MCP tool.
+
+        Args:
+            server_name: The MCP server's configured name.
+            tool_name: The tool's name as advertised by that server.
+
+        Returns:
+            ``mcp__<server_name>__<tool_name>``.
+        """
+        return f"{MCP_TOOL_PREFIX}{server_name}{MCP_TOOL_SEPARATOR}{tool_name}"
+
+    def register_mcp_client(self, client: "McpClient") -> List[ToolSpec]:
+        """Register every tool an MCP client has discovered.
+
+        The client must already be connected so that its cached tool catalogue
+        is populated.  A tool whose composed name is already taken is skipped
+        with a warning rather than overwriting the existing registration.
+
+        Args:
+            client: A connected MCP client exposing ``server_name`` and ``tools``.
+
+        Returns:
+            The specs that were successfully registered, in discovery order.
+        """
+        registered: List[ToolSpec] = []
+        for tool in client.tools:
+            tool_name = self.build_mcp_tool_name(client.server_name, tool.name)
+            if self.get_spec(tool_name) is not None:
+                logger.warning(
+                    f"Skipping MCP tool '{tool_name}': name already registered"
+                )
+                continue
+
+            async def _invoke(_client=client, _tool_name=tool.name, **kwargs):
+                """Forward the model's keyword arguments to the server tool.
+
+                The default arguments capture *this* iteration's client and
+                tool name.  Closing over the loop variables instead would
+                route every registered tool to whichever tool came last.
+                """
+                return await _client.call_tool(_tool_name, kwargs)
+
+            description = (tool.description or "").strip()
+            if not description:
+                description = (
+                    f"Tool '{tool.name}' provided by MCP server "
+                    f"'{client.server_name}'."
+                )
+
+            registered.append(
+                self.register(
+                    _invoke,
+                    name=tool_name,
+                    human_doc=f"[{client.server_name}] {description}",
+                    agent_doc=f"[{client.server_name}] {description}",
+                    parameters_schema=_normalize_input_schema(tool.input_schema),
+                    display_action=f"mcp:{client.server_name}",
+                )
+            )
+        return registered
 
     def tools_map(self) -> Dict[str, Callable]:
         """Return a name-to-callable mapping of all registered tools."""
