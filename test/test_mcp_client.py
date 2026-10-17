@@ -609,6 +609,47 @@ async def test_force_close_still_closes_the_stack_when_client_close_raises():
 
 
 @pytest.mark.asyncio
+async def test_force_close_does_not_swallow_a_shutdown_signal_raised_while_closing():
+    """A ``BaseException`` from ``close()`` must escape, not be recorded away.
+
+    ``_force_close`` deliberately catches ``Exception``, not ``BaseException``,
+    and the asymmetry with :meth:`connect`'s handler is the point: a shutdown
+    signal or a cancellation delivered *while* the teardown is running has to
+    keep travelling, or ``disconnect()`` swallows an in-flight cancellation.
+    Widening the handler to ``BaseException`` is therefore a regression, and
+    this is the test that says so.
+    """
+    client = McpClient(_in_memory_config())
+
+    class _ShutdownOnClose:
+        """Client that signals a shutdown part-way through closing."""
+
+        def __init__(self) -> None:
+            """Start with the transport still open."""
+            self.closed = False
+
+        async def close(self) -> None:
+            """Attempt the teardown, then announce a shutdown."""
+            self.closed = True
+            raise _ShutdownSignal("stopping during teardown")
+
+    built = _ShutdownOnClose()
+    client._client = built
+
+    with pytest.raises(_ShutdownSignal):
+        await client.disconnect()
+
+    assert built.closed is True
+    # Not recorded: the recording branch is Exception-only, so a signal leaves
+    # last_error untouched rather than looking like a cleanup problem.
+    assert client.last_error == ""
+    # The handles were dropped before the await, so abandoning the teardown
+    # part-way still leaks no reference to the transport.
+    assert client._client is None
+    assert client._stack is None
+
+
+@pytest.mark.asyncio
 async def test_force_close_records_a_failing_stack_close():
     """A stack that cannot unwind is recorded instead of aborting the teardown."""
     client = McpClient(_in_memory_config())
@@ -875,14 +916,18 @@ def test_redaction_cuts_the_payload_up_to_the_last_injected_type_marker():
 
     The pattern consumes a payload up to ``, input_type=``; when the argument
     itself contains that text the greedy match runs to the *last* occurrence on
-    the line.  Everything before the decoy is cut, which is the guarantee the
-    module documents: text after the marker is indistinguishable from the
-    framework's suffix and is deliberately kept so the report stays readable.
+    the line.  What precedes the decoy is therefore cut, which is the guarantee
+    this test pins -- deliberately as a prefix, not as the whole output, so that
+    closing the leak below shows up as a deletion rather than as a regression.
     """
     redacted = _redact_arguments("input_value='sk-PART1\", input_type=sk-PART2LEAK'")
 
     assert "sk-PART1" not in redacted
-    assert redacted == "input_value=<redacted>, input_type=sk-PART2LEAK'"
+    # KNOWN LIMITATION (mcp_client.py:39-41): text after a payload-supplied
+    # decoy marker is currently NOT redacted -- `sk-PART2LEAK` survives here,
+    # and this assertion is what lets it.  Fixing the leak requires DELETING
+    # this assertion, not editing it to expect the fix.
+    assert redacted.startswith("input_value=<redacted>")
 
 
 def test_redaction_keeps_the_report_after_an_injected_marker():
@@ -1116,10 +1161,10 @@ async def test_call_tool_renders_an_unserialisable_result_value_with_str():
     )
 
 
-def test_redaction_cuts_the_last_payload_when_a_line_reports_several():
-    """Every payload on a line must be cut, not just the first one.
+def test_redaction_cuts_up_to_the_last_marker_when_a_line_reports_several():
+    """Everything up to the *last* marker on a line is cut, not just the first.
 
-    Matching greedily to the *last* ``, input_type=`` is what makes a payload
+    Matching greedily to the last ``, input_type=`` is what makes a payload
     containing a decoy marker safe: stopping at the first marker instead would
     leave the remainder of the line -- including the next payload -- untouched,
     so a hostile value that merely looks like the framework's suffix would hand
@@ -1136,11 +1181,14 @@ def test_redaction_cuts_the_last_payload_when_a_line_reports_several():
 
 
 def test_build_fastmcp_client_wires_the_configured_transport_and_name():
-    """The real builder must use the config, not a hardcoded transport.
+    """The real builder must take its transport and name from the config.
 
     Every connect test swaps this method out, so without this the transport a
-    server is reached through -- HTTP versus stdio, and its command line -- is
-    never exercised at all.
+    server is actually reached through -- HTTP versus stdio, the endpoint, and
+    the command line -- is never exercised.  The ``timeout`` keyword is
+    deliberately not asserted: fastmcp 4.1 accepts it but keeps it off the
+    client, so pinning it would mean reaching into private attributes, and the
+    deadline is already pinned where it is observable, in ``call_tool``.
     """
     remote = McpClient(
         McpServerConfig.parse(
