@@ -9,7 +9,11 @@ from fastmcp import Client, FastMCP
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mitocode.backend.exception.mitocode_exception import MitoCodeMcpToolCallError
-from mitocode.backend.mcp.mcp_client import McpClient, McpConnectionState
+from mitocode.backend.mcp.mcp_client import (
+    McpClient,
+    McpConnectionState,
+    _redact_arguments,
+)
 from mitocode.backend.mcp.mcp_config import McpServerConfig
 
 
@@ -177,6 +181,51 @@ async def test_connect_timeout_force_closes_the_client():
     assert await client.connect() is False
     assert built.closed is True
     assert client._client is None
+
+
+@pytest.mark.asyncio
+async def test_connect_cancellation_closes_the_transport_and_still_propagates():
+    """Cancelling a handshake must tear the transport down, then keep cancelling.
+
+    ``CancelledError`` derives from ``BaseException``, so it walks straight past
+    an ``except Exception`` handler: Ctrl-C, a TUI shutdown or an enclosing
+    ``wait_for`` would leave ``_client``/``_stack`` populated and stdio's
+    detached connect task holding the child process alive.  Swallowing the
+    cancellation would be wrong too — cleanup, then propagate.
+    """
+    client = McpClient(_slow_config(1.0))
+    entered = asyncio.Event()
+
+    class _HangingClient:
+        """Async context manager whose __aenter__ never completes."""
+
+        closed = False
+
+        async def __aenter__(self):
+            entered.set()
+            await asyncio.Event().wait()
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+        async def close(self):
+            type(self).closed = True
+
+    built = _HangingClient()
+    client._build_fastmcp_client = lambda: built
+
+    task = asyncio.ensure_future(client.connect())
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert built.closed is True, "cancellation orphaned the transport"
+    assert client._client is None
+    assert client._stack is None
+    assert client.tools == []
+    assert client.state is McpConnectionState.FAILED
 
 
 @pytest.mark.asyncio
@@ -387,6 +436,55 @@ async def test_call_tool_does_not_re_wrap_its_own_error():
         await client.call_tool("echo", {})
 
     assert excinfo.value is original
+
+
+@pytest.mark.asyncio
+async def test_tool_error_message_never_echoes_the_arguments_it_validated(
+    monkeypatch,
+):
+    """A schema mistake must not turn the rejected argument into an error message.
+
+    fastmcp re-raises pydantic's validation text as a ``ToolError``, and every
+    ``input_value=`` segment in it is the value the model just sent.  This is
+    the *common* failure — the model calls a tool with the wrong shape — and the
+    generic ``except Exception`` path cannot help because it never sees it.
+    """
+    secret = "sk-TOOL-ERROR-DO-NOT-LEAK"
+    server = FastMCP("probe")
+
+    @server.tool
+    def login(token: str) -> str:
+        """Accept a token."""
+        return "ok"
+
+    client = McpClient(_in_memory_config())
+    monkeypatch.setattr(client, "_build_fastmcp_client", lambda: Client(server))
+    assert await client.connect() is True
+
+    with pytest.raises(MitoCodeMcpToolCallError) as excinfo:
+        await client.call_tool("login", {"token": [secret]})
+
+    message = str(excinfo.value)
+    assert secret not in message, f"the rejected argument leaked: {message}"
+    # Redaction must cost diagnosis nothing: which tool, on which server, which
+    # field, and what was expected of it all have to survive.
+    assert "login" in message
+    assert "probe" in message
+    assert "token" in message
+    assert "should be a valid string" in message
+    await client.disconnect()
+
+
+def test_redaction_covers_an_input_value_with_no_type_suffix():
+    """Text that quotes an argument without pydantic's type suffix is still cut.
+
+    ``input_type=`` is the common tail, but the rule must not depend on it: an
+    argument payload is never safe to echo, whatever surrounds it.
+    """
+    redacted = _redact_arguments("server said no: input_value=sk-BARE-DO-NOT-LEAK")
+
+    assert "sk-BARE-DO-NOT-LEAK" not in redacted
+    assert "server said no" in redacted
 
 
 @pytest.mark.asyncio

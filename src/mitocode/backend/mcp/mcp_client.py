@@ -17,6 +17,7 @@ direct request from the model, so :meth:`call_tool` raises
 
 import asyncio
 import json
+import re
 from contextlib import AsyncExitStack
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -26,6 +27,38 @@ from fastmcp.exceptions import ToolError
 
 from mitocode.backend.exception.mitocode_exception import MitoCodeMcpToolCallError
 from mitocode.backend.mcp.mcp_config import McpServerConfig
+
+#: Stands in for an argument payload that has been cut out of error text.
+_REDACTED = "<redacted>"
+
+#: The argument payload pydantic quotes back after rejecting a value.  A server
+#: that validates its input hands the offending value straight to the client in
+#: its error text, and that value is whatever the model sent — routinely a token
+#: or a file's contents.  The payload runs up to ``input_type=`` when pydantic
+#: supplies that trailing context and to the end of the line when it does not;
+#: ``.*`` is greedy so a value that itself contains the text ``", input_type="``
+#: is consumed up to the real suffix instead of leaking its tail.  ``.`` does not
+#: cross a newline, so one error's payload never eats the next error's report.
+_ARGUMENT_PAYLOAD = re.compile(
+    r"input_value=(?:(?P<payload>.*)(?P<suffix>, input_type=[^\]\n]*)|[^\n]*)"
+)
+
+
+def _redact_arguments(text: str) -> str:
+    """Cut argument payloads out of error text while keeping it diagnosable.
+
+    Only the value is removed: the tool, the server, the offending field name
+    and the description of what was expected all survive, so the message still
+    says *what* was wrong even though it no longer says *with what*.
+
+    Args:
+        text: Error text as reported, possibly quoting the call's arguments.
+
+    Returns:
+        The same text with every ``input_value=`` payload replaced by
+        :data:`_REDACTED`.
+    """
+    return _ARGUMENT_PAYLOAD.sub(rf"input_value={_REDACTED}\g<suffix>", text)
 
 
 class McpConnectionState(str, Enum):
@@ -102,9 +135,20 @@ class McpClient:
         and the child process alive as an orphan.  Only ``Client.close()`` sets
         the transport's stop event and tears down the process group.
 
+        Cancellation is the same story with a different trigger: ``Ctrl-C``, a
+        TUI shutdown or an enclosing ``wait_for`` delivers
+        :class:`asyncio.CancelledError`, which derives from ``BaseException``
+        and so bypasses an ``except Exception`` handler entirely.  It is caught,
+        cleaned up after and then re-raised — swallowing a cancellation is not
+        this method's call to make, but orphaning a subprocess is not an option
+        either.
+
         Returns:
             ``True`` when the client is connected and its tools are cached,
             ``False`` otherwise.
+
+        Raises:
+            asyncio.CancelledError: If the caller cancels the connection.
         """
         if self._state is McpConnectionState.CONNECTED:
             return True
@@ -124,13 +168,17 @@ class McpClient:
             self._tools = list(
                 await asyncio.wait_for(client.list_tools(), timeout=timeout)
             )
-        except Exception as exc:  # pylint: disable=broad-except
+        except BaseException as exc:  # pylint: disable=broad-except
             # Cleanup runs outside the timed-out await, or the teardown itself
-            # would be cancelled and the subprocess orphaned after all.
-            await self._force_close()
+            # would be cancelled and the subprocess orphaned after all.  The
+            # shield keeps a *repeat* cancellation — a second Ctrl-C, or an
+            # enclosing wait_for firing as well — from interrupting it too.
+            await asyncio.shield(self._force_close())
             self._state = McpConnectionState.FAILED
             self._last_error = f"{type(exc).__name__}: {exc}"
-            return False
+            if isinstance(exc, Exception):
+                return False
+            raise
 
         self._state = McpConnectionState.CONNECTED
         self._last_error = ""
@@ -206,8 +254,12 @@ class McpClient:
                 timeout=timeout,
             )
         except ToolError as exc:
+            # The server's own text is the most likely place for the arguments to
+            # reappear: an argument-validation failure quotes the value it
+            # rejected, so the payload is cut before anything is interpolated.
             raise MitoCodeMcpToolCallError(
-                f"MCP tool '{tool_name}' on server '{server}' failed: {exc}"
+                f"MCP tool '{tool_name}' on server '{server}' failed: "
+                f"{_redact_arguments(str(exc))}"
             ) from exc
         except asyncio.TimeoutError as exc:
             raise MitoCodeMcpToolCallError(
@@ -217,11 +269,13 @@ class McpClient:
         except MitoCodeMcpToolCallError:
             raise
         except Exception as exc:  # pylint: disable=broad-except
-            # Arguments are never echoed: they routinely carry file contents and
-            # credentials, and this text reaches the TUI error pane and logs.
+            # Arguments are never echoed here either: they routinely carry file
+            # contents and credentials, and this text reaches the TUI error pane
+            # and logs.  A local validation failure can quote them just as a
+            # server-side one does, so the same redaction applies.
             raise MitoCodeMcpToolCallError(
                 f"MCP tool '{tool_name}' on server '{server}' raised "
-                f"{type(exc).__name__}: {exc}"
+                f"{type(exc).__name__}: {_redact_arguments(str(exc))}"
             ) from exc
         return self._render_result(result)
 
