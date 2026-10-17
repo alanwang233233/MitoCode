@@ -119,6 +119,7 @@ class FakeClient:
         self._config = config
         self._succeed = succeed
         self.keep_tools_on_failure = keep_tools_on_failure
+        self._cancel_next = False
         self.server_name = config.name
         self.tools = [
             SimpleNamespace(
@@ -138,9 +139,20 @@ class FakeClient:
     async def connect(self):
         """Move to CONNECTED or FAILED according to the scripted outcome.
 
+        One-shot cancellation is honoured first, so a test can arm it *after*
+        a successful ``start`` rather than making every later connect fail.
+
         Returns:
             The scripted outcome.
+
+        Raises:
+            asyncio.CancelledError: If :meth:`cancel_next_connect` armed this
+                attempt, which is how ``McpClient.connect`` behaves when the
+                caller cancels it.
         """
+        if self._cancel_next:
+            self._cancel_next = False
+            raise asyncio.CancelledError()
         self.connected = self._succeed
         if self._succeed:
             self.state = McpConnectionState.CONNECTED
@@ -162,6 +174,10 @@ class FakeClient:
         """Make every later connect attempt fail, as a server going away would."""
         self._succeed = False
 
+    def cancel_next_connect(self):
+        """Cancel only the next connect, leaving any later one to succeed."""
+        self._cancel_next = True
+
     async def call_tool(self, tool_name, arguments):
         """Record the call and render it, as the real client would."""
         self.calls += 1
@@ -182,17 +198,15 @@ class RudeClient(FakeClient):
         Args:
             config: The ``McpServerConfig`` this stand-in represents.
             succeed: Value :meth:`connect` reports back when it does not raise.
-            fail_on: ``"connect"``, ``"disconnect"``, ``"cancel"`` or ``""``.
+            fail_on: ``"connect"``, ``"disconnect"`` or ``""``.
         """
         super().__init__(config, succeed=succeed)
         self._fail_on = fail_on
 
     async def connect(self):
-        """Raise, or cancel, instead of connecting when this client is armed."""
+        """Raise instead of connecting when this client is armed for it."""
         if self._fail_on == "connect":
             raise RuntimeError("handshake exploded")
-        if self._fail_on == "cancel":
-            raise asyncio.CancelledError()
         return await super().connect()
 
     async def disconnect(self):
@@ -288,6 +302,8 @@ def _run_import_probe(script):
         env=env,
         cwd=env["MITOCODE_SRC"],
         check=False,
+        # A wedged child must fail the test rather than hang the whole suite.
+        timeout=120,
     )
 
 
@@ -569,7 +585,7 @@ async def test_start_records_a_cancelled_server_and_lets_the_cancellation_out():
     so without this the server would report a failure with no reason at all.
     """
     tool_manager = ToolManager()
-    factory = _rude_factory({"bad": "cancel", "good": ""})
+    factory = _rude_factory({"bad": "", "good": ""})
     manager = McpManager(
         _config(
             ("bad", {"url": "https://bad.invalid/mcp"}),
@@ -578,6 +594,7 @@ async def test_start_records_a_cancelled_server_and_lets_the_cancellation_out():
         tool_manager=tool_manager,
         client_factory=factory,
     )
+    factory.made["bad"].cancel_next_connect()
 
     with pytest.raises(asyncio.CancelledError):
         await manager.start()
@@ -587,6 +604,149 @@ async def test_start_records_a_cancelled_server_and_lets_the_cancellation_out():
     assert (
         factory.made["good"].state is McpConnectionState.CONNECTED
     ), "the server that did connect still published its tools"
+
+
+@pytest.mark.asyncio
+async def test_start_keeps_owning_a_tool_it_could_not_unregister(monkeypatch):
+    """A second ``start`` must not forget a tool the registry refused to remove.
+
+    ``register_mcp_client`` skips a name that is still registered, so its
+    result omits the stuck tool.  Assigning that result to the ownership record
+    would forget the tool while it is still in the registry — dispatchable,
+    counted nowhere, and reclaimable by nobody.
+    """
+    tool_manager = ToolManager()
+    real_unregister = tool_manager.unregister
+    armed = {"bad": False}
+
+    def _unregister(name):
+        if armed["bad"] and name == "mcp__weather__x":
+            raise RuntimeError("registry exploded")
+        return real_unregister(name)
+
+    monkeypatch.setattr(tool_manager, "unregister", _unregister)
+    factory = _factory({"weather": (True, ("x",))})
+    manager = McpManager(
+        _config(("weather", {"url": "https://w.invalid/mcp"})),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    await manager.start()
+    armed["bad"] = True
+
+    await manager.start()
+
+    assert (
+        manager.status()["weather"].tool_count == 1
+    ), "the tool is still in the registry, so status() must still count it"
+    assert "registry exploded" in manager.status()["weather"].error
+
+    armed["bad"] = False
+    await manager.stop()
+
+    assert (
+        tool_manager.tools_map() == {}
+    ), "a later stop() must reclaim the tool nobody forgot"
+
+
+@pytest.mark.asyncio
+async def test_start_owns_the_tools_a_refresh_could_not_unregister(monkeypatch):
+    """The same guarantee holds on ``refresh``, the other path through it."""
+    tool_manager = ToolManager()
+    real_unregister = tool_manager.unregister
+    armed = {"bad": False}
+
+    def _unregister(name):
+        if armed["bad"] and name == "mcp__weather__a":
+            raise RuntimeError("registry exploded")
+        return real_unregister(name)
+
+    monkeypatch.setattr(tool_manager, "unregister", _unregister)
+    factory = _factory({"weather": (True, ("a", "b"))})
+    manager = McpManager(
+        _config(("weather", {"url": "https://w.invalid/mcp"})),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    await manager.start()
+    armed["bad"] = True
+
+    await manager.refresh("weather")
+
+    assert (
+        manager.status()["weather"].tool_count == 2
+    ), "'a' is stuck in the registry and 'b' was registered, so both are owned"
+
+    armed["bad"] = False
+    await manager.stop()
+
+    assert tool_manager.tools_map() == {}
+
+
+@pytest.mark.asyncio
+async def test_stop_completes_both_phases_and_then_propagates_a_cancellation(
+    monkeypatch,
+):
+    """A cancelled unregistration must not skip the disconnections.
+
+    The two phases run one after the other, so re-raising as soon as the first
+    one is cancelled would leave every server connected — the outcome the
+    per-server isolation exists to prevent, reached through the propagation path.
+    """
+    tool_manager = ToolManager()
+    factory = _factory({"bad": (True, ("x",)), "good": (True, ("y",))})
+    manager = McpManager(
+        _config(
+            ("bad", {"url": "https://bad.invalid/mcp"}),
+            ("good", {"url": "https://good.invalid/mcp"}),
+        ),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    await manager.start()
+
+    real_unregister = tool_manager.unregister
+
+    def _unregister(name):
+        if name == "mcp__bad__x":
+            raise asyncio.CancelledError()
+        return real_unregister(name)
+
+    monkeypatch.setattr(tool_manager, "unregister", _unregister)
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.stop()
+
+    assert factory.made["good"].state is McpConnectionState.DISCONNECTED
+    assert (
+        factory.made["bad"].state is McpConnectionState.DISCONNECTED
+    ), "every connection was closed before the cancellation was re-raised"
+    assert manager.status()["bad"].error == "CancelledError"
+
+
+@pytest.mark.asyncio
+async def test_refresh_records_a_cancellation_and_lets_it_out():
+    """``refresh`` propagates a cancellation for the same reason ``start`` does."""
+    tool_manager = ToolManager()
+    factory = _rude_factory({"bad": "", "good": ""})
+    manager = McpManager(
+        _config(
+            ("bad", {"url": "https://bad.invalid/mcp"}),
+            ("good", {"url": "https://good.invalid/mcp"}),
+        ),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    await manager.start()
+    factory.made["bad"].cancel_next_connect()
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.refresh("bad")
+
+    assert manager.status()["bad"].error == "CancelledError"
+    assert (
+        factory.made["good"].state is McpConnectionState.CONNECTED
+    ), "refreshing one server left the others alone"
 
 
 @pytest.mark.asyncio
@@ -1084,7 +1244,7 @@ def test_mcp_package_exports_the_manager_and_its_neighbours():
     }, "the package advertises exactly the six documented names"
 
 
-def test_mcp_package_imports_without_the_tool_layer(tmp_path):
+def test_mcp_package_imports_without_the_tool_layer():
     """The ``mcp`` package must be importable with no tool layer at all.
 
     The plan fixes the dependency direction: ``mcp`` never imports

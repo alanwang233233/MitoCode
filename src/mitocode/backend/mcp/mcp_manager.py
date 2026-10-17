@@ -239,17 +239,29 @@ class McpManager:
         leave a registered tool pointing at a dead client, which fails at
         call time in the model's hands rather than here.
 
-        Both phases are isolated per server.  A registry that refuses to give a
-        tool back must not skip the teardown that releases the subprocesses,
-        and a connection that refuses to close must not strand the others;
-        either is recorded against its server in :meth:`status` instead.
+        Both phases are isolated per server, and a cancellation in the first
+        does not skip the second: the disconnection phase releases the
+        subprocesses, and leaving every one of them running because an
+        unregistration was cancelled is the failure mode this method exists to
+        prevent.  A registry that refuses to give a tool back must not skip that
+        teardown either, and a connection that refuses to close must not strand
+        the others; either is recorded against its server in :meth:`status`
+        instead.
 
         Raises:
             asyncio.CancelledError: If one server's unregistration or
-                disconnection is cancelled.
+                disconnection is cancelled, after both phases have run.
         """
-        await self._run_each(list(self._clients), self._unregister_one)
-        await self._run_each(list(self._clients), self._disconnect_one)
+        cancelled: Optional[asyncio.CancelledError] = None
+        for phase in (self._unregister_one, self._disconnect_one):
+            try:
+                await self._run_each(list(self._clients), phase)
+            except asyncio.CancelledError as exc:
+                # Remember the first one and carry on to the next phase; the
+                # caller is told afterwards, not in place of the teardown.
+                cancelled = cancelled or exc
+        if cancelled is not None:
+            raise cancelled
 
     async def refresh(self, server_name: Optional[str] = None) -> None:
         """Reconnect servers so a changed tool catalogue is picked up.
@@ -304,7 +316,7 @@ class McpManager:
         return snapshot
 
     async def _run_each(
-        self, names: List[str], operation: Callable[[str], Awaitable[None]]
+        self, names: List[str], operation: Callable[[str], Awaitable[Any]]
     ) -> None:
         """Run *operation* once per name, concurrently, isolating failures.
 
@@ -323,6 +335,7 @@ class McpManager:
         Args:
             names: Servers to run *operation* for, each visited exactly once.
             operation: One server's worth of work, e.g. :meth:`_connect_one`.
+                Whatever it returns is discarded; it manages its own state.
 
         Raises:
             asyncio.CancelledError: If *operation* was cancelled for one server.
@@ -364,18 +377,30 @@ class McpManager:
         # Whatever this server registered last time is released first, so a
         # repeated start or refresh cannot leave the previous names behind as
         # tools nobody owns and stop() cannot unregister.
-        await self._unregister_one(name)
+        stuck = await self._unregister_one(name)
         try:
             specs = self._tool_manager.register_mcp_client(client)
         except Exception as exc:  # pylint: disable=broad-except
             self._record_failure(name, exc, "failed to register its tools")
             return
 
-        self._registered[name] = [spec.name for spec in specs]
-        self._errors.pop(name, None)
+        # ``stuck`` is non-empty only when a removal above failed.  Those tools
+        # are still in the registry, so register_mcp_client skipped their names
+        # and they are absent from ``specs``: recording ``specs`` alone would
+        # forget the one record a later stop() needs to reclaim them, leaving a
+        # dispatchable tool nobody owns.  The error stays recorded for the same
+        # reason.
+        self._registered[name] = [spec.name for spec in specs] + stuck
+        if not stuck:
+            self._errors.pop(name, None)
 
     async def _reconnect_one(self, name: str) -> None:
         """Unregister, close and reconnect one server.
+
+        The unregistration here is what makes a *failed* reconnect publish
+        nothing, since :meth:`_connect_one` only registers after a successful
+        connect.  Its leftover names need no handling: they stay in the
+        ownership record, and :meth:`_connect_one` retries them.
 
         Args:
             name: Name of the server to reconnect, as keyed in ``_clients``.
@@ -399,7 +424,7 @@ class McpManager:
         except Exception as exc:  # pylint: disable=broad-except
             self._record_failure(name, exc, "failed to disconnect")
 
-    async def _unregister_one(self, name: str) -> None:
+    async def _unregister_one(self, name: str) -> List[str]:
         """Remove every tool one server registered from the registry.
 
         The ownership record is updated per tool and only once the registry has
@@ -419,6 +444,11 @@ class McpManager:
 
         Args:
             name: Name of the server whose tools are removed.
+
+        Returns:
+            The tools that are still in the registry because their removal
+            failed, so the caller can keep owning them.  Empty when everything
+            this server held was released.
         """
         remaining: List[str] = []
         for tool_name in self._registered.get(name, []):
@@ -437,12 +467,13 @@ class McpManager:
                 )
         if remaining:
             self._registered[name] = remaining
-            return
+            return remaining
         self._registered.pop(name, None)
         # Nothing failed and nothing is left, so whatever this server last
         # complained about is history.  Leaving it in place would have status()
         # report a failure that no longer describes anything.
         self._errors.pop(name, None)
+        return []
 
     def _record_failure(self, name: str, exc: BaseException, problem: str) -> None:
         """Remember a failure the client did not report itself, and log it.
@@ -451,8 +482,11 @@ class McpManager:
             name: Name of the MCP server that failed.
             exc: The exception that ended the operation.
             problem: A complete phrase saying what went wrong, e.g.
-                ``"failed to connect"`` — it is logged verbatim and may name a
-                tool, which is never a credential.
+                ``"failed to connect"``.  It is logged verbatim and may name a
+                tool.  Such a name is arbitrary text from the server, so it is
+                not guaranteed to look innocuous — but it is already published
+                through :meth:`status` and the tool schemas, so naming it here
+                adds no exposure of its own.
         """
         self._errors[name] = _describe(exc)
         logger.error(f"MCP server '{name}': {problem}: {self._errors[name]}")
