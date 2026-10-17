@@ -3,6 +3,7 @@ import subprocess
 import sys
 import unittest.mock as mock
 from types import SimpleNamespace
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
 import pytest
 
@@ -11,7 +12,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from mitocode.backend.agent.agent_session import AgentSession
 from mitocode.backend.agent.session_factory import SessionFactory
 from mitocode.backend.chat_provider.sample_chat_provider import _SampleChatProvider
+from mitocode.backend.exception.mitocode_exception import MitoCodeToolDefinitionError
 from mitocode.backend.tool.tool_manager import (
+    MCP_TOOL_PREFIX,
+    MCP_TOOL_SEPARATOR,
     ToolManager,
     declare_tool,
     _build_parameters_schema,
@@ -40,6 +44,76 @@ assert "fastmcp" not in sys.modules, "fastmcp was imported"
 leaked = [m for m in sys.modules if m.startswith("mitocode.backend.mcp")]
 assert not leaked, f"mcp package imported at runtime: {leaked}"
 """
+
+#: The same blocked-fastmcp interpreter, but this one also *calls* the MCP entry
+#: point.  ``_IMPORT_WITHOUT_FASTMCP`` only observes imports that happen while
+#: ``tool_manager`` is being imported, so a lazy ``import`` inside a function
+#: body would sail past it; this probe closes that hole by exercising
+#: ``register_mcp_client`` and then re-checking ``sys.modules``.
+_IMPORT_WITHOUT_FASTMCP_WHEN_CALLED = """
+import importlib.abc
+import sys
+
+
+class _BlockFastMcp(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "fastmcp" or fullname.startswith("fastmcp."):
+            raise ImportError("fastmcp is not installed")
+        return None
+
+
+class _DuckTypedClient:
+    server_name = "files"
+    tools = []
+
+    async def call_tool(self, tool_name, arguments):
+        return ""
+
+
+sys.meta_path.insert(0, _BlockFastMcp())
+from mitocode.backend.tool.tool_manager import ToolManager
+
+leaked_at_import = [m for m in sys.modules if m.startswith("mitocode.backend.mcp")]
+assert not leaked_at_import, f"mcp package imported at import time: {leaked_at_import}"
+
+registered = ToolManager().register_mcp_client(_DuckTypedClient())
+assert registered == [], f"an empty catalogue registers nothing, got {registered!r}"
+
+leaked_after_call = [m for m in sys.modules if m.startswith("mitocode.backend.mcp")]
+assert not leaked_after_call, f"register_mcp_client imported the mcp package: {leaked_after_call}"
+assert "fastmcp" not in sys.modules, "fastmcp was imported"
+"""
+
+
+def _run_import_probe(script, cwd):
+    """Run *script* in a child interpreter that cannot resolve ``fastmcp``.
+
+    ``PYTHONPATH`` is absolute and carries no empty trailing entry, and the child
+    runs in an empty *cwd*: ``python -c`` puts the working directory at the front
+    of ``sys.path`` and an empty ``PYTHONPATH`` element adds it again, so a
+    ``cwd`` holding a ``mitocode/`` package would shadow the module under test
+    and quietly turn the probe into a test of the decoy.
+
+    Args:
+        script: Source for the child interpreter.
+        cwd: Directory the child runs in; must contain no importable package.
+
+    Returns:
+        The completed ``subprocess.CompletedProcess``.
+    """
+    src_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([src_dir, env.get("PYTHONPATH", "")]).rstrip(
+        os.pathsep
+    )
+    return subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(cwd),
+        check=False,
+    )
 
 
 def test_tool_manager_decorator_registration_and_docs():
@@ -132,27 +206,28 @@ def test_dict_reference_pollution():
     assert props["city"] is not props["country"]
 
 
-def test_tool_manager_imports_without_fastmcp_installed():
+def test_tool_manager_imports_without_fastmcp_installed(tmp_path):
     """tool_manager must stay importable where fastmcp is absent.
 
     Dependency runs one way — tool_manager -> mcp -> fastmcp — so the MCP
     reference in ``register_mcp_client``'s annotation must stay under
     ``TYPE_CHECKING`` and the module must duck-type the client at runtime.
+
+    *tmp_path* is an empty directory so the child interpreter's ``sys.path``
+    cannot pick up a stray ``mitocode/`` package and shadow the module under
+    test.
     """
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(
-        [
-            os.path.join(os.path.dirname(__file__), "..", "src"),
-            env.get("PYTHONPATH", ""),
-        ]
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", _IMPORT_WITHOUT_FASTMCP],
-        capture_output=True,
-        text=True,
-        env=env,
-        check=False,
-    )
+    result = _run_import_probe(_IMPORT_WITHOUT_FASTMCP, tmp_path)
+    assert result.returncode == 0, result.stderr
+
+
+def test_tool_manager_does_not_import_the_mcp_package_when_called(tmp_path):
+    """Calling the MCP entry point must not pull the mcp package in either.
+
+    The import-time probe above cannot see a function-body import, so this one
+    registers a duck-typed client and re-checks ``sys.modules`` afterwards.
+    """
+    result = _run_import_probe(_IMPORT_WITHOUT_FASTMCP_WHEN_CALLED, tmp_path)
     assert result.returncode == 0, result.stderr
 
 
@@ -325,3 +400,849 @@ async def test_registered_mcp_tools_dispatch_to_their_own_server_tool():
         ("read", {"path": "a.txt"}),
         ("write", {"path": "b.txt", "body": "hi"}),
     ]
+
+
+def test_mcp_tool_namespace_constants_are_the_documented_strings():
+    """The prefix and separator are module-public; the composed name depends on them."""
+    assert MCP_TOOL_PREFIX == "mcp__", "every remote tool must be recognisably remote"
+    assert MCP_TOOL_SEPARATOR == "__", "server and tool names are joined by __"
+
+
+def test_build_mcp_tool_name_joins_names_verbatim_without_escaping():
+    """A server name holding the separator is not escaped, so composition is ambiguous."""
+    composed = ToolManager.build_mcp_tool_name("my__files", "read")
+    assert composed == "mcp__my__files__read", "names are concatenated as given"
+    assert (
+        ToolManager.build_mcp_tool_name("my", "files__read") == "mcp__my__files__read"
+    ), "a different server/tool pair composes to the same string"
+
+
+@pytest.mark.parametrize(
+    "annotation, expected_type",
+    [
+        (str, "string"),
+        (int, "integer"),
+        (float, "number"),
+        (bool, "boolean"),
+        (dict, "object"),
+        (list, "array"),
+        (type(None), "null"),
+    ],
+)
+def test_build_parameters_schema_types_each_supported_scalar(annotation, expected_type):
+    """Every supported base annotation maps to its documented JSON Schema type."""
+
+    def probe(value: annotation):
+        return value
+
+    schema = _build_parameters_schema(probe)
+    assert list(schema["properties"]) == ["value"], "one entry per keyword argument"
+    assert schema["properties"]["value"] == {
+        "type": expected_type
+    }, f"{annotation!r} must render as {expected_type!r}"
+
+
+def test_two_tools_with_the_same_annotation_get_independent_schema_dicts():
+    """One tool's parameter schema must never be the same object as another's."""
+
+    def first(text: str):
+        return text
+
+    def second(text: str):
+        return text
+
+    first_property = _build_parameters_schema(first)["properties"]["text"]
+    second_property = _build_parameters_schema(second)["properties"]["text"]
+    first_property["type"] = "integer"
+
+    assert second_property == {
+        "type": "string"
+    }, "a schema fragment shared with the module's type map would be corrupted here"
+
+
+def test_build_parameters_schema_types_an_unannotated_parameter_as_a_required_string():
+    """An absent annotation means string, and the parameter stays required."""
+
+    def unannotated(value):
+        return value
+
+    schema = _build_parameters_schema(unannotated)
+    assert schema["properties"]["value"] == {
+        "type": "string"
+    }, "an un-annotated parameter is described as a string"
+    assert schema["required"] == ["value"], "no default was given, so it is required"
+
+
+def test_build_parameters_schema_renders_an_optional_parameter_as_a_two_branch_any_of():
+    """``Optional[str]`` is a two-member union, so it is not a bare string."""
+
+    def maybe(label: Optional[str]):
+        return label
+
+    schema = _build_parameters_schema(maybe)
+    assert schema["properties"]["label"] == {
+        "anyOf": [{"type": "string"}, {"type": "null"}]
+    }, "Optional[str] must offer both string and null"
+
+
+def test_build_parameters_schema_renders_a_pep604_union_as_any_of():
+    """``str | None`` must be treated exactly like ``Optional[str]``."""
+
+    def maybe(label: str | None):
+        return label
+
+    schema = _build_parameters_schema(maybe)
+    assert schema["properties"]["label"] == {
+        "anyOf": [{"type": "string"}, {"type": "null"}]
+    }, "the PEP 604 union type is a union too"
+
+
+def test_build_parameters_schema_renders_a_literal_as_an_enum_of_its_first_members_type():
+    """The enum's JSON type is taken from its first member."""
+
+    def choose(mode: Literal["read", "write"]):
+        return mode
+
+    schema = _build_parameters_schema(choose)
+    assert schema["properties"]["mode"] == {
+        "type": "string",
+        "enum": ["read", "write"],
+    }, "a Literal of strings is a string constrained to those values"
+
+
+def test_build_parameters_schema_renders_an_empty_literal_as_a_string():
+    """A Literal with no members has no member whose type could be sampled."""
+
+    def choose(mode: Literal[()]):
+        return mode
+
+    schema = _build_parameters_schema(choose)
+    assert schema["properties"]["mode"] == {
+        "type": "string"
+    }, "an empty enum falls back to the un-annotated default"
+
+
+@pytest.mark.parametrize(
+    "annotation, expected",
+    [
+        (List[int], {"type": "array", "items": {"type": "integer"}}),
+        (Tuple[int, str], {"type": "array", "items": {"type": "integer"}}),
+        (Set[float], {"type": "array", "items": {"type": "number"}}),
+    ],
+)
+def test_build_parameters_schema_types_a_parameterised_sequence_as_an_array(
+    annotation, expected
+):
+    """A list, tuple or set annotation is an array described by its first item."""
+
+    def collect(values: annotation):
+        return values
+
+    schema = _build_parameters_schema(collect)
+    assert (
+        schema["properties"]["values"] == expected
+    ), f"{annotation!r} must render as {expected!r}"
+
+
+def test_build_parameters_schema_types_a_bare_list_annotation_as_an_array_without_items():
+    """An un-parameterised ``list`` has no item type to advertise."""
+
+    def collect(values: list):
+        return values
+
+    schema = _build_parameters_schema(collect)
+    assert schema["properties"]["values"] == {
+        "type": "array"
+    }, "no items key is invented for a bare list"
+
+
+@pytest.mark.parametrize(
+    "annotation, expected",
+    [
+        (list, {"type": "array"}),
+        (List, {"type": "array"}),
+        (dict, {"type": "object"}),
+        (Dict, {"type": "object"}),
+    ],
+)
+def test_build_parameters_schema_types_an_unparameterised_container_without_element_type(
+    annotation, expected
+):
+    """A bare builtin and its bare ``typing`` alias must describe the same thing."""
+
+    def collect(values: annotation):
+        return values
+
+    schema = _build_parameters_schema(collect)
+    assert (
+        schema["properties"]["values"] == expected
+    ), f"{annotation!r} has no element type to advertise, so none is invented"
+
+
+@pytest.mark.parametrize("annotation", [tuple, set])
+def test_register_rejects_a_bare_tuple_or_set_annotation(annotation):
+    """A bare ``list`` is supported but a bare ``tuple``/``set`` is not.
+
+    The supported list in the docstring names str/int/float/bool/dict/list, so
+    ``tuple`` and ``set`` are rejected even though their parameterised forms are
+    accepted.
+    """
+
+    def collect(values: annotation):
+        return values
+
+    manager = ToolManager()
+    with pytest.raises(MitoCodeToolDefinitionError, match="Unsupported type"):
+        manager.register(collect, name="collect")
+
+    assert (
+        manager.tools_map() == {}
+    ), "a rejected annotation must leave the registry untouched"
+
+
+def test_build_parameters_schema_types_a_mapping_annotation_by_its_value_type():
+    """The key type of a mapping annotation is dropped; the value type is kept."""
+
+    def index(table: Dict[str, int]):
+        return table
+
+    schema = _build_parameters_schema(index)
+    assert schema["properties"]["table"] == {
+        "type": "object",
+        "additionalProperties": {"type": "integer"},
+    }, "Dict[str, int] describes an object whose values are integers"
+
+
+@pytest.mark.parametrize("annotation", [complex, Any])
+def test_register_rejects_an_unsupported_annotation_without_registering(annotation):
+    """An annotation outside the supported set fails loudly, leaving no half-built tool."""
+
+    def broken(value: annotation):
+        return value
+
+    manager = ToolManager()
+    with pytest.raises(
+        MitoCodeToolDefinitionError, match="Unsupported type annotation"
+    ):
+        manager.register(broken, name="broken")
+
+    assert manager.tools_map() == {}, "a failed derivation must not register a tool"
+
+
+def test_register_rejects_a_positional_only_parameter_without_registering():
+    """LLMs invoke tools by keyword, so a positional-only parameter is unrepresentable."""
+
+    def broken(value: str, /):
+        return value
+
+    manager = ToolManager()
+    with pytest.raises(
+        MitoCodeToolDefinitionError, match="positional-only parameter 'value'"
+    ):
+        manager.register(broken, name="broken")
+
+    assert (
+        manager.tools_map() == {}
+    ), "a rejected signature must leave the registry untouched"
+
+
+def test_register_names_a_callable_object_by_its_class_in_the_rejection_message():
+    """A tool without ``__name__`` is still named in the error, by its class."""
+
+    class BrokenTool:
+        def __call__(self, value: str, /):
+            return value
+
+    manager = ToolManager()
+    with pytest.raises(MitoCodeToolDefinitionError, match="Tool function 'BrokenTool'"):
+        manager.register(BrokenTool(), name="broken")
+
+    assert (
+        manager.tools_map() == {}
+    ), "a rejected signature must leave the registry untouched"
+
+
+def test_build_parameters_schema_omits_star_args_and_star_kwargs():
+    """``*args``/``**kwargs`` are not keyword arguments a model could name."""
+
+    def collect(required: int, *args, **kwargs):
+        return required, args, kwargs
+
+    schema = _build_parameters_schema(collect)
+    assert list(schema["properties"]) == [
+        "required"
+    ], "only named parameters are described"
+    assert schema["required"] == [
+        "required"
+    ], "the named parameter keeps its requiredness"
+
+
+def test_build_parameters_schema_omits_the_required_key_when_nothing_is_required():
+    """An all-defaults signature advertises defaults and no required list."""
+
+    def defaulted(count: int = 0):
+        return count
+
+    schema = _build_parameters_schema(defaulted)
+    assert "required" not in schema, "no required parameter means no required list"
+    assert schema["properties"]["count"] == {
+        "type": "integer",
+        "default": 0,
+    }, "the default is advertised so the model may omit the argument"
+
+
+def test_build_parameters_schema_always_forbids_undeclared_arguments():
+    """The top-level schema is always a closed object schema."""
+
+    def simple(text: str):
+        return text
+
+    schema = _build_parameters_schema(simple)
+    assert schema["type"] == "object", "a parameter list describes an object"
+    assert (
+        schema["additionalProperties"] is False
+    ), "an undeclared argument cannot be passed by a model, so it is forbidden"
+
+
+def test_declare_tool_without_a_name_falls_back_to_the_function_name():
+    """An unnamed declaration keeps the decorated function's own name."""
+
+    @declare_tool(human_doc="doc", agent_doc="agent")
+    def fallback_name():
+        return None
+
+    manager = ToolManager()
+    manager.register(fallback_name)
+
+    assert list(manager.tools_map()) == [
+        "fallback_name"
+    ], "no name means the function's __name__"
+
+
+def test_register_prefers_an_explicit_name_over_declare_tool_metadata():
+    """The explicit ``name`` argument outranks the declared metadata name."""
+
+    @declare_tool(name="meta_name")
+    def conflict(text: str):
+        return text
+
+    manager = ToolManager()
+    manager.register(conflict, name="explicit_name")
+
+    assert list(manager.tools_map()) == [
+        "explicit_name"
+    ], "the explicit name is the one the model sees"
+
+
+def test_register_prefers_explicit_docs_over_declare_tool_metadata():
+    """The explicit doc arguments outrank the declared metadata docs."""
+
+    @declare_tool(human_doc="meta human", agent_doc="meta agent")
+    def conflict(text: str):
+        return text
+
+    manager = ToolManager()
+    manager.register(conflict, human_doc="explicit human", agent_doc="explicit agent")
+
+    assert manager.human_docs()["conflict"] == "explicit human", "explicit wins"
+    assert manager.agent_docs()["conflict"] == "explicit agent", "explicit wins"
+
+
+def test_register_falls_back_to_the_function_docstring_for_both_audiences():
+    """With no metadata and no arguments, the function's docstring is the description."""
+
+    def documented():
+        """Search the workspace."""
+
+    manager = ToolManager()
+    manager.register(documented)
+
+    assert manager.human_docs()["documented"] == "Search the workspace.", "docstring"
+    assert manager.agent_docs()["documented"] == (
+        "Search the workspace."
+    ), "the agent description falls back to the human one"
+
+
+def test_register_gives_an_undocumented_tool_empty_docs_for_both_audiences():
+    """No docstring, no metadata and no arguments means no description at all."""
+
+    def bare():
+        return None
+
+    manager = ToolManager()
+    manager.register(bare)
+
+    assert (
+        manager.human_docs()["bare"] == ""
+    ), "an absent docstring is not the string 'None'"
+    assert manager.agent_docs()["bare"] == "", "and the agent gets nothing either"
+
+
+def test_register_falls_back_to_the_human_doc_when_only_that_is_given():
+    """An agent-only description may be omitted; the human one then serves both."""
+
+    @declare_tool(human_doc="human only")
+    def only_human():
+        return None
+
+    manager = ToolManager()
+    manager.register(only_human)
+
+    assert manager.human_docs()["only_human"] == "human only", "the declared human doc"
+    assert manager.agent_docs()["only_human"] == (
+        "human only"
+    ), "the agent description defaults to the human description"
+
+
+def test_register_reads_parameters_schema_from_declare_tool_metadata():
+    """The documented metadata tier for ``parameters_schema`` does work.
+
+    ``declare_tool`` writes only ``name``, ``human_doc`` and ``agent_doc``, so
+    there is no public way to place ``parameters_schema`` into the metadata this
+    tier reads; the private attribute has to be written by hand.  That makes
+    the tier advertised but unreachable through the public API.
+    """
+    manager = ToolManager()
+    from_meta = {"type": "object", "properties": {"remote": {"type": "string"}}}
+
+    @declare_tool(name="remote_call")
+    def remote_call(**kwargs):
+        return kwargs
+
+    remote_call.__mitocode_tool_meta__["parameters_schema"] = from_meta
+    spec = manager.register(remote_call)
+
+    assert (
+        spec.parameters_schema == from_meta
+    ), "the metadata schema must outrank the derived empty one"
+    assert (
+        "remote" in spec.parameters_schema["properties"]
+    ), "the server's shape survives"
+
+
+def test_register_prefers_the_explicit_parameters_schema_over_declare_tool_metadata():
+    """Tier one beats tier two: the explicit argument wins over the metadata."""
+
+    @declare_tool(name="tiered")
+    def tiered(**kwargs):
+        return kwargs
+
+    tiered.__mitocode_tool_meta__["parameters_schema"] = {
+        "type": "object",
+        "properties": {"from_meta": {"type": "string"}},
+    }
+    explicit = {"type": "object", "properties": {"explicit": {"type": "boolean"}}}
+
+    manager = ToolManager()
+    spec = manager.register(tiered, parameters_schema=explicit)
+
+    assert spec.parameters_schema == explicit, "the explicit argument is the winner"
+    assert (
+        "from_meta" not in spec.parameters_schema["properties"]
+    ), "the metadata tier must not be consulted at all"
+
+
+def test_register_keeps_an_explicitly_empty_parameters_schema_instead_of_deriving_one():
+    """An empty dict is a supplied schema, not an absent one.
+
+    ``parameters_schema={}`` is how a caller says "this tool takes no
+    arguments"; treating it as absent would advertise a derived schema instead.
+    """
+
+    def ping() -> str:
+        return "pong"
+
+    manager = ToolManager()
+    spec = manager.register(ping, parameters_schema={})
+
+    assert spec.parameters_schema == {}, "an explicit {} must be kept verbatim"
+
+
+def test_register_replaces_a_registration_that_already_uses_the_name():
+    """Registering the same name again overwrites rather than duplicating."""
+
+    def first():
+        return "first"
+
+    def second():
+        return "second"
+
+    manager = ToolManager()
+    manager.register(first, name="shared", agent_doc="first doc")
+    spec = manager.register(second, name="shared", agent_doc="second doc")
+
+    assert list(manager.tools_map()) == ["shared"], "one name, one entry"
+    assert manager.tools_map()["shared"] is second, "the newest registration wins"
+    assert spec.agent_doc == "second doc", "the description is replaced with it"
+
+
+def test_register_defaults_both_display_hints_to_empty_strings():
+    """Display hints are opt-in; without them the spec carries empty strings."""
+
+    def plain(text: str):
+        return text
+
+    manager = ToolManager()
+    spec = manager.register(plain)
+
+    assert spec.display_action == "", "no display action was requested"
+    assert spec.display_param == "", "no display parameter was requested"
+
+
+def test_tool_decorator_returns_the_decorated_function_unchanged():
+    """The decorator registers the function and hands the same object back."""
+
+    def ping():
+        return None
+
+    manager = ToolManager()
+    decorated = manager.tool(agent_doc="doc")(ping)
+
+    assert decorated is ping, "registration must not wrap or replace the callable"
+
+
+def test_tool_decorator_forwards_an_explicit_parameters_schema_to_register():
+    """The decorator must pass ``parameters_schema`` through, not swallow it."""
+    manager = ToolManager()
+    schema = {"type": "object", "properties": {"city": {"type": "string"}}}
+
+    @manager.tool(name="get_weather", parameters_schema=schema)
+    def get_weather(**kwargs):
+        return kwargs
+
+    assert (
+        manager.get_spec("get_weather").parameters_schema == schema
+    ), "the decorator forwards the schema to register()"
+
+
+def test_get_spec_returns_none_for_a_name_that_was_never_registered():
+    """An unknown name has no spec rather than raising."""
+    manager = ToolManager()
+    assert manager.get_spec("absent") is None, "a missing tool reports None"
+
+
+def test_get_spec_returns_the_same_object_register_returned():
+    """``get_spec`` exposes the registered object, not a copy of it."""
+
+    def ping():
+        return None
+
+    manager = ToolManager()
+    spec = manager.register(ping, name="ping")
+
+    assert manager.get_spec("ping") is spec, "callers must see the stored spec"
+
+
+def test_tool_schemas_defaults_to_the_agent_audience():
+    """The default audience is the agent's."""
+    manager = ToolManager()
+
+    @manager.tool(human_doc="human only", agent_doc="agent only")
+    def ping():
+        return None
+
+    assert manager.tool_schemas() == manager.tool_schemas(
+        "agent"
+    ), "the default audience is the agent's"
+    assert (
+        manager.tool_schemas()[0]["function"]["description"] == "agent only"
+    ), "the agent's description is served by default"
+
+
+def test_tool_schemas_serves_human_docs_for_the_human_audience():
+    """``audience="human"`` switches the description to the human one."""
+    manager = ToolManager()
+
+    @manager.tool(human_doc="human only", agent_doc="agent only")
+    def ping():
+        return None
+
+    assert manager.tool_schemas("human")[0]["function"]["description"] == (
+        "human only"
+    ), "the human audience gets the human description"
+
+
+def test_tool_schemas_treats_an_unknown_audience_as_the_agent_one():
+    """Only the literal ``"human"`` switches audience."""
+    manager = ToolManager()
+
+    @manager.tool(human_doc="human only", agent_doc="agent only")
+    def ping():
+        return None
+
+    assert manager.tool_schemas("operator")[0]["function"]["description"] == (
+        "agent only"
+    ), "an unrecognised audience is served the agent description"
+
+
+def test_register_mcp_client_registers_nothing_from_an_empty_catalogue():
+    """A client that discovered no tools registers nothing and warns about nothing."""
+    manager = ToolManager()
+    client = _fake_mcp_client("files", [])
+
+    with mock.patch("mitocode.backend.tool.tool_manager.logger") as fake_logger:
+        specs = manager.register_mcp_client(client)
+
+    assert specs == [], "an empty catalogue yields no specs"
+    assert manager.tools_map() == {}, "and leaves the registry untouched"
+    assert (
+        fake_logger.warning.called is False
+    ), "nothing collided, so nothing to warn about"
+
+
+def test_register_mcp_client_returns_specs_in_catalogue_order():
+    """The returned specs follow discovery order, not alphabetical order."""
+    manager = ToolManager()
+    client = _fake_mcp_client(
+        "files",
+        [
+            _fake_tool("write", description="w"),
+            _fake_tool("delete", description="d"),
+            _fake_tool("read", description="r"),
+        ],
+    )
+
+    specs = manager.register_mcp_client(client)
+
+    assert [spec.name for spec in specs] == [
+        "mcp__files__write",
+        "mcp__files__delete",
+        "mcp__files__read",
+    ], "discovery order is the contract"
+    assert list(manager.tools_map()) == [
+        spec.name for spec in specs
+    ], "the registry keeps the same order"
+
+
+def test_register_mcp_client_namespaces_the_same_tool_name_per_server():
+    """Two servers offering one tool name both register under their own namespace."""
+    manager = ToolManager()
+    alpha = _fake_mcp_client("alpha", [_fake_tool("search", description="from alpha")])
+    beta = _fake_mcp_client("beta", [_fake_tool("search", description="from beta")])
+
+    specs = manager.register_mcp_client(alpha) + manager.register_mcp_client(beta)
+
+    assert [spec.name for spec in specs] == [
+        "mcp__alpha__search",
+        "mcp__beta__search",
+    ], "the server name keeps two identical tool names apart"
+    assert manager.agent_docs()["mcp__alpha__search"] == (
+        "[alpha] from alpha"
+    ), "each keeps its own description"
+
+
+def test_register_mcp_client_warns_and_keeps_the_existing_tool_on_collision():
+    """A skipped collision is logged, not silent, and the incumbent survives."""
+    manager = ToolManager()
+
+    @manager.tool(agent_doc="built-in")
+    def mcp__files__read():
+        return "builtin"
+
+    client = _fake_mcp_client("files", [_fake_tool("read", description="remote")])
+    with mock.patch("mitocode.backend.tool.tool_manager.logger") as fake_logger:
+        specs = manager.register_mcp_client(client)
+
+    assert specs == [], "a colliding tool is not registered"
+    assert manager.agent_docs()["mcp__files__read"] == "built-in", "the incumbent wins"
+    fake_logger.warning.assert_called_once_with(
+        "Skipping MCP tool 'mcp__files__read': name already registered"
+    ), "the skip must be visible in the log"
+
+
+def test_register_mcp_client_does_not_warn_when_every_name_is_free():
+    """Only collisions warn; a clean registration is quiet."""
+    manager = ToolManager()
+    client = _fake_mcp_client("files", [_fake_tool("read", description="remote")])
+
+    with mock.patch("mitocode.backend.tool.tool_manager.logger") as fake_logger:
+        specs = manager.register_mcp_client(client)
+
+    assert len(specs) == 1, "the tool was registered"
+    assert fake_logger.warning.called is False, "a free name is not a warning"
+
+
+@pytest.mark.asyncio
+async def test_register_mcp_client_keeps_the_first_of_two_clients_with_one_server_name():
+    """A second client on the same server name never receives the dispatch."""
+    first_calls = []
+    second_calls = []
+    first = _fake_mcp_client(
+        "files", [_fake_tool("read", description="from first")], first_calls
+    )
+    second = _fake_mcp_client(
+        "files", [_fake_tool("read", description="from second")], second_calls
+    )
+    manager = ToolManager()
+    manager.register_mcp_client(first)
+    manager.register_mcp_client(second)
+
+    await manager.tools_map()["mcp__files__read"](path="a.txt")
+
+    assert first_calls == [
+        ("read", {"path": "a.txt"})
+    ], "the first client keeps ownership of the composed name"
+    assert second_calls == [], "the second client must never be dispatched to"
+
+
+def test_register_mcp_client_synthesizes_an_exact_description_for_a_blank_description():
+    """A whitespace-only description is replaced by the documented sentence."""
+
+    manager = ToolManager()
+    client = _fake_mcp_client("files", [_fake_tool("read", description="  \n\t ")])
+
+    manager.register_mcp_client(client)
+
+    assert manager.human_docs()["mcp__files__read"] == (
+        "[files] Tool 'read' provided by MCP server 'files'."
+    ), "the synthesised description names the tool and the server"
+    assert manager.agent_docs()["mcp__files__read"] == (
+        "[files] Tool 'read' provided by MCP server 'files'."
+    ), "both audiences get the same text"
+
+
+def test_register_mcp_client_strips_surrounding_whitespace_from_a_description():
+    """A real description keeps its content but loses its padding."""
+
+    manager = ToolManager()
+    client = _fake_mcp_client(
+        "files", [_fake_tool("read", description="  Read a file.\n")]
+    )
+
+    manager.register_mcp_client(client)
+
+    assert manager.agent_docs()["mcp__files__read"] == (
+        "[files] Read a file."
+    ), "the server's own description is used, trimmed"
+
+
+def test_register_mcp_client_leaves_the_display_param_empty():
+    """Only a display action is synthesised; there is no parameter to highlight."""
+
+    manager = ToolManager()
+    client = _fake_mcp_client("files", [_fake_tool("read", description="d")])
+
+    spec = manager.register_mcp_client(client)[0]
+
+    assert (
+        spec.display_param == ""
+    ), "the module does not know which argument to highlight"
+
+
+def test_register_mcp_client_preserves_a_complete_input_schema_verbatim():
+    """A server that advertises a full schema gets it back unchanged."""
+    manager = ToolManager()
+    advertised = {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}},
+        "required": ["path"],
+        "additionalProperties": False,
+    }
+    client = _fake_mcp_client("files", [_fake_tool("read", input_schema=advertised)])
+
+    manager.register_mcp_client(client)
+
+    schema = manager.tool_schemas("agent")[0]["function"]["parameters"]
+    assert schema == advertised, "nothing is added to or removed from a complete schema"
+
+
+def test_register_mcp_client_replaces_non_dict_properties_in_an_input_schema():
+    """A ``properties`` value that is not a dict is replaced by an empty dict."""
+    manager = ToolManager()
+    client = _fake_mcp_client(
+        "files",
+        [_fake_tool("read", input_schema={"type": "object", "properties": "city"})],
+    )
+
+    manager.register_mcp_client(client)
+
+    schema = manager.tool_schemas("agent")[0]["function"]["parameters"]
+    assert schema["properties"] == {}, "the unusable value is dropped"
+    assert schema["type"] == "object", "a usable type survives"
+
+
+@pytest.mark.asyncio
+async def test_registered_mcp_tool_returns_the_server_result_unchanged():
+    """The generated callable hands the server's return value straight back."""
+
+    manager = ToolManager()
+    client = _fake_mcp_client("files", [_fake_tool("read", description="r")])
+    manager.register_mcp_client(client)
+
+    result = await manager.tools_map()["mcp__files__read"](path="a.txt", limit=3)
+
+    assert (
+        result == "read got ['limit', 'path']"
+    ), "the server's string is passed through"
+
+
+def test_registered_mcp_tool_schema_hides_the_private_dispatch_bindings():
+    """``_client``/``_tool_name`` exist on the callable but not on the wire."""
+    manager = ToolManager()
+    client = _fake_mcp_client(
+        "files",
+        [
+            _fake_tool(
+                "read",
+                input_schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                },
+            )
+        ],
+    )
+
+    spec = manager.register_mcp_client(client)[0]
+
+    assert set(spec.parameters_schema["properties"]) == {
+        "path"
+    }, "the advertised arguments are exactly the server's"
+    assert (
+        "_client" not in spec.parameters_schema["properties"]
+    ), "an internal binding must never be advertised to a model"
+    assert (
+        "_tool_name" not in spec.parameters_schema["properties"]
+    ), "an internal binding must never be advertised to a model"
+
+
+@pytest.mark.asyncio
+async def test_registered_mcp_tool_lets_a_model_argument_override_the_captured_tool_name():
+    """Documents a defect: a ``_tool_name`` argument silently redirects the dispatch.
+
+    ``_invoke`` binds its captured client and tool name as ordinary default
+    parameters, so they share one namespace with the model's ``**kwargs``.  A
+    server tool advertising an argument called ``_tool_name`` therefore binds
+    over the captured name and the call lands on a different server tool.  The
+    docstring promises only the model's keyword arguments are forwarded.
+    """
+    calls = []
+    manager = ToolManager()
+    client = _fake_mcp_client("files", [_fake_tool("read", description="r")], calls)
+    manager.register_mcp_client(client)
+
+    result = await manager.tools_map()["mcp__files__read"](
+        _tool_name="write", path="a.txt"
+    )
+
+    assert calls == [
+        ("write", {"path": "a.txt"})
+    ], "the captured tool name was overridden by the model's argument"
+    assert result == "write got ['path']", "the dispatch went to 'write', not 'read'"
+
+
+@pytest.mark.asyncio
+async def test_registered_mcp_tool_lets_a_model_argument_override_the_captured_client():
+    """Documents a defect: a ``_client`` argument replaces the captured client.
+
+    Same namespace collision as ``_tool_name``: the value binds over the
+    captured client, so the call fails instead of reaching the server at all.
+    """
+    calls = []
+    manager = ToolManager()
+    client = _fake_mcp_client("files", [_fake_tool("read", description="r")], calls)
+    manager.register_mcp_client(client)
+
+    with pytest.raises(AttributeError, match="'call_tool'"):
+        await manager.tools_map()["mcp__files__read"](_client="not-a-client")
+
+    assert calls == [], "the real client was never reached"
