@@ -1,4 +1,6 @@
+import asyncio
 import os
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -8,9 +10,85 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mitocode.backend.exception.mitocode_exception import MitoCodeMcpConfigError
 from mitocode.backend.mcp.mcp_client import McpClient, McpConnectionState
-from mitocode.backend.mcp.mcp_config import McpServerConfig
+from mitocode.backend.mcp.mcp_config import McpServerConfig, McpServerKind
 from mitocode.backend.mcp.mcp_manager import McpManager, McpServerStatus
 from mitocode.backend.tool.tool_manager import ToolManager
+
+#: Imports the ``mcp`` package in a process where the tool layer cannot be
+#: resolved at all, so the one-way ``mcp`` -> (never) ``tool_manager``
+#: dependency is checked for real rather than by reading the source.
+#:
+#: Both ``mitocode`` and ``mitocode.backend`` are stubbed as bare packages:
+#: their real ``__init__`` files re-export the agent layer, which imports
+#: ``tool_manager`` itself, so a real import of either parent would prove
+#: nothing about the module under test.  The stubs carry only ``__path__``,
+#: which is what lets ``mitocode.backend.mcp`` load from disk as usual.
+_IMPORT_WITHOUT_TOOL_LAYER = """
+import importlib.abc
+import os
+import sys
+import types
+
+SRC_DIR = os.environ["MITOCODE_SRC"]
+
+
+class _BlockToolLayer(importlib.abc.MetaPathFinder):
+    \"\"\"Make the whole tool layer unimportable, however it is reached.\"\"\"
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.startswith("mitocode.backend.tool"):
+            raise ImportError(f"{fullname} is not importable here")
+        return None
+
+
+def _stub_package(name, path):
+    \"\"\"Register a package that never runs its real __init__.
+
+    Args:
+        name: Fully qualified package name.
+        path: Directory its submodules live in.
+    \"\"\"
+    module = types.ModuleType(name)
+    module.__path__ = [path]
+    sys.modules[name] = module
+
+
+_stub_package("mitocode", SRC_DIR)
+_stub_package("mitocode.backend", os.path.join(SRC_DIR, "mitocode", "backend"))
+sys.meta_path.insert(0, _BlockToolLayer())
+
+import mitocode.backend.mcp as mcp
+
+
+def leaked():
+    \"\"\"List the tool-layer modules this import dragged in.\"\"\"
+    return sorted(m for m in sys.modules if m.startswith("mitocode.backend.tool"))
+
+
+assert not leaked(), f"importing the mcp package pulled in the tool layer: {leaked()}"
+
+
+class _StubRegistry:
+    \"\"\"Duck-typed stand-in for ToolManager, to drive the manager offline.\"\"\"
+
+    def register_mcp_client(self, client):
+        \"\"\"Register nothing and report nothing registered.\"\"\"
+        return []
+
+    def unregister(self, name):
+        \"\"\"Report a removal that never happened.\"\"\"
+        return False
+
+
+# The manager must work with anything exposing those two methods: that is what
+# lets the mcp package stay unaware of the tool layer.
+manager = mcp.McpManager(
+    {"mcpServers": {"w": {"url": "https://w.invalid/mcp"}}},
+    tool_manager=_StubRegistry(),
+)
+assert manager.status()["w"].state == "disconnected"
+print("ok")
+"""
 
 
 class FakeClient:
@@ -20,18 +98,27 @@ class FakeClient:
     from ``connected``, so a client that has just been stopped stays
     distinguishable from one that never came up.  ``status()`` reports that
     difference and the manager's contract rests on it.
+
+    The catalogue follows the real client's rule that a client which is not
+    connected has no tools: it is emptied on construction when the scripted
+    outcome is a failure, and again by every failed :meth:`connect`.
     """
 
-    def __init__(self, config, succeed=True, tools=()):
+    def __init__(self, config, succeed=True, tools=(), keep_tools_on_failure=False):
         """Script one connect outcome and the tool catalogue it advertises.
 
         Args:
             config: The ``McpServerConfig`` this stand-in represents.
             succeed: Value :meth:`connect` reports back.
-            tools: Names of the tools this stand-in advertises.
+            tools: Names of the tools this stand-in advertises once connected.
+            keep_tools_on_failure: Leave the catalogue populated even while
+                not connected.  Deliberately unfaithful: it is how a test
+                reaches an implementation that registers before connecting,
+                which the real client would not let it get away with.
         """
         self._config = config
         self._succeed = succeed
+        self.keep_tools_on_failure = keep_tools_on_failure
         self.server_name = config.name
         self.tools = [
             SimpleNamespace(
@@ -41,21 +128,30 @@ class FakeClient:
             )
             for name in tools
         ]
+        if not succeed and not keep_tools_on_failure:
+            self.tools.clear()
         self.state = McpConnectionState.DISCONNECTED
         self.last_error = ""
         self.connected = False
         self.calls = 0
 
     async def connect(self):
-        """Move to CONNECTED or FAILED according to the scripted outcome."""
+        """Move to CONNECTED or FAILED according to the scripted outcome.
+
+        Returns:
+            The scripted outcome.
+        """
         self.connected = self._succeed
         if self._succeed:
             self.state = McpConnectionState.CONNECTED
             self.last_error = ""
-        else:
-            self.state = McpConnectionState.FAILED
-            self.last_error = "connection refused"
-        return self._succeed
+            return True
+        # The real client drops its cached catalogue when a connect fails.
+        if not self.keep_tools_on_failure:
+            self.tools.clear()
+        self.state = McpConnectionState.FAILED
+        self.last_error = "connection refused"
+        return False
 
     async def disconnect(self):
         """Close the connection and go back to DISCONNECTED."""
@@ -80,20 +176,23 @@ class RudeClient(FakeClient):
     client that breaks its contract instead.
     """
 
-    def __init__(self, config, fail_on=""):
-        """Arm one method to raise.
+    def __init__(self, config, succeed=True, fail_on=""):
+        """Arm one method to raise, independently of the scripted outcome.
 
         Args:
             config: The ``McpServerConfig`` this stand-in represents.
-            fail_on: ``"connect"``, ``"disconnect"`` or ``""`` for neither.
+            succeed: Value :meth:`connect` reports back when it does not raise.
+            fail_on: ``"connect"``, ``"disconnect"``, ``"cancel"`` or ``""``.
         """
-        super().__init__(config, succeed=fail_on != "connect")
+        super().__init__(config, succeed=succeed)
         self._fail_on = fail_on
 
     async def connect(self):
-        """Raise instead of connecting when this client is armed for it."""
+        """Raise, or cancel, instead of connecting when this client is armed."""
         if self._fail_on == "connect":
             raise RuntimeError("handshake exploded")
+        if self._fail_on == "cancel":
+            raise asyncio.CancelledError()
         return await super().connect()
 
     async def disconnect(self):
@@ -103,12 +202,14 @@ class RudeClient(FakeClient):
         await super().disconnect()
 
 
-def _factory(script):
+def _factory(script, keep_tools_on_failure=False):
     """Build a client_factory driven by a {server_name: (succeed, tools)} map.
 
     Args:
         script: Mapping from server name to its scripted outcome.  A server
             the script does not mention connects successfully with no tools.
+        keep_tools_on_failure: Give every client a catalogue that survives a
+            failed connect, for the registration-ordering probe.
 
     Returns:
         The factory, with every client it built exposed as ``made``.
@@ -117,7 +218,12 @@ def _factory(script):
 
     def _make(config):
         succeed, tools = script.get(config.name, (True, ()))
-        client = FakeClient(config, succeed=succeed, tools=tools)
+        client = FakeClient(
+            config,
+            succeed=succeed,
+            tools=tools,
+            keep_tools_on_failure=keep_tools_on_failure,
+        )
         made[config.name] = client
         return client
 
@@ -125,20 +231,27 @@ def _factory(script):
     return _make
 
 
-def _rude_factory(script):
+def _rude_factory(script, succeed=None):
     """Build a client_factory whose clients raise from a scripted method.
 
     Args:
         script: Mapping from server name to the method it raises from, or
             ``""`` for a well-behaved client.
+        succeed: Optional mapping from server name to the connect outcome used
+            when that method does not raise, overriding the default of ``True``.
 
     Returns:
         The factory, with every client it built exposed as ``made``.
     """
     made = {}
+    outcomes = succeed or {}
 
     def _make(config):
-        client = RudeClient(config, fail_on=script.get(config.name, ""))
+        client = RudeClient(
+            config,
+            succeed=outcomes.get(config.name, True),
+            fail_on=script.get(config.name, ""),
+        )
         made[config.name] = client
         return client
 
@@ -149,6 +262,33 @@ def _rude_factory(script):
 def _config(*entries):
     """Build a ``{"mcpServers": {...}}`` document from (name, spec) pairs."""
     return {"mcpServers": {name: spec for name, spec in entries}}
+
+
+def _run_import_probe(script):
+    """Run *script* in a child interpreter that cannot resolve the tool layer.
+
+    ``MITOCODE_SRC`` is absolute and the child runs in an empty *cwd*, so
+    ``python -c`` cannot pick up a stray ``mitocode/`` package that would
+    shadow the module under test.
+
+    Args:
+        script: Source for the child interpreter.
+
+    Returns:
+        The completed ``subprocess.CompletedProcess``.
+    """
+    env = dict(os.environ)
+    env["MITOCODE_SRC"] = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "src")
+    )
+    return subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=env["MITOCODE_SRC"],
+        check=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -222,6 +362,39 @@ async def test_status_reports_state_error_and_tool_count():
 
 
 @pytest.mark.asyncio
+async def test_tools_are_registered_only_after_a_successful_connect():
+    """A server that failed to connect must publish nothing.
+
+    The client is armed with a catalogue it never connected well enough to
+    discover, which the real client does not do — that is precisely the shape
+    an implementation that registers *before* connecting would publish.
+    """
+    tool_manager = ToolManager()
+    factory = _factory(
+        {"broken": (False, ("ping",)), "healthy": (True, ("pong",))},
+        keep_tools_on_failure=True,
+    )
+    manager = McpManager(
+        _config(
+            ("broken", {"url": "https://broken.invalid/mcp"}),
+            ("healthy", {"url": "https://healthy.invalid/mcp"}),
+        ),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+
+    await manager.start()
+
+    assert set(tool_manager.tools_map()) == {
+        "mcp__healthy__pong"
+    }, "only the connected server's tools may be registered"
+    assert manager.status()["broken"].tool_count == 0
+    assert (
+        factory.made["broken"].tools != []
+    ), "the probe catalogue survived, so it proves the point"
+
+
+@pytest.mark.asyncio
 async def test_stop_unregisters_tools_and_disconnects():
     tool_manager = ToolManager()
     factory = _factory({"weather": (True, ("get_forecast",))})
@@ -264,6 +437,29 @@ async def test_refresh_picks_up_new_tools():
 
     assert "mcp__weather__a" in tool_manager.tools_map()
     assert "mcp__weather__b" in tool_manager.tools_map()
+
+
+@pytest.mark.asyncio
+async def test_refresh_before_start_connects_the_server_it_names():
+    """``refresh`` is not gated on ``start``: it brings up what it names.
+
+    Documented rather than rejected, because refusing it would make a manager
+    that is being reconnected after a crash refuse the one call meant to
+    recover it.
+    """
+    tool_manager = ToolManager()
+    factory = _factory({"weather": (True, ("a",))})
+    manager = McpManager(
+        _config(("weather", {"url": "https://w.invalid/mcp"})),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+
+    await manager.refresh("weather")
+
+    assert factory.made["weather"].state is McpConnectionState.CONNECTED
+    assert set(tool_manager.tools_map()) == {"mcp__weather__a"}
+    assert manager.status()["weather"].tool_count == 1
 
 
 @pytest.mark.asyncio
@@ -365,6 +561,35 @@ async def test_start_does_not_raise_when_a_registration_raises(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_start_records_a_cancelled_server_and_lets_the_cancellation_out():
+    """A cancellation is recorded *and* propagated, never swallowed.
+
+    ``return_exceptions=True`` hands a child's ``CancelledError`` back as a
+    result rather than raising it, and ``except Exception`` cannot catch one,
+    so without this the server would report a failure with no reason at all.
+    """
+    tool_manager = ToolManager()
+    factory = _rude_factory({"bad": "cancel", "good": ""})
+    manager = McpManager(
+        _config(
+            ("bad", {"url": "https://bad.invalid/mcp"}),
+            ("good", {"url": "https://good.invalid/mcp"}),
+        ),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.start()
+
+    assert manager.status()["bad"].error == "CancelledError"
+    assert manager.status()["bad"].tool_count == 0
+    assert (
+        factory.made["good"].state is McpConnectionState.CONNECTED
+    ), "the server that did connect still published its tools"
+
+
+@pytest.mark.asyncio
 async def test_stop_disconnects_every_server_when_one_teardown_raises():
     """One failing teardown must not strand the other connections open."""
     tool_manager = ToolManager()
@@ -384,6 +609,136 @@ async def test_stop_disconnects_every_server_when_one_teardown_raises():
     assert factory.made["good"].state is McpConnectionState.DISCONNECTED
     assert tool_manager.tools_map() == {}
     assert "RuntimeError" in manager.status()["bad"].error
+
+
+@pytest.mark.asyncio
+async def test_stop_completes_teardown_when_an_unregister_raises(monkeypatch):
+    """A registry that refuses to give a tool back must not strand a connection.
+
+    Unregistration runs before the disconnects, so an unguarded failure here
+    would skip the teardown entirely and leave every server connected.
+    """
+    tool_manager = ToolManager()
+    real_unregister = tool_manager.unregister
+    armed = {"bad": False}
+
+    def _unregister(name):
+        if armed["bad"] and name == "mcp__bad__x":
+            raise RuntimeError("registry exploded")
+        return real_unregister(name)
+
+    monkeypatch.setattr(tool_manager, "unregister", _unregister)
+    factory = _factory({"bad": (True, ("x",)), "good": (True, ("y",))})
+    manager = McpManager(
+        _config(
+            ("bad", {"url": "https://bad.invalid/mcp"}),
+            ("good", {"url": "https://good.invalid/mcp"}),
+        ),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    await manager.start()
+    armed["bad"] = True
+
+    await manager.stop()
+
+    assert (
+        factory.made["good"].state is McpConnectionState.DISCONNECTED
+    ), "the healthy server was torn down"
+    assert factory.made["bad"].state is McpConnectionState.DISCONNECTED
+    assert set(tool_manager.tools_map()) == {
+        "mcp__bad__x"
+    }, "only the tool the registry refused to remove is left"
+    assert "registry exploded" in manager.status()["bad"].error
+
+
+@pytest.mark.asyncio
+async def test_stop_retries_an_unregister_that_previously_failed(monkeypatch):
+    """A failed removal stays owned, so a later stop() can finish the job.
+
+    The manager pops its ownership record only once a removal is confirmed;
+    forgetting a tool it never removed would leave it dispatchable forever.
+    """
+    tool_manager = ToolManager()
+    real_unregister = tool_manager.unregister
+    armed = {"bad": False}
+
+    def _unregister(name):
+        if armed["bad"] and name == "mcp__bad__x":
+            raise RuntimeError("registry exploded")
+        return real_unregister(name)
+
+    monkeypatch.setattr(tool_manager, "unregister", _unregister)
+    factory = _factory({"bad": (True, ("x",))})
+    manager = McpManager(
+        _config(("bad", {"url": "https://bad.invalid/mcp"})),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    await manager.start()
+    armed["bad"] = True
+    await manager.stop()
+    assert manager.status()["bad"].tool_count == 1, "still owned, so still counted"
+
+    armed["bad"] = False
+    await manager.stop()
+
+    assert tool_manager.tools_map() == {}
+    assert manager.status()["bad"].tool_count == 0
+    assert (
+        manager.status()["bad"].error == ""
+    ), "a failure the retry resolved is history, not a current error"
+
+
+@pytest.mark.asyncio
+async def test_stop_forgets_a_tool_that_was_already_removed(monkeypatch):
+    """``unregister`` reporting "nothing was there" ends the manager's claim.
+
+    A tool someone else removed from the registry cannot be removed again, so
+    keeping it on the ownership record would make every later stop() retry a
+    removal that can never succeed.
+    """
+    tool_manager = ToolManager()
+    factory = _factory({"weather": (True, ("a",))})
+    manager = McpManager(
+        _config(("weather", {"url": "https://w.invalid/mcp"})),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    await manager.start()
+    assert (
+        tool_manager.unregister("mcp__weather__a") is True
+    ), "removed behind the manager's back"
+
+    await manager.stop()
+
+    assert manager.status()["weather"].tool_count == 0
+    assert tool_manager.tools_map() == {}
+
+
+@pytest.mark.asyncio
+async def test_status_prefers_a_recorded_failure_over_a_stale_client_message():
+    """The newest reason wins when the manager and the client both have one.
+
+    The client's message describes the connect that failed earlier; the
+    recorded failure describes the teardown that just failed, which is the one
+    an operator can act on.
+    """
+    tool_manager = ToolManager()
+    factory = _rude_factory({"weather": "disconnect"}, succeed={"weather": False})
+    manager = McpManager(
+        _config(("weather", {"url": "https://w.invalid/mcp"})),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    await manager.start()
+    assert manager.status()["weather"].error == "connection refused"
+
+    await manager.stop()
+
+    assert manager.status()["weather"].error == (
+        "RuntimeError: teardown exploded"
+    ), "the teardown failure is the most recent one"
 
 
 @pytest.mark.asyncio
@@ -557,6 +912,74 @@ def test_a_list_of_configs_is_accepted_as_the_configuration():
     assert manager.status()["weather"].tool_count == 0
 
 
+def test_a_repeated_server_name_in_a_list_is_rejected():
+    """Two entries under one name would make status() and the registry disagree.
+
+    The name is both the client key and the ``mcp__<name>__`` tool namespace,
+    so a duplicate leaves a tool registered, dispatchable and reported as
+    ``disabled`` with ``tool_count=0``.  Refusing the configuration is the only
+    way to keep those three facts in agreement.
+    """
+    factory = _factory({"dup": (True, ("a",))})
+    config = [
+        McpServerConfig.parse("dup", {"url": "https://one.invalid/mcp"}),
+        McpServerConfig.parse("dup", {"url": "https://two.invalid/mcp"}),
+    ]
+
+    with pytest.raises(MitoCodeMcpConfigError) as excinfo:
+        McpManager(config, tool_manager=ToolManager(), client_factory=factory)
+
+    assert "dup" in str(excinfo.value), "the duplicated name is named"
+    assert "1" in str(excinfo.value), "and so is the offending position"
+    assert factory.made == {}, "a rejected configuration connects to nothing"
+
+
+def test_a_repeated_server_name_is_rejected_even_when_only_one_is_enabled():
+    """Enabled-then-disabled is the pair that produced the worst mismatch."""
+    factory = _factory({"dup": (True, ("a",))})
+    config = [
+        McpServerConfig.parse("dup", {"url": "https://one.invalid/mcp"}),
+        McpServerConfig.parse(
+            "dup", {"url": "https://two.invalid/mcp", "enabled": False}
+        ),
+    ]
+
+    with pytest.raises(MitoCodeMcpConfigError) as excinfo:
+        McpManager(config, tool_manager=ToolManager(), client_factory=factory)
+
+    assert "dup" in str(excinfo.value)
+    assert factory.made == {}
+
+
+@pytest.mark.asyncio
+async def test_two_servers_offering_the_same_tool_name_both_register():
+    """A duplicate *tool* name across servers is legal and must keep working.
+
+    Only duplicate *server* names collide; the ``mcp__<server>__`` prefix keeps
+    two servers' identically-named tools apart.
+    """
+    tool_manager = ToolManager()
+    factory = _factory({"alpha": (True, ("search",)), "beta": (True, ("search",))})
+    manager = McpManager(
+        _config(
+            ("alpha", {"url": "https://alpha.invalid/mcp"}),
+            ("beta", {"url": "https://beta.invalid/mcp"}),
+        ),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+
+    await manager.start()
+
+    assert set(tool_manager.tools_map()) == {
+        "mcp__alpha__search",
+        "mcp__beta__search",
+    }
+    assert manager.status()["alpha"].tool_count == 1
+    assert manager.status()["beta"].tool_count == 1
+    assert tool_manager.agent_docs()["mcp__alpha__search"] == "[alpha] search on alpha"
+
+
 def test_a_configuration_that_is_neither_a_document_nor_a_list_is_rejected():
     with pytest.raises(MitoCodeMcpConfigError):
         McpManager(
@@ -642,6 +1065,7 @@ async def test_status_before_start_reports_a_disconnected_server():
 
 
 def test_mcp_package_exports_the_manager_and_its_neighbours():
+    """Every name in ``__all__`` resolves; a stale entry is a failed import."""
     from mitocode.backend import mcp
 
     assert mcp.McpManager is McpManager
@@ -649,6 +1073,29 @@ def test_mcp_package_exports_the_manager_and_its_neighbours():
     assert mcp.McpClient is McpClient
     assert mcp.McpConnectionState is McpConnectionState
     assert mcp.McpServerConfig is McpServerConfig
+    assert mcp.McpServerKind is McpServerKind
+    assert set(mcp.__all__) == {
+        "McpClient",
+        "McpConnectionState",
+        "McpManager",
+        "McpServerConfig",
+        "McpServerKind",
+        "McpServerStatus",
+    }, "the package advertises exactly the six documented names"
+
+
+def test_mcp_package_imports_without_the_tool_layer(tmp_path):
+    """The ``mcp`` package must be importable with no tool layer at all.
+
+    The plan fixes the dependency direction: ``mcp`` never imports
+    ``tool_manager``.  A reference kept under ``TYPE_CHECKING`` is invisible to
+    this probe, which is why the block covers the whole ``mitocode.backend.tool``
+    package rather than one name.
+    """
+    result = _run_import_probe(_IMPORT_WITHOUT_TOOL_LAYER)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().splitlines()[-1] == "ok"
 
 
 @pytest.mark.asyncio
