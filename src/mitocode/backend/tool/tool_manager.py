@@ -72,6 +72,42 @@ def _normalize_input_schema(raw: Any) -> Dict[str, Any]:
     return normalized
 
 
+def _make_invoke(client: "McpClient", upstream_name: str) -> Callable:
+    """Build the async callable that dispatches one MCP tool.
+
+    The client and the upstream tool name are captured in the closure, so the
+    generated callable takes ``**kwargs`` and nothing else.  Two earlier shapes
+    were wrong and must not come back:
+
+    * Binding them as default arguments — ``async def _invoke(_client=client,
+      _tool_name=tool.name, **kwargs)`` — puts them in the *same* namespace as
+      the model's keyword arguments.  A server tool advertising an argument
+      literally named ``_client`` or ``_tool_name`` then binds over the captured
+      values, and ``_tool_name`` in particular silently redirects the call to a
+      different tool on that server, bypassing the name-collision guard that
+      ``register_mcp_client`` relies on.
+    * Closing over the loop variables directly would route every tool registered
+      from one catalogue to whichever tool happened to come last.
+
+    A closure factory gives the isolation the default arguments were reaching
+    for without exposing either value as a keyword.
+
+    Args:
+        client: The connected MCP client to dispatch through.
+        upstream_name: The tool's name *on the server*, which is not the
+            namespaced name MitoCode registers it under.
+
+    Returns:
+        An async callable forwarding its keyword arguments to that one tool.
+    """
+
+    async def _invoke(**kwargs):
+        """Forward the model's keyword arguments to the server tool."""
+        return await client.call_tool(upstream_name, kwargs)
+
+    return _invoke
+
+
 def _annotation_to_schema(annotation: Any) -> Dict[str, Any]:
     """Convert a Python type annotation to a JSON Schema fragment.
 
@@ -405,15 +441,6 @@ class ToolManager:
                 )
                 continue
 
-            async def _invoke(_client=client, _tool_name=tool.name, **kwargs):
-                """Forward the model's keyword arguments to the server tool.
-
-                The default arguments capture *this* iteration's client and
-                tool name.  Closing over the loop variables instead would
-                route every registered tool to whichever tool came last.
-                """
-                return await _client.call_tool(_tool_name, kwargs)
-
             description = (tool.description or "").strip()
             if not description:
                 description = (
@@ -423,7 +450,7 @@ class ToolManager:
 
             registered.append(
                 self.register(
-                    _invoke,
+                    _make_invoke(client, tool.name),
                     name=tool_name,
                     human_doc=f"[{client.server_name}] {description}",
                     agent_doc=f"[{client.server_name}] {description}",
