@@ -1127,8 +1127,9 @@ def test_redaction_cuts_the_payload_up_to_the_last_injected_type_marker():
     redacted = _redact_arguments("input_value='sk-PART1\", input_type=sk-PART2LEAK'")
 
     assert "sk-PART1" not in redacted
-    # KNOWN LIMITATION (mcp_client.py:47-49): text after a payload-supplied
-    # decoy marker is currently NOT redacted -- `sk-PART2LEAK` survives here.
+    # KNOWN LIMITATION (mcp_client.py:42-44, rationale at :34-41): text after a
+    # payload-supplied decoy marker is currently NOT redacted --
+    # `sk-PART2LEAK` survives here.
     # This assertion deliberately does NOT enforce that, because it cannot:
     # `startswith` passes just as happily against an implementation that closes
     # the leak.  The assertion that actually breaks when the leak is closed is

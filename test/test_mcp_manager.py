@@ -2092,10 +2092,6 @@ async def test_status_error_is_the_exception_text_verbatim(stubborn_registry):
     the exception's own text is the whole contract: a server name, a tool name
     or a configuration value interpolated here would be text the exception
     never contained, arriving at the one surface a user reads.
-
-    Asserted with ``in`` rather than ``==`` on purpose: a future endpoint
-    scrubber is not a regression, and an exact-match assertion would have to be
-    rewritten to let one in.
     """
     tool_manager, _armed = stubborn_registry("mcp__weather__a")
     factory = _hostile_factory({"weather": {"tools": ("a",)}})
@@ -2109,7 +2105,7 @@ async def test_status_error_is_the_exception_text_verbatim(stubborn_registry):
     await manager.stop()
 
     assert (
-        "RuntimeError: registry exploded" in manager.status()["weather"].error
+        manager.status()["weather"].error == "RuntimeError: registry exploded"
     ), "no server name, no tool name, no decoration"
 
 
