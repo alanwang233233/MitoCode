@@ -1,10 +1,13 @@
 import asyncio
+import contextlib
+import dataclasses
 import os
 import subprocess
 import sys
 from types import SimpleNamespace
 
 import pytest
+from loguru import logger as loguru_logger
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -135,12 +138,15 @@ class FakeClient:
         self.last_error = ""
         self.connected = False
         self.calls = 0
+        self.attempts = 0
 
     async def connect(self):
         """Move to CONNECTED or FAILED according to the scripted outcome.
 
         One-shot cancellation is honoured first, so a test can arm it *after*
         a successful ``start`` rather than making every later connect fail.
+        ``attempts`` counts every entry, so a test can tell "never given a turn"
+        from "given one and failed".
 
         Returns:
             The scripted outcome.
@@ -150,6 +156,7 @@ class FakeClient:
                 attempt, which is how ``McpClient.connect`` behaves when the
                 caller cancels it.
         """
+        self.attempts += 1
         if self._cancel_next:
             self._cancel_next = False
             raise asyncio.CancelledError()
@@ -174,6 +181,10 @@ class FakeClient:
         """Make every later connect attempt fail, as a server going away would."""
         self._succeed = False
 
+    def go_online(self):
+        """Make every later connect attempt succeed, as a server coming back."""
+        self._succeed = True
+
     def cancel_next_connect(self):
         """Cancel only the next connect, leaving any later one to succeed."""
         self._cancel_next = True
@@ -192,28 +203,90 @@ class RudeClient(FakeClient):
     client that breaks its contract instead.
     """
 
-    def __init__(self, config, succeed=True, fail_on=""):
+    def __init__(self, config, succeed=True, fail_on="", cancel_on="", tools=()):
         """Arm one method to raise, independently of the scripted outcome.
 
         Args:
             config: The ``McpServerConfig`` this stand-in represents.
             succeed: Value :meth:`connect` reports back when it does not raise.
             fail_on: ``"connect"``, ``"disconnect"`` or ``""``.
+            cancel_on: ``"connect"``, ``"disconnect"`` or ``""``, for a
+                cancellation rather than a failure.  Checked first, because a
+                cancelled teardown has to reach the caller while a failed one
+                must be recorded and swallowed.
+            tools: Names this stand-in advertises once connected.
         """
-        super().__init__(config, succeed=succeed)
+        super().__init__(config, succeed=succeed, tools=tools)
         self._fail_on = fail_on
+        self._cancel_on = cancel_on
 
     async def connect(self):
         """Raise instead of connecting when this client is armed for it."""
+        if self._cancel_on == "connect":
+            self.attempts += 1
+            raise asyncio.CancelledError()
         if self._fail_on == "connect":
             raise RuntimeError("handshake exploded")
         return await super().connect()
 
     async def disconnect(self):
         """Raise instead of closing when this client is armed for it."""
+        if self._cancel_on == "disconnect":
+            raise asyncio.CancelledError()
         if self._fail_on == "disconnect":
             raise RuntimeError("teardown exploded")
         await super().disconnect()
+
+
+class ExplodingCatalogueClient:
+    """Stand-in whose tool catalogue cannot be read at all.
+
+    The real :class:`McpClient` exposes a plain list, so the only way to reach
+    the registry's ``client.tools`` access is to substitute a client whose
+    attribute raises.  That is the seam between "the server said it was
+    connected but its catalogue is unreadable" and a failure the manager can
+    report against that server alone.
+    """
+
+    def __init__(self, config, succeed=True):
+        """Connect on demand, with a catalogue that raises whenever it is read.
+
+        Args:
+            config: The ``McpServerConfig`` this stand-in represents.
+            succeed: Value :meth:`connect` reports back.
+        """
+        self.server_name = config.name
+        self._succeed = succeed
+        self.state = McpConnectionState.DISCONNECTED
+        self.last_error = ""
+        self.connected = False
+
+    @property
+    def tools(self):
+        """Raise instead of returning the catalogue.
+
+        Returns:
+            Never returns.
+
+        Raises:
+            RuntimeError: Every time the registry asks for the catalogue.
+        """
+        raise RuntimeError("catalogue exploded on access")
+
+    async def connect(self):
+        """Connect without ever holding a readable catalogue."""
+        self.connected = self._succeed
+        if not self._succeed:
+            self.state = McpConnectionState.FAILED
+            self.last_error = "connection refused"
+            return False
+        self.state = McpConnectionState.CONNECTED
+        return True
+
+    async def disconnect(self):
+        """Close the connection and go back to DISCONNECTED."""
+        self.connected = False
+        self.state = McpConnectionState.DISCONNECTED
 
 
 def _factory(script, keep_tools_on_failure=False):
@@ -271,6 +344,113 @@ def _rude_factory(script, succeed=None):
 
     _make.made = made
     return _make
+
+
+def _hostile_factory(script):
+    """Build a client_factory in which each server misbehaves in its own way.
+
+    Args:
+        script: Mapping from server name to its misbehaviour.  ``rude`` names the
+            method that raises ``"connect"`` or ``"disconnect"``, ``cancel_on``
+            names the one that raises :class:`asyncio.CancelledError` instead,
+            ``catalogue_raises`` swaps in a client whose tool list cannot be
+            read, and ``succeed``/``tools`` configure an otherwise ordinary
+            :class:`RudeClient`.  A server the script does not mention is
+            well behaved.
+
+    Returns:
+        The factory, with every client it built exposed as ``made``.
+    """
+    made = {}
+
+    def _make(config):
+        spec = dict(script.get(config.name, {}))
+        if spec.pop("catalogue_raises", False):
+            client = ExplodingCatalogueClient(config, succeed=spec.pop("succeed", True))
+        else:
+            client = RudeClient(
+                config,
+                succeed=spec.pop("succeed", True),
+                fail_on=spec.pop("rude", ""),
+                cancel_on=spec.pop("cancel_on", ""),
+                tools=spec.pop("tools", ()),
+            )
+        made[config.name] = client
+        return client
+
+    _make.made = made
+    return _make
+
+
+#: Values standing in for credentials, one per configuration field that can
+#: carry one.  Each is unique so a failing assertion names *which* field leaked
+#: rather than only that something did.
+_SECRET_USERINFO = "pw-2d4f-secret"
+_SECRET_HEADER = "Bearer 7c21-secret"
+_SECRET_ENV = "env-5b8e-secret"
+_SECRET_ARG = "--arg-9f3a-secret"
+_SECRET_PATH = "/srv-6a0b-secret"
+
+_SECRETS = (
+    _SECRET_USERINFO,
+    _SECRET_HEADER,
+    _SECRET_ENV,
+    _SECRET_ARG,
+    _SECRET_PATH,
+)
+
+
+def _http_secret_spec(server_name):
+    """A remote server entry carrying a secret in every field that takes one."""
+    return {
+        "url": f"https://user:{_SECRET_USERINFO}@{server_name}.invalid/mcp",
+        "headers": {"Authorization": _SECRET_HEADER},
+        "env": {"MCP_TOKEN": _SECRET_ENV},
+        "args": [_SECRET_ARG],
+        "cwd": _SECRET_PATH,
+    }
+
+
+def _stdio_secret_spec():
+    """A local server entry carrying a secret in every field that takes one."""
+    return {
+        "command": _SECRET_PATH,
+        "args": [_SECRET_ARG],
+        "env": {"MCP_TOKEN": _SECRET_ENV},
+        "cwd": _SECRET_PATH,
+        "headers": {"Authorization": _SECRET_HEADER},
+    }
+
+
+def _assert_carries_no_secret(text, where):
+    """Fail naming every credential value that reached *text*.
+
+    Args:
+        text: The message a caller can see -- the TUI pane or the log.
+        where: What produced it, used only in the failure message.
+    """
+    leaked = [secret for secret in _SECRETS if secret in text]
+    assert not leaked, f"{where} leaked {leaked}"
+
+
+@contextlib.contextmanager
+def _captured_logs():
+    """Collect every loguru line emitted inside the block.
+
+    The manager's own logging is half of what it promises an operator: a
+    failure it records against a server is also named in the log, with the
+    tool that could not be released.  ``status()`` deliberately carries less,
+    so the two surfaces have to be checked separately.
+
+    Yields:
+        The list every emitted line is appended to.
+    """
+    lines = []
+    sink_id = loguru_logger.add(lines.append, level="DEBUG")
+    try:
+        yield lines
+    finally:
+        loguru_logger.remove(sink_id)
 
 
 def _config(*entries):
@@ -949,6 +1129,9 @@ async def test_refresh_drops_tools_the_server_no_longer_advertises():
     assert set(tool_manager.tools_map()) == {
         "mcp__weather__a"
     }, "a tool the server dropped must not stay dispatchable to a dead client"
+    assert (
+        manager.status()["weather"].tool_count == 1
+    ), "the ownership record must shrink with the catalogue, or status() promises a tool that left"
 
 
 @pytest.mark.asyncio
@@ -1266,6 +1449,10 @@ async def test_local_stdio_server_end_to_end(tmp_path):
     exercises the whole chain — a real ``McpClient``, a real stdio transport
     and a real ``sys.executable`` child serving over MCP — so it is what
     justifies the transport plumbing underneath it.
+
+    ``start`` is inside the ``try`` on purpose.  A child process outlives the
+    call that spawned it unless something closes its transport, so a failure
+    *during* the startup is exactly when the teardown matters most.
     """
     server_script = tmp_path / "srv.py"
     server_script.write_text(
@@ -1292,8 +1479,8 @@ async def test_local_stdio_server_end_to_end(tmp_path):
         tool_manager=tool_manager,
     )
 
-    await manager.start()
     try:
+        await manager.start()
         status = manager.status()["local"]
         assert status.state == "connected", status.error
         assert status.tool_count == 1
@@ -1306,3 +1493,789 @@ async def test_local_stdio_server_end_to_end(tmp_path):
 
     assert tool_manager.tools_map() == {}
     assert manager.status()["local"].state == "disconnected"
+
+
+@pytest.mark.asyncio
+async def test_one_servers_failure_never_lands_on_another_servers_status():
+    """Four servers, three broken in different ways, one healthy.
+
+    Each failure has to be visible against the server that caused it and
+    invisible against every other: a shared error slot would report one reason
+    four times and say nothing about which server is actually broken.
+    """
+    tool_manager = ToolManager()
+    factory = _hostile_factory(
+        {
+            "raises": {"rude": "connect"},
+            "offline": {"succeed": False},
+            "unreadable": {"catalogue_raises": True},
+            "healthy": {"tools": ("ping",)},
+        }
+    )
+    manager = McpManager(
+        _config(
+            ("raises", {"url": "https://raises.invalid/mcp"}),
+            ("offline", {"url": "https://offline.invalid/mcp"}),
+            ("unreadable", {"url": "https://unreadable.invalid/mcp"}),
+            ("healthy", {"url": "https://healthy.invalid/mcp"}),
+        ),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+
+    await manager.start()
+
+    status = manager.status()
+    assert set(tool_manager.tools_map()) == {
+        "mcp__healthy__ping"
+    }, "only the healthy server publishes tools"
+    assert (
+        status["healthy"].state,
+        status["healthy"].error,
+        status["healthy"].tool_count,
+    ) == ("connected", "", 1), "the healthy server is untouched by its neighbours"
+    assert (
+        status["raises"].state,
+        status["raises"].tool_count,
+    ) == ("disconnected", 0), "a connect that raised never reached the registry"
+    assert status["raises"].error == "RuntimeError: handshake exploded"
+    assert (
+        status["offline"].state,
+        status["offline"].error,
+        status["offline"].tool_count,
+    ) == ("failed", "connection refused", 0)
+    assert (
+        status["unreadable"].state,
+        status["unreadable"].error,
+        status["unreadable"].tool_count,
+    ) == (
+        "connected",
+        "RuntimeError: catalogue exploded on access",
+        0,
+    ), "an unreadable catalogue fails that server's registration, not its connect"
+
+    reasons = {status[name].error for name in ("raises", "offline", "unreadable")}
+    for name, entry in status.items():
+        if name in ("raises", "offline", "unreadable"):
+            continue
+        assert (
+            entry.error not in reasons
+        ), f"'{name}' was handed another server's failure: {entry.error!r}"
+
+
+@pytest.mark.asyncio
+async def test_stop_after_an_isolated_start_closes_the_connection_that_did_open():
+    """A partial start must still be fully torn down.
+
+    ``start`` returns once every server has had its turn, failed or not, so
+    ``stop`` is the only thing left that can reclaim what did come up.
+    """
+    tool_manager = ToolManager()
+    factory = _hostile_factory(
+        {"offline": {"succeed": False}, "healthy": {"tools": ("ping",)}}
+    )
+    manager = McpManager(
+        _config(
+            ("offline", {"url": "https://offline.invalid/mcp"}),
+            ("healthy", {"url": "https://healthy.invalid/mcp"}),
+        ),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    await manager.start()
+    assert "mcp__healthy__ping" in tool_manager.tools_map()
+
+    await manager.stop()
+
+    assert tool_manager.tools_map() == {}, "no tool outlives stop()"
+    assert factory.made["healthy"].connected is False
+    assert factory.made["healthy"].state is McpConnectionState.DISCONNECTED
+
+
+@pytest.mark.asyncio
+async def test_a_registry_failing_on_the_second_server_leaves_the_first_published(
+    monkeypatch,
+):
+    """The seam between two servers is one call, not one shared outcome."""
+    tool_manager = ToolManager()
+    real_register = tool_manager.register_mcp_client
+
+    def _register(client):
+        if client.server_name == "second":
+            raise ValueError("catalogue exploded")
+        return real_register(client)
+
+    monkeypatch.setattr(tool_manager, "register_mcp_client", _register)
+    factory = _hostile_factory(
+        {
+            "first": {"tools": ("a",)},
+            "second": {"tools": ("b",)},
+            "third": {"tools": ("c",)},
+        }
+    )
+    manager = McpManager(
+        _config(
+            ("first", {"url": "https://first.invalid/mcp"}),
+            ("second", {"url": "https://second.invalid/mcp"}),
+            ("third", {"url": "https://third.invalid/mcp"}),
+        ),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+
+    await manager.start()
+
+    assert set(tool_manager.tools_map()) == {
+        "mcp__first__a",
+        "mcp__third__c",
+    }, "the servers either side of the failing one still publish"
+    assert manager.status()["first"].tool_count == 1
+    assert manager.status()["third"].tool_count == 1
+    assert manager.status()["second"].tool_count == 0
+    assert manager.status()["second"].error == "ValueError: catalogue exploded"
+
+
+@pytest.mark.asyncio
+async def test_a_tool_the_registry_already_holds_is_neither_adopted_nor_removed():
+    """A name that is already taken belongs to whoever put it there.
+
+    ``register_mcp_client`` skips a name that is still registered, so that tool
+    is absent from the result it returns.  Recording the catalogue rather than
+    the registration result would make the manager its owner: it would count a
+    tool it never registered, and its ``stop`` would delete another layer's.
+    """
+    tool_manager = ToolManager()
+
+    async def pre_existing(**_kwargs):
+        """Stand-in for a tool some other layer registered.
+
+        Returns:
+            A fixed string, so a dispatch proves the original survived.
+        """
+        return "not from MCP"
+
+    tool_manager.register(pre_existing, name="mcp__weather__a", human_doc="mine")
+    factory = _hostile_factory({"weather": {"tools": ("a", "b")}})
+    manager = McpManager(
+        _config(("weather", {"url": "https://w.invalid/mcp"})),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+
+    await manager.start()
+
+    assert set(tool_manager.tools_map()) == {"mcp__weather__a", "mcp__weather__b"}
+    assert (
+        tool_manager.get_spec("mcp__weather__a").human_doc == "mine"
+    ), "the name that was already taken was not overwritten"
+    assert (
+        manager.status()["weather"].tool_count == 1
+    ), "only the tool the manager actually registered is counted"
+
+    await manager.stop()
+
+    assert set(tool_manager.tools_map()) == {
+        "mcp__weather__a"
+    }, "stop must not remove a tool the manager never owned"
+    assert await tool_manager.tools_map()["mcp__weather__a"]() == "not from MCP"
+
+
+@pytest.mark.asyncio
+async def test_a_connected_server_that_advertises_nothing_is_distinguishable_from_a_failed_one():
+    """Both contribute no tools; only one of them is broken.
+
+    ``start`` registers only after a successful connect precisely so that an
+    empty result means "this server offers nothing" and never "this server
+    never came up".  ``status`` has to keep the two apart as well.
+    """
+    tool_manager = ToolManager()
+    factory = _hostile_factory({"empty": {"succeed": True}, "down": {"succeed": False}})
+    manager = McpManager(
+        _config(
+            ("empty", {"url": "https://empty.invalid/mcp"}),
+            ("down", {"url": "https://down.invalid/mcp"}),
+        ),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+
+    await manager.start()
+
+    assert (
+        manager.status()["empty"].state,
+        manager.status()["empty"].error,
+        manager.status()["empty"].tool_count,
+    ) == ("connected", "", 0), "an empty catalogue is not a failure"
+    assert (
+        manager.status()["down"].state,
+        manager.status()["down"].error,
+        manager.status()["down"].tool_count,
+    ) == ("failed", "connection refused", 0)
+    assert tool_manager.tools_map() == {}
+
+
+def test_status_lists_every_enabled_server_before_the_disabled_ones():
+    """The documented order is the enabled servers first, then the disabled."""
+    manager = McpManager(
+        _config(
+            ("first", {"url": "https://a.invalid/mcp"}),
+            ("off", {"url": "https://b.invalid/mcp", "enabled": False}),
+            ("second", {"url": "https://c.invalid/mcp"}),
+        ),
+        tool_manager=ToolManager(),
+        client_factory=_hostile_factory({"first": {}, "second": {}}),
+    )
+
+    assert list(manager.status()) == ["first", "second", "off"]
+
+
+def test_each_status_entry_is_a_frozen_snapshot():
+    """A reader cannot rewrite what the next reader of ``status()`` will see."""
+    status = McpServerStatus(state="connected", error="", tool_count=2)
+
+    assert (status.state, status.error, status.tool_count) == ("connected", "", 2)
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        status.tool_count = 99
+
+    assert status.tool_count == 2, "the rejected assignment changed nothing"
+
+
+@pytest.mark.asyncio
+async def test_status_counts_exactly_the_tools_surviving_a_half_finished_stop(
+    monkeypatch,
+):
+    """One tool out of two refuses to leave; only that one is still owned.
+
+    The ownership record is updated per tool and only once the registry has
+    confirmed each removal, so it must name the tool that stayed and not the
+    one that left.  Keeping both would make ``status`` promise a tool nobody
+    could find in the registry.
+    """
+    tool_manager = ToolManager()
+    real_unregister = tool_manager.unregister
+    armed = {"bad": False}
+
+    def _unregister(name):
+        if armed["bad"] and name == "mcp__weather__a":
+            raise RuntimeError("registry exploded")
+        return real_unregister(name)
+
+    monkeypatch.setattr(tool_manager, "unregister", _unregister)
+    factory = _hostile_factory({"weather": {"tools": ("a", "b")}})
+    manager = McpManager(
+        _config(("weather", {"url": "https://w.invalid/mcp"})),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    await manager.start()
+    armed["bad"] = True
+
+    await manager.stop()
+
+    assert set(tool_manager.tools_map()) == {
+        "mcp__weather__a"
+    }, "'b' was released, so it must not still be claimed"
+    assert manager.status()["weather"].tool_count == 1
+    assert manager.status()["weather"].error == "RuntimeError: registry exploded"
+
+
+@pytest.mark.asyncio
+async def test_stop_removes_the_tools_while_their_client_is_still_connected(
+    monkeypatch,
+):
+    """The removal phase runs before the disconnection phase.
+
+    The documented reason is the reverse failure: a tool still registered while
+    its client is gone dispatches into a dead client at call time, in the
+    model's hands rather than here.  The order is observable from the registry
+    side -- a removal that runs after the connection has closed is removing a
+    tool nobody could serve any more.
+    """
+    tool_manager = ToolManager()
+    factory = _hostile_factory({"weather": {"tools": ("get_forecast",)}})
+    manager = McpManager(
+        _config(("weather", {"url": "https://w.invalid/mcp"})),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    await manager.start()
+    live_at_removal = {}
+    real_unregister = tool_manager.unregister
+
+    def _unregister(name):
+        live_at_removal[name] = factory.made["weather"].connected
+        return real_unregister(name)
+
+    monkeypatch.setattr(tool_manager, "unregister", _unregister)
+
+    await manager.stop()
+
+    assert live_at_removal == {
+        "mcp__weather__get_forecast": True
+    }, "the tool was unregistered after its client had already been disconnected"
+
+
+@pytest.mark.asyncio
+async def test_stop_propagates_a_cancellation_raised_by_a_disconnect():
+    """A cancelled teardown is the caller unwinding, not a server that failed.
+
+    Both phases still run and every tool is still released.  The connection
+    that refused to close stays open, and ``status`` says so instead of
+    claiming a teardown that did not happen.
+    """
+    tool_manager = ToolManager()
+    factory = _hostile_factory(
+        {
+            "stuck": {"tools": ("x",), "cancel_on": "disconnect"},
+            "good": {"tools": ("y",)},
+        }
+    )
+    manager = McpManager(
+        _config(
+            ("stuck", {"url": "https://stuck.invalid/mcp"}),
+            ("good", {"url": "https://good.invalid/mcp"}),
+        ),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    await manager.start()
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.stop()
+
+    assert tool_manager.tools_map() == {}, "the removal phase ran before the teardown"
+    assert factory.made["good"].state is McpConnectionState.DISCONNECTED
+    assert (
+        factory.made["stuck"].state is McpConnectionState.CONNECTED
+    ), "the connection whose close was cancelled is still open"
+    assert manager.status()["stuck"].error == "CancelledError"
+    assert manager.status()["stuck"].tool_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_refresh_leaves_that_server_with_no_tools_and_the_others_alone():
+    """A refresh cancelled mid-teardown publishes nothing.
+
+    The tools go before the reconnect is attempted, so a cancellation between
+    the two leaves the server with none rather than with tools pointing at a
+    client that is not coming back.
+    """
+    tool_manager = ToolManager()
+    factory = _hostile_factory(
+        {
+            "bad": {"tools": ("x",), "cancel_on": "disconnect"},
+            "good": {"tools": ("y",)},
+        }
+    )
+    manager = McpManager(
+        _config(
+            ("bad", {"url": "https://bad.invalid/mcp"}),
+            ("good", {"url": "https://good.invalid/mcp"}),
+        ),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    await manager.start()
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.refresh("bad")
+
+    assert set(tool_manager.tools_map()) == {
+        "mcp__good__y"
+    }, "the cancelled server published nothing and the untouched one kept its tools"
+    assert manager.status()["bad"].tool_count == 0
+    assert manager.status()["bad"].error == "CancelledError"
+    assert (
+        manager.status()["good"].state,
+        manager.status()["good"].error,
+        manager.status()["good"].tool_count,
+    ) == ("connected", "", 1), "refreshing one server left the other alone"
+
+
+@pytest.mark.asyncio
+async def test_every_cancelled_server_is_visited_before_the_cancellation_is_raised():
+    """One cancelled server must not cost the next one its turn.
+
+    ``start`` runs the servers concurrently and inspects the results only
+    afterwards, so both cancelled servers are connected before the
+    cancellation is re-raised.  A sequential loop that re-raised on the spot
+    would never reach the second one, and the healthy server would be left
+    never tried at all.
+    """
+    tool_manager = ToolManager()
+    factory = _hostile_factory(
+        {
+            "first": {"tools": ("a",)},
+            "second": {"tools": ("b",)},
+            "healthy": {"tools": ("c",)},
+        }
+    )
+    manager = McpManager(
+        _config(
+            ("first", {"url": "https://first.invalid/mcp"}),
+            ("second", {"url": "https://second.invalid/mcp"}),
+            ("healthy", {"url": "https://healthy.invalid/mcp"}),
+        ),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    factory.made["first"].cancel_next_connect()
+    factory.made["second"].cancel_next_connect()
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.start()
+
+    assert factory.made["first"].attempts == 1
+    assert (
+        factory.made["second"].attempts == 1
+    ), "the second cancelled server never got its turn"
+    assert set(tool_manager.tools_map()) == {"mcp__healthy__c"}
+    assert (
+        manager.status()["first"].state,
+        manager.status()["first"].tool_count,
+    ) == ("disconnected", 0)
+    assert (
+        manager.status()["healthy"].state,
+        manager.status()["healthy"].tool_count,
+    ) == ("connected", 1)
+
+
+@pytest.mark.asyncio
+async def test_status_error_is_the_exception_text_verbatim(monkeypatch):
+    """The recorded error is the exception and nothing the manager adds.
+
+    ``status`` is rendered into the TUI and written to the log, so forwarding
+    the exception's own text is the whole contract: a server name, a tool name
+    or a configuration value interpolated here would be text the exception
+    never contained, arriving at the one surface a user reads.
+    """
+    tool_manager = ToolManager()
+    real_unregister = tool_manager.unregister
+
+    def _unregister(name):
+        if name == "mcp__weather__a":
+            raise RuntimeError("registry exploded")
+        return real_unregister(name)
+
+    monkeypatch.setattr(tool_manager, "unregister", _unregister)
+    factory = _hostile_factory({"weather": {"tools": ("a",)}})
+    manager = McpManager(
+        _config(("weather", {"url": "https://w.invalid/mcp"})),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    await manager.start()
+
+    await manager.stop()
+
+    assert (
+        manager.status()["weather"].error == "RuntimeError: registry exploded"
+    ), "no server name, no tool name, no decoration"
+
+
+@pytest.mark.asyncio
+async def test_the_log_names_the_tool_a_failed_unregistration_could_not_release(
+    monkeypatch,
+):
+    """The tool that stayed is named in the log, and not in ``status``.
+
+    ``status`` describes a server; the log is where an operator reads which of
+    its tools is still holding a registry slot.  A tool name is arbitrary text
+    from the server, so the two surfaces deliberately carry different amounts
+    and each has to be checked on its own.
+    """
+    tool_manager = ToolManager()
+    real_unregister = tool_manager.unregister
+
+    def _unregister(name):
+        if name == "mcp__weather__a":
+            raise RuntimeError("registry exploded")
+        return real_unregister(name)
+
+    monkeypatch.setattr(tool_manager, "unregister", _unregister)
+    factory = _hostile_factory({"weather": {"tools": ("a",)}})
+    manager = McpManager(
+        _config(("weather", {"url": "https://w.invalid/mcp"})),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    await manager.start()
+
+    with _captured_logs() as lines:
+        await manager.stop()
+
+    reported = [line for line in lines if "failed to unregister" in line]
+    assert len(reported) == 1, f"expected one unregistration failure, got {reported}"
+    assert "mcp__weather__a" in reported[0], "the log names the tool that stayed"
+    assert "weather" in reported[0], "and the server it belongs to"
+    assert "RuntimeError: registry exploded" in reported[0], "and why it stayed"
+    assert (
+        "mcp__weather__a" not in manager.status()["weather"].error
+    ), "status describes the server, not the tool"
+
+
+def test_a_duplicate_name_error_does_not_echo_any_configuration_value():
+    """The refusal names the name and the positions, and nothing else.
+
+    Both entries carry a distinct secret in every field that accepts one, so
+    the only way to keep them out of the message is for the message not to
+    carry either entry at all.
+    """
+    config = [
+        McpServerConfig.parse("dup", _http_secret_spec("one")),
+        McpServerConfig.parse("dup", _stdio_secret_spec()),
+    ]
+
+    with pytest.raises(MitoCodeMcpConfigError) as excinfo:
+        McpManager(
+            config, tool_manager=ToolManager(), client_factory=_hostile_factory({})
+        )
+
+    message = str(excinfo.value)
+    assert "dup" in message, "the duplicated name is named"
+    assert "1" in message, "and so is the offending position"
+    _assert_carries_no_secret(message, "the duplicate-name error")
+
+
+def test_a_mistyped_list_entry_error_does_not_echo_any_configuration_value():
+    """A rejected element is described by its position and its type.
+
+    The rejected element *is* the secret-bearing one here, and its neighbours
+    are real entries carrying secrets too, so the message has to name the
+    element that was wrong without ever rendering any of them.
+    """
+    config = [
+        McpServerConfig.parse("first", _http_secret_spec("one")),
+        _http_secret_spec("rogue"),
+        McpServerConfig.parse("third", _stdio_secret_spec()),
+    ]
+
+    with pytest.raises(MitoCodeMcpConfigError) as excinfo:
+        McpManager(
+            config, tool_manager=ToolManager(), client_factory=_hostile_factory({})
+        )
+
+    message = str(excinfo.value)
+    assert "1" in message, "the offending position is named"
+    assert "dict" in message, "and so is the type that was found there"
+    _assert_carries_no_secret(message, "the mistyped-entry error")
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_refresh_name_error_does_not_echo_any_configuration_value():
+    """The refusal names the server asked for, not how it is configured.
+
+    The existing probe puts a secret in ``headers`` only, so ``url``,
+    ``env``, ``args`` and ``cwd`` were never at risk from this module's own
+    message.  Here each carries one of its own.
+    """
+    manager = McpManager(
+        _config(
+            ("remote", _http_secret_spec("remote")),
+            ("local", _stdio_secret_spec()),
+        ),
+        tool_manager=ToolManager(),
+        client_factory=_hostile_factory({"remote": {}, "local": {}}),
+    )
+
+    with pytest.raises(MitoCodeMcpConfigError) as excinfo:
+        await manager.refresh("nope")
+
+    message = str(excinfo.value)
+    assert "nope" in message, "the requested name is named"
+    assert "remote" in message and "local" in message, "and the configured servers"
+    _assert_carries_no_secret(message, "the unknown-server error")
+
+
+@pytest.mark.asyncio
+async def test_a_registration_that_raises_partway_leaves_no_tool_in_the_registry(
+    monkeypatch,
+):
+    """A registration that dies half way must not strand what it already did.
+
+    ``_connect_one`` merges the tools it could not release into the ownership
+    record, precisely so a dispatchable tool is never left unowned.  That
+    defence covers a partial ``unregister``.  This is the same hazard from the
+    other side: registration publishes tools as it goes, so an exception half
+    way leaves its earlier output in the registry with no record of it, and no
+    later ``stop`` can ever reclaim it.
+    """
+    tool_manager = ToolManager()
+    real_register = tool_manager.register_mcp_client
+
+    async def half_registered(**_kwargs):
+        """Stand-in for a tool the registry published before it failed.
+
+        Returns:
+            ``None``; nothing dispatches it in this test.
+        """
+        return None
+
+    def _register(client):
+        if client.server_name == "bad":
+            tool_manager.register(
+                half_registered, name="mcp__bad__a", human_doc="half registered"
+            )
+            raise RuntimeError("catalogue exploded midway")
+        return real_register(client)
+
+    monkeypatch.setattr(tool_manager, "register_mcp_client", _register)
+    factory = _hostile_factory(
+        {"bad": {"tools": ("a", "b")}, "good": {"tools": ("g",)}}
+    )
+    manager = McpManager(
+        _config(
+            ("bad", {"url": "https://bad.invalid/mcp"}),
+            ("good", {"url": "https://good.invalid/mcp"}),
+        ),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+
+    await manager.start()
+
+    assert set(tool_manager.tools_map()) == {
+        "mcp__good__g"
+    }, "the healthy server still publishes"
+    assert manager.status()["bad"].tool_count == 0
+
+    await manager.stop()
+
+    assert [
+        name for name in tool_manager.tools_map() if name.startswith("mcp__bad__")
+    ] == [], "a tool the manager cannot name is a tool nobody can remove"
+    assert tool_manager.tools_map() == {}
+
+
+@pytest.mark.asyncio
+async def test_a_stdio_server_that_dies_costs_only_its_own_tools(tmp_path):
+    """The isolation claim end to end, against two real subprocesses.
+
+    One child exits immediately without speaking MCP; the other serves a tool
+    over a real stdio transport.  No ``client_factory`` is involved, so this is
+    the feature's central promise proven through the real transport rather than
+    through a stand-in.
+    """
+    server_script = tmp_path / "srv.py"
+    server_script.write_text(
+        "from fastmcp import FastMCP\n"
+        "app = FastMCP('live')\n"
+        "@app.tool\n"
+        "def ping() -> str:\n"
+        "    '''Answer a ping.'''\n"
+        "    return 'pong'\n"
+        "app.run()\n"
+    )
+
+    tool_manager = ToolManager()
+    manager = McpManager(
+        {
+            "mcpServers": {
+                "dead": {
+                    "command": sys.executable,
+                    "args": ["-c", "import sys; sys.exit(3)"],
+                    "connect_timeout": 20.0,
+                },
+                "live": {
+                    "command": sys.executable,
+                    "args": [str(server_script)],
+                    "connect_timeout": 60.0,
+                },
+            }
+        },
+        tool_manager=tool_manager,
+    )
+
+    try:
+        await manager.start()
+
+        dead = manager.status()["dead"]
+        assert (dead.state, dead.tool_count) == (
+            "failed",
+            0,
+        ), f"the dead server reported {dead.error!r}"
+        assert dead.error != "", "and it says why"
+
+        live = manager.status()["live"]
+        assert (live.state, live.error, live.tool_count) == ("connected", "", 1)
+        assert set(tool_manager.tools_map()) == {"mcp__live__ping"}
+        assert await tool_manager.tools_map()["mcp__live__ping"]() == "pong"
+    finally:
+        await manager.stop()
+
+    assert tool_manager.tools_map() == {}
+    assert manager.status()["live"].state == "disconnected"
+
+
+@pytest.mark.asyncio
+async def test_refresh_after_a_failed_refresh_publishes_the_catalogue_again():
+    """A server that failed to reconnect is not permanently marked broken.
+
+    The failed refresh leaves no tools behind, so the ownership record is empty
+    when the next one runs.  That is what makes recovery possible: the retry has
+    to start from a clean slate rather than from a record naming tools that
+    already left.
+    """
+    tool_manager = ToolManager()
+    factory = _hostile_factory({"weather": {"tools": ("a",)}})
+    manager = McpManager(
+        _config(("weather", {"url": "https://w.invalid/mcp"})),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    client = factory.made["weather"]
+    client.go_offline()
+
+    await manager.refresh("weather")
+
+    assert tool_manager.tools_map() == {}, "the failed refresh published nothing"
+    assert manager.status()["weather"].state == "failed"
+
+    client.go_online()
+    # The failed connect dropped the cached catalogue, exactly as the real
+    # client does, so the server "coming back" is a server advertising
+    # something new rather than the same thing twice.
+    for name in ("a", "b"):
+        client.tools.append(
+            SimpleNamespace(
+                name=name,
+                description=f"{name} on weather",
+                input_schema={"type": "object", "properties": {}},
+            )
+        )
+    await manager.refresh("weather")
+
+    assert set(tool_manager.tools_map()) == {
+        "mcp__weather__a",
+        "mcp__weather__b",
+    }, "the recovery publishes the catalogue the server advertises now"
+    assert manager.status()["weather"] == McpServerStatus(
+        "connected", "", 2
+    ), "a failure the retry resolved is history, not a current error"
+
+
+@pytest.mark.asyncio
+async def test_refresh_without_a_name_never_touches_a_disabled_server():
+    """``refresh()`` with no name means every *enabled* server.
+
+    A disabled entry has no client, so reaching one is not a failure a
+    ``try``/``except`` around a reconnect could absorb: it would be an
+    unrecorded ``KeyError`` out of a method documented never to raise for a
+    server.
+    """
+    factory = _hostile_factory({"on": {"tools": ("a",)}})
+    manager = McpManager(
+        _config(
+            ("on", {"url": "https://on.invalid/mcp"}),
+            ("off", {"url": "https://off.invalid/mcp", "enabled": False}),
+        ),
+        tool_manager=ToolManager(),
+        client_factory=factory,
+    )
+
+    await manager.refresh()
+
+    assert "off" not in factory.made, "a disabled server is never given a client"
+    assert factory.made["on"].state is McpConnectionState.CONNECTED
+    assert manager.status()["off"] == McpServerStatus("disabled", "", 0)
