@@ -50,6 +50,11 @@ MCP_TOOL_PREFIX = "mcp__"
 #: Separator between the server name and the tool name inside that prefix.
 MCP_TOOL_SEPARATOR = "__"
 
+#: Longest function name OpenAI's function-calling API accepts.  Not an MCP
+#: constraint — the specification imposes nothing here — but the composed name is
+#: published to the model verbatim, so a long server name plus a long tool name
+#: can break a request at the provider after passing every local check.
+MAX_TOOL_NAME_LENGTH = 64
 
 
 def _normalize_input_schema(raw: Any) -> Dict[str, Any]:
@@ -448,6 +453,17 @@ class ToolManager:
         :meth:`register` ever grows a step that can raise, this needs a
         rollback as well.
 
+        The composed name is emitted straight into :meth:`tool_schemas`, so it
+        has to survive whatever the model API does with a function name.  The
+        usual constraint is ``^[a-zA-Z0-9_-]{1,64}$``: the namespace prefix and
+        separator are already within that character set, but the *length* is
+        the server author's and the tool author's to spend, and a long server
+        name plus a long tool name can exceed 64 characters.  Nothing here
+        fails such a tool — the name is not truncated, because a truncated name
+        is a different tool — but a warning says what the provider will say
+        later, when the whole request is rejected for a name this harness
+        composed.
+
         Args:
             client: A connected MCP client exposing ``server_name`` and ``tools``.
 
@@ -468,6 +484,12 @@ class ToolManager:
             # as it was read: the first wins and the second is skipped.
             claimed.add(tool_name)
 
+            if len(tool_name) > MAX_TOOL_NAME_LENGTH:
+                logger.warning(
+                    f"MCP tool '{tool_name}' is {len(tool_name)} characters, past "
+                    f"the {MAX_TOOL_NAME_LENGTH} an OpenAI-compatible function name "
+                    "may be; the model API will reject the request that carries it"
+                )
 
             description = (tool.description or "").strip()
             if not description:

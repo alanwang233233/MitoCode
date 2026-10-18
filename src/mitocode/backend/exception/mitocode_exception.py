@@ -85,7 +85,15 @@ class MitoCodeMcpConfigError(MitoCodeMcpError):
 
 
 class MitoCodeMcpConnectionError(MitoCodeMcpError):
-    """Raised when an MCP server connection cannot be established or is lost."""
+    """Reserved for when an MCP connection cannot be established or is lost.
+
+    Nothing raises it yet, and that is deliberate rather than an oversight:
+    :class:`~mitocode.backend.mcp.mcp_client.McpClient` records a failed
+    connection in ``state``/``last_error`` and returns ``False``, because one
+    unreachable server must not abort the startup of the servers that work.
+    Turning that into an exception belongs to whichever layer turns connection
+    failure into a user-visible abort.
+    """
 
 
 class MitoCodeMcpToolCallError(MitoCodeMcpError):

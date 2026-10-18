@@ -17,6 +17,7 @@ from mitocode.backend.agent.session_factory import SessionFactory
 from mitocode.backend.chat_provider.sample_chat_provider import _SampleChatProvider
 from mitocode.backend.exception.mitocode_exception import MitoCodeToolDefinitionError
 from mitocode.backend.tool.tool_manager import (
+    MAX_TOOL_NAME_LENGTH,
     MCP_TOOL_PREFIX,
     MCP_TOOL_SEPARATOR,
     ToolManager,
@@ -1319,6 +1320,43 @@ async def test_registered_mcp_tool_exposes_no_dispatch_bindings_as_keywords():
     assert list(parameters) == [
         "kwargs"
     ], "the client and upstream tool name must be captured, never bound as keywords"
+
+
+def test_register_mcp_client_warns_when_a_composed_name_is_too_long_for_a_model():
+    """The composed name goes to the model verbatim, so its length is ours to warn about.
+
+    The MCP specification imposes no name limit; the model API does, at 64
+    characters.  A server name plus a tool name that together exceed it produce
+    a tool that registers perfectly here and takes down the whole request at the
+    provider.  The tool is still registered — truncating would rename it, and a
+    renamed tool is a different tool — but the warning says why.
+    """
+    manager = ToolManager()
+    long_server = "s" * 40
+    long_tool = "t" * 40
+    client = _fake_mcp_client(long_server, [_fake_tool(long_tool, description="d")])
+    composed = ToolManager.build_mcp_tool_name(long_server, long_tool)
+
+    with _captured_logs() as lines:
+        specs = manager.register_mcp_client(client)
+
+    assert len(composed) > MAX_TOOL_NAME_LENGTH, "the case is the one being tested"
+    assert [spec.name for spec in specs] == [composed], "and the tool still registers"
+    warnings = [line for line in lines if "characters, past the 64" in line]
+    assert len(warnings) == 1, f"expected one length warning, got {warnings}"
+    assert composed in warnings[0], "naming the composed name that is too long"
+
+
+def test_register_mcp_client_does_not_warn_about_the_length_of_a_usable_name():
+    """An ordinary namespaced name is well inside the limit and stays quiet."""
+    manager = ToolManager()
+    client = _fake_mcp_client("weather", [_fake_tool("get_forecast", description="d")])
+
+    with _captured_logs() as lines:
+        specs = manager.register_mcp_client(client)
+
+    assert [spec.name for spec in specs] == ["mcp__weather__get_forecast"]
+    assert lines == [], f"a 26-character name is not a warning, got {lines}"
 
 
 @pytest.mark.asyncio
