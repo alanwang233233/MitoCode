@@ -799,13 +799,29 @@ class BackgroundRegistry:
         self._settle(handle, task)
 
     def _settle(self, handle: str, task: "asyncio.Task[None]") -> None:
-        """Fill in a record whose wrapper never ran, and leave the rest alone.
+        """Fill in a record that nothing settled, and leave the rest alone.
 
-        Reached only when the wrapper was cancelled before its first line
-        executed, so the record is still ``RUNNING`` while its task is already
-        finished.  Called from both the done-callback and ``collect`` because
-        the callback is scheduled with ``call_soon`` and may not have run by
-        the time a caller asks.
+        Reached whenever a handle's wrapper task has finished while its record
+        is still ``RUNNING``, so the record is ``RUNNING`` while its task is
+        already finished.  Two paths get there, and neither is exotic:
+
+        * the wrapper was cancelled before its first line executed, so none of
+          its body ran; and
+        * ``_run``'s first statement is
+          ``asyncio.ensure_future(coro_factory())``, which raises before
+          :meth:`_run` is entered when the factory itself raises or hands back
+          something that is not awaitable.
+
+        The second is the same threat model the rest of this module is built
+        for: the tool mini-DSL parses arbitrary literals, so a model can supply
+        a ``coro_factory`` that is not a callable returning an awaitable, and
+        that failure arrives here rather than on a settled record.  Recording
+        it is the point — the alternative is a handle reading ``RUNNING``
+        forever, with no outcome anyone can ever ask for.
+
+        Called from both the done-callback and :meth:`collect` because the
+        callback is scheduled with ``call_soon`` and may not have run by the
+        time a caller asks.
 
         Args:
             handle: The handle to reconcile.
