@@ -428,12 +428,18 @@ class ToolManager:
         with a warning rather than overwriting the existing registration.
 
         Registration is all-or-nothing.  Every tool is read, normalised and
-        composed first, and nothing is published until the whole catalogue has
-        survived that pass, because a caller can only ever reclaim what it was
-        told it registered: a catalogue whose later entry is malformed would
-        otherwise leave its healthy predecessors published, unreported, and
-        therefore removable by nobody.  A failure while publishing is undone
-        the same way.
+        composed first, and ``self._tools`` is not touched until the whole
+        catalogue has survived that pass, because a caller can only ever
+        reclaim what it was told it registered: a catalogue whose later entry
+        is malformed would otherwise leave its healthy predecessors published,
+        unreported, and therefore removable by nobody.
+
+        Publishing afterwards cannot itself fail for these inputs -- the name
+        is an f-string result, so it is always hashable, and the docs and
+        schema were normalised in the first pass -- which is what makes the
+        single pass sufficient rather than a prefix of a wider one.  If
+        :meth:`register` ever grows a step that can raise, this needs a
+        rollback as well.
 
         Args:
             client: A connected MCP client exposing ``server_name`` and ``tools``.
@@ -474,13 +480,8 @@ class ToolManager:
             )
 
         registered: List[ToolSpec] = []
-        try:
-            for pending in prepared:
-                registered.append(self.register(**pending))
-        except Exception:  # pylint: disable=broad-except
-            for spec in registered:
-                self._tools.pop(spec.name, None)
-            raise
+        for pending in prepared:
+            registered.append(self.register(**pending))
         return registered
 
     def tools_map(self) -> Dict[str, Callable]:
