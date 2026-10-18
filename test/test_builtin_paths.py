@@ -11,14 +11,16 @@ every in-root spelling, exactly one for every escape spelling.  Asserting only
 that the happy path returns a non-``None`` path would pass against an
 implementation that asked the approver every time.
 
-**Containment is decided by ``is_within``, not ``resolve_within``.**  On Python
-3.13+ ``Path.resolve()`` no longer raises on a symlink loop: it returns the path
-with the looping component left in place, still spelled under the root, so a bare
-containment check accepts it.  (Probed, not assumed: on 3.10.20
-``Path.resolve`` raises ``RuntimeError``; on 3.14.0 it returns
-``<root>/loop_a`` and ``resolve_within`` *succeeds* — only ``is_within``
-answers False.  ``test_a_symlink_loop_reaches_the_approver`` is the test that
-fails if the two are ever swapped.)
+**Containment is decided by ``is_within``, not ``resolve_within``.**  The two
+answer the same question, but only ``is_within`` also answers "is this usable at
+all?", and that second question is not a refinement — so this file proves the gate
+uses it.  ``test_resolve_escalates_a_target_the_resolved_path_would_have_accepted``
+does that with a workspace double whose two entry points disagree, which
+discriminates on every interpreter.  The real symlink loop discriminates only on
+3.13+ (probed, not assumed: on 3.10.20 ``Path.resolve`` raises ``RuntimeError`` on
+a loop, so ``resolve_within`` escalates by accident and any gate looks correct;
+on 3.14.0 ``resolve_within`` *accepts* the loop and ``is_within`` alone rejects
+it).
 
 Two expectations are deliberately written against ``Path(...).resolve()`` rather
 than a literal spelling: on macOS ``/etc`` is a symlink to ``/private/etc``, so a
@@ -96,13 +98,13 @@ ESCAPE_CASE_IDS = (
 class _RecordingApprover:
     """An approver that records every request and returns a fixed decision.
 
-    The ``asyncio.sleep(0)`` is load-bearing rather than decorative: a verdict
-    produced only after a suspension point can be consumed by an ``await`` and by
-    nothing else.  So every escape test in this file also proves that ``resolve``
-    really suspends on ``ctx.approver.request(...)`` — an implementation that
-    called it without awaiting would hold a coroutine, fail the ``is ALLOW``
-    identity check and refuse every escape, which is exactly what the allow-path
-    assertions catch.
+    The ``asyncio.sleep(0)`` is there because an approver is going to be a dialog
+    that waits for a keystroke, and a double that never suspends would not notice
+    an implementation that mishandles the suspension.  It is explicitly **not**
+    evidence that ``resolve`` awaits: an ``async def`` returns a coroutine whether
+    or not its body suspends, so a missed ``await`` would leave ``resolve`` holding
+    the coroutine and fail the ``is ALLOW`` identity check either way.  What the
+    allow-path assertions do prove is that the verdict was awaited and acted on.
     """
 
     def __init__(self, decision: ApprovalDecision = ApprovalDecision.ALLOW) -> None:
@@ -163,10 +165,11 @@ class _FlakyWorkspace:
         """
         self.path = path
         self.error = error
+        self.is_within_targets: list[Path] = []
         self.resolve_within_targets: list[Path] = []
 
     def is_within(self, target: Path) -> bool:
-        """Accept everything: the race is in the second call, not this one.
+        """Record the candidate and accept it: the race is in the second call.
 
         Args:
             target: The candidate ``resolve`` checked.
@@ -174,6 +177,7 @@ class _FlakyWorkspace:
         Returns:
             Always ``True``.
         """
+        self.is_within_targets.append(target)
         return True
 
     def resolve_within(self, target: Path) -> Path:
@@ -187,6 +191,55 @@ class _FlakyWorkspace:
         """
         self.resolve_within_targets.append(target)
         raise self.error
+
+
+class _DisagreeingWorkspace:
+    """A workspace whose two containment entry points answer differently.
+
+    ``is_within`` refuses a target that ``resolve_within`` happily resolves to an
+    in-root path.  Nothing on a real filesystem produces that combination — which
+    is exactly why this double exists: it is the one shape that separates "gated on
+    ``is_within``" from "gated on ``resolve_within``" without depending on how
+    ``Path.resolve()`` happens to treat a symlink loop on the running interpreter.
+    """
+
+    def __init__(self, path: Path, accepted: Path) -> None:
+        """Bind the root, and the path the permissive call will return.
+
+        Args:
+            path: The workspace root ``ToolContext.root()`` reads.
+            accepted: The in-root path ``resolve_within`` returns while
+                ``is_within`` still answers False.
+        """
+        self.path = path
+        self.accepted = accepted
+        self.is_within_targets: list[Path] = []
+        self.resolve_within_targets: list[Path] = []
+
+    def is_within(self, target: Path) -> bool:
+        """Record the candidate and refuse it.
+
+        Args:
+            target: The candidate ``resolve`` checked.
+
+        Returns:
+            Always ``False``: this is the entry point that answers "inside *and*
+            usable", and the target is deliberately not that.
+        """
+        self.is_within_targets.append(target)
+        return False
+
+    def resolve_within(self, target: Path) -> Path:
+        """Record the candidate and return the accepted in-root path.
+
+        Args:
+            target: The candidate, which this call answers for happily.
+
+        Returns:
+            :attr:`accepted`, regardless of what ``is_within`` said about it.
+        """
+        self.resolve_within_targets.append(target)
+        return self.accepted
 
 
 @pytest.fixture(name="root")
@@ -370,9 +423,14 @@ def test_resolve_is_a_coroutine_with_the_signature_the_call_sites_use():
         "resolve must stay awaitable; a future approver is a dialog that waits "
         "for a keystroke"
     )
-    assert list(signature.parameters) == ["ctx", "target", "action"], (
-        "the parameter names are what keyword call sites depend on, got "
-        f"{list(signature.parameters)}"
+    assert len(signature.parameters) == 3, (
+        "every call site passes context, path and verb; a fourth parameter would "
+        f"be dead weight, got {len(signature.parameters)}"
+    )
+    kinds = [parameter.kind for parameter in signature.parameters.values()]
+    assert kinds == [inspect.Parameter.POSITIONAL_OR_KEYWORD] * 3, (
+        "every call site passes all three arguments positionally, so a "
+        f"keyword-only or reordered signature would break them; got {kinds}"
     )
 
 
@@ -609,11 +667,13 @@ async def test_resolve_carries_the_resolved_path_the_action_and_the_root_in_the_
 ):
     """The request a future dialog renders names the action, the path and the boundary.
 
-    ``detail`` is the concrete path, so a human can answer sensibly; ``reason``
-    is asserted only as far as the docstrings specify.  ``resolve``'s docstring
-    documents the refusal sentence but never ``ApprovalRequest.reason`` itself, so
-    the wording is pinned no further than "it says where the boundary is" — the
-    exact phrasing is an open question, recorded here rather than guessed at.
+    ``detail`` is the concrete path, so a human can answer sensibly.  ``reason`` is
+    pinned only as far as the docstrings go: they specify the *refusal* sentence,
+    which says the target resolves outside "the workspace root", but never state
+    ``ApprovalRequest.reason`` itself.  So the assertion is the one thing the two
+    agree on — the reason says what the boundary is — and not that the reason
+    repeats the root, which only the current implementation happens to do and which
+    a future dialog could reasonably drop.
     """
     target = "escape_link"
     expected = (root.parent / "outside.txt").resolve()
@@ -628,9 +688,6 @@ async def test_resolve_carries_the_resolved_path_the_action_and_the_root_in_the_
     assert request.action == "grep", "the action is passed through verbatim"
     assert request.detail == str(expected), "the detail is the resolved path"
     assert isinstance(request.reason, str), "the reason is prose for a human"
-    assert str(root) in request.reason, (
-        f"the reason must name the boundary, got {request.reason!r}"
-    )
     assert "workspace root" in request.reason, (
         f"the reason must say what the boundary is, got {request.reason!r}"
     )
@@ -710,21 +767,28 @@ async def test_resolve_asks_the_approver_about_a_symlink_loop_instead_of_accepti
 ):
     """A loop is in-root yet unusable, so it must escalate rather than be taken at its word.
 
-    The discriminator between the two containment entry points.  On Python 3.13+
-    ``Path.resolve()`` no longer raises on a loop: it returns the path with the
+    What this pins end to end, on every interpreter: a symlink loop inside the
+    root produces exactly one approval request and, once allowed, comes back
+    spelled as the model wrote it.
+
+    What it does **not** pin: which predicate made that call.  On Python 3.13+
+    ``Path.resolve()`` no longer raises on a loop — it returns the path with the
     looping component left in place, still spelled under the root, so
-    ``resolve_within`` *accepts* it (verified on CPython 3.14.0).  An
-    implementation that gated on ``resolve_within`` inside a try/except — or on a
-    bare containment test — would hand the model a path that can only ever fail
-    with ELOOP and would never consult a human about it.  ``is_within`` answers
-    False on every supported version, so this test fails the moment the predicate
-    is swapped.
+    ``resolve_within`` *accepts* it (verified on CPython 3.14.0) and this test is
+    the discriminator.  On 3.10-3.12 ``resolve_within`` raises ``RuntimeError``
+    instead, so an implementation gated on it in a ``try/except`` escalates exactly
+    as this test expects and the suite stays green with either predicate.
+    ``test_resolve_escalates_a_target_the_resolved_path_would_have_accepted`` is
+    the discriminator that does not depend on the interpreter.
     """
     loop = root / "loop_a"
 
     path, error = await resolve(_context(workspace, spy), "loop_a", "read")
 
-    assert loop.is_symlink(), "precondition: the fixture really is a symlink loop"
+    assert loop.is_symlink() and not loop.exists(), (
+        "precondition: the fixture is a self-referential link, which os.lstat "
+        "reports and stat cannot follow"
+    )
     assert len(spy.requests) == 1, (
         "a loop is unresolvable, so it must be escalated; accepting it would "
         "hand the model a path that only ever fails with ELOOP"
@@ -775,12 +839,60 @@ async def test_resolve_hands_back_an_approved_loop_un_normalised_so_open_still_f
     assert path == loop, (
         "an unresolvable target comes back as the candidate, un-normalised"
     )
+    # No `match=` on purpose: ELOOP's message text is platform wording, and the
+    # errno assertion below says strictly more than any string match could.
     with pytest.raises(OSError) as excinfo:
         open(path).close()
     assert excinfo.value.errno == errno.ELOOP, (
         "the point of returning the loop path is that open() names the real "
         f"failure; got errno {excinfo.value.errno}"
     )
+
+
+@pytest.mark.asyncio
+async def test_resolve_escalates_a_target_the_resolved_path_would_have_accepted(
+    root, spy
+):
+    """The predicate is ``is_within``: the resolved path never decides containment.
+
+    The version-independent discriminator.  The real-symlink-loop test above only
+    separates the two entry points on Python 3.13+, because on 3.10-3.12
+    ``resolve_within`` *raises* on a loop and an implementation gated on it inside a
+    ``try/except`` escalates all the same.  This double removes the interpreter
+    from the question: its ``is_within`` answers False while its ``resolve_within``
+    succeeds and hands back an in-root path, which is the exact shape the design
+    says must escalate.
+
+    The two implementations diverge exactly here:
+
+    * gated on ``is_within`` — one request, and ``(None, refusal)`` under a
+      denying approver, which is what this test asserts;
+    * gated on ``resolve_within`` — ``(accepted, None)`` with **zero** requests,
+      so the call-count assertion fails.
+    """
+    accepted = root / "src" / "main.py"
+    workspace = _DisagreeingWorkspace(root, accepted)
+    spy.decision = ApprovalDecision.DENY
+
+    path, error = await resolve(_context(workspace, spy), "src/main.py", "read")
+
+    assert workspace.path == root, "precondition: the double answers about this root"
+    assert accepted == root / "src" / "main.py", (
+        "precondition: the path its permissive call returns really is in-root"
+    )
+    assert workspace.resolve_within_targets == [], (
+        "is_within answering False must end the gate before anything asks for the "
+        f"resolved path; got {workspace.resolve_within_targets!r}"
+    )
+    assert len(spy.requests) == 1, (
+        "a target is_within rejected is an escape and must be escalated exactly "
+        f"once; got {len(spy.requests)} — a gate driven by resolve_within would "
+        "have answered from the path this double hands back and asked for nothing"
+    )
+    assert path is None, "a denied escalation yields no usable path"
+    assert error == REFUSAL_TEMPLATE.format(
+        action="read", path=accepted, root=root
+    ), "the refusal names the resolved path and the root, as any denial does"
 
 
 # ──────────────────────────────────────────────────────────────
@@ -825,18 +937,21 @@ async def test_resolve_without_a_workspace_answers_every_path_and_asks_nothing(
         "nul-absolute": ("/in\0side.txt", Path("/in\0side.txt")),
     }
     target, expected = cases[case_id]
-    ctx = ToolContext(
-        workspace=None, approver=_RecordingApprover(ApprovalDecision.DENY)
-    )
-    assert ctx.workspace is None, "precondition: the boundary is absent"
+    denying = _RecordingApprover(ApprovalDecision.DENY)
+    ctx = ToolContext(workspace=None, approver=denying)
 
     path, error = await resolve(ctx, target, "read")
 
+    assert ToolContext(workspace=None).root() == cwd, (
+        "precondition: with no workspace the root is the process working directory, "
+        "so every relative target below is measured against this directory"
+    )
     assert error is None, (
         f"{case_id}: no boundary means nothing to refuse, got {error!r}"
     )
     assert path == expected, f"{case_id}: must resolve to {expected}, got {path!r}"
-    assert ctx.approver.requests == [], (
+    assert ctx.approver is denying, "precondition: the denying approver is installed"
+    assert denying.requests == [], (
         f"{case_id}: with no workspace there is no escape to approve"
     )
 
@@ -993,8 +1108,8 @@ async def test_resolve_propagates_a_workspace_that_accepts_and_then_refuses(tmp_
     all ``ToolContext`` and ``resolve`` use.
     """
     root = (tmp_path / "ws").resolve()
-    root.mkdir()
-    (root / "main.py").write_text("x", encoding="utf-8")
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "main.py").write_text("x", encoding="utf-8")
     error = MitoCodeWorkspacePathError("the file moved mid-check")
     flaky = _FlakyWorkspace(root, error)
     spy = _RecordingApprover(ApprovalDecision.ALLOW)
@@ -1002,10 +1117,13 @@ async def test_resolve_propagates_a_workspace_that_accepts_and_then_refuses(tmp_
     with pytest.raises(
         MitoCodeWorkspacePathError, match="the file moved mid-check"
     ) as excinfo:
-        await resolve(_context(flaky, spy), "main.py", "read")
+        await resolve(_context(flaky, spy), "src/../src/main.py", "read")
 
     assert excinfo.value is error, "the workspace's own exception must be what escapes"
-    assert flaky.resolve_within_targets == [root / "main.py"], (
-        "the resolved-path call receives the root-joined candidate"
+    assert flaky.is_within_targets == [root / "src" / ".." / "src" / "main.py"], (
+        "the target reaches the workspace root-joined but un-normalised: the gate "
+        "normalises in its own return value, so ``src/../src/main.py`` must still "
+        "be spelled the way the caller wrote it here.  ``src/main.py`` would not "
+        "discriminate, because joining it and resolving it give the same path"
     )
     assert spy.requests == [], "a race must not produce a second approval request"
