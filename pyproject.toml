@@ -36,11 +36,6 @@ dev = [
 
 [tool.coverage.run]
 source = ["src/mitocode"]
-omit = [
-    "src/mitocode/tui/*",
-    "src/mitocode/__main__.py",
-    "src/mitocode/backend/chat_provider/scenario_provider.py",
-]
 
 [tool.pyright]
 typeCheckingMode = "standard"
