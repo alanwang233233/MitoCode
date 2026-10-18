@@ -326,13 +326,28 @@ class McpClient:
         second Ctrl-C or the enclosing cancellation that caused it, and
         :attr:`last_error` stays untouched rather than blaming a cleanup
         problem that never happened.
+
+        The teardown is shielded for the same reason :meth:`connect`'s is: a
+        *repeat* cancellation — a second Ctrl-C, or an enclosing ``wait_for``
+        firing in the same tick — must not interrupt ``Client.close()`` midway
+        and leave stdio's detached connect task holding the child process alive.
+        Only the fact that ``close`` ran to completion tells a shielded teardown
+        from a plain await; both leave the handles cleared.
+
+        :attr:`state` is set before that await rather than after it, for the
+        same reason :meth:`_force_close` drops the handles before its own
+        awaits: the transport is gone from the instant the teardown starts, so a
+        caller cancelled part-way through it must not find a client still
+        reporting ``CONNECTED``.  That is not cosmetic — :meth:`connect` returns
+        early for a connected client, so the state left behind would hand the
+        next reconnect a client with no transport under it.
         """
         if self._stack is None and self._client is None:
             return
-        errors = await self._force_close()
+        self._state = McpConnectionState.DISCONNECTED
+        errors = await asyncio.shield(self._force_close())
         if errors:
             self._last_error = "; ".join(errors)
-        self._state = McpConnectionState.DISCONNECTED
 
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
         """Invoke *tool_name* on the connected server and render the result as text.

@@ -119,6 +119,32 @@ class _HandshakeHangingClient:
         self.close_finished.set()
 
 
+class _SlowCloseClient:
+    """Fake client whose ``close()`` blocks long enough to be cancelled inside.
+
+    The window has to be opened *inside* ``close()``: the teardown the shield
+    protects is exactly that call, so a fake whose ``close()`` returns at once
+    would finish the await before any cancellation could be delivered and every
+    test below would pass whether or not the teardown is shielded.  The pause is
+    announced through ``close_started`` so a test cancels against the teardown
+    it means to interrupt rather than against a sleep it cannot see.
+    """
+
+    def __init__(self, error: Optional[Exception] = None) -> None:
+        """Arm the recorder, optionally to raise *error* after the wait."""
+        self.error = error
+        self.close_started = asyncio.Event()
+        self.close_finished = asyncio.Event()
+
+    async def close(self) -> None:
+        """Record that teardown began, yield to the loop, then finish or fail."""
+        self.close_started.set()
+        await asyncio.sleep(0.05)
+        self.close_finished.set()
+        if self.error is not None:
+            raise self.error
+
+
 class _ShutdownSignal(BaseException):
     """A shutdown request that is neither an ``Exception`` nor a cancellation.
 
@@ -203,6 +229,30 @@ async def _cancel_twice_during_teardown(
     with pytest.raises(asyncio.CancelledError):
         await task
     await asyncio.wait_for(canceller, timeout=5)
+
+
+async def _cancel_during_disconnect_teardown(
+    client: McpClient, built: _SlowCloseClient
+) -> None:
+    """Cancel a running ``disconnect()`` while its own ``close()`` is in flight.
+
+    The cancellation is timed off ``close_started`` so it cannot race the
+    teardown: without it the test would pass whether or not the teardown is
+    shielded.  No message is attached, because a task that ends cancelled is
+    re-cancelled with a fresh, empty ``CancelledError`` by the loop -- the text
+    a caller passes to ``cancel()`` does not survive to the awaiter, so a
+    ``match=`` here could only ever fail.
+
+    Args:
+        client: The client whose :meth:`disconnect` must be cancelled.
+        built: The fake transport installed as the client's client handle.
+    """
+    task = asyncio.ensure_future(client.disconnect())
+    await asyncio.wait_for(built.close_started.wait(), timeout=5)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio
@@ -904,6 +954,88 @@ async def test_disconnect_stays_idempotent_after_a_failing_close(monkeypatch):
     assert client._stack is None
     assert client.state is McpConnectionState.DISCONNECTED
     assert client.last_error == "close failed: RuntimeError: transport wedged"
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cancellation_still_completes_the_transport_teardown():
+    """A cancellation must finish ``close()`` before it propagates out.
+
+    ``_force_close`` drops both handles *before* its first await, so a
+    cancellation landing inside ``close()`` propagates with the transport
+    unreleased and nothing left to retry: stdio's detached connect task is still
+    holding the child process alive, which is the exact orphan
+    :meth:`McpClient.connect` is careful to avoid on its own failure path.  Only
+    the fact that ``close`` *ran to completion* distinguishes a shielded teardown
+    from a plain await -- both leave the handles cleared -- so the wait below is
+    the assertion.
+    """
+    client = McpClient(_in_memory_config())
+    built = _SlowCloseClient()
+    stack = _StackRecorder()
+    client._client = built
+    client._stack = stack
+    client._state = McpConnectionState.CONNECTED
+
+    await _cancel_during_disconnect_teardown(client, built)
+
+    await asyncio.wait_for(built.close_finished.wait(), timeout=5)
+    assert stack.closed is True, "the exit stack was stranded behind the client"
+    assert client._client is None
+    assert client._stack is None
+    assert client.state is McpConnectionState.DISCONNECTED, (
+        "a client whose transport is gone must not keep reporting connected -- "
+        "connect() returns True early for a CONNECTED client, so the next "
+        "reconnect would adopt a client with no transport behind it"
+    )
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cancellation_is_not_recorded_as_a_cleanup_failure():
+    """A cancellation stays a signal; it is not written to ``last_error``.
+
+    Shielding the teardown must not turn an in-flight cancellation into a
+    recorded cleanup problem.  ``_force_close``'s handler is ``Exception``-only
+    and ``disconnect`` records what it returns, so a caller that was cancelled
+    finds :attr:`last_error` exactly as it left it -- the same rule the
+    shutdown-signal tests pin from the other side.
+    """
+    client = McpClient(_in_memory_config())
+    built = _SlowCloseClient()
+    client._client = built
+    client._stack = _StackRecorder()
+    client._state = McpConnectionState.CONNECTED
+
+    await _cancel_during_disconnect_teardown(client, built)
+
+    await asyncio.wait_for(built.close_finished.wait(), timeout=5)
+    assert client.last_error == "", "a cancellation is not a cleanup failure"
+
+
+@pytest.mark.asyncio
+async def test_disconnect_records_the_teardown_error_after_a_slow_close():
+    """A slow teardown still reports what it could not release.
+
+    Shielding changes who waits for the teardown, not what it reports: the
+    errors ``_force_close`` collects are still joined into :attr:`last_error` in
+    the same shape, and the stack is still unwound behind a client that failed
+    to close.
+    """
+    client = McpClient(_in_memory_config())
+    built = _SlowCloseClient(error=RuntimeError("transport wedged"))
+    stack = _StackRecorder(OSError("process group already gone"))
+    client._client = built
+    client._stack = stack
+    client._state = McpConnectionState.CONNECTED
+
+    await client.disconnect()
+
+    assert client.last_error == (
+        "close failed: RuntimeError: transport wedged; "
+        "stack close failed: OSError: process group already gone"
+    )
+    assert built.close_finished.is_set(), "the slow close never ran to completion"
+    assert stack.closed is True
+    assert client.state is McpConnectionState.DISCONNECTED
 
 
 @pytest.mark.asyncio
