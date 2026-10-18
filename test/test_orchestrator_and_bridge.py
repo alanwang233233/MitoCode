@@ -7,13 +7,13 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mitocode.backend.agent.agent_runtime import AgentRuntime
-from mitocode.backend.agent.agent_session import AgentSession
-from mitocode.backend.agent.agent_orchestrator import AgentOrchestrator
-from mitocode.backend.agent.agent_state import AgentState
-from mitocode.backend.bridge.event_adapter import EventBridge
-from mitocode.backend.chat_provider.sample_chat_provider import _SampleChatProvider
-from mitocode.backend.tool.tool_manager import ToolManager
+from mitocode.core.agent.agent_runtime import AgentRuntime
+from mitocode.core.agent.agent_session import AgentSession
+from mitocode.core.agent.agent_orchestrator import AgentOrchestrator
+from mitocode.core.agent.agent_state import AgentState
+from mitocode.core.bridge.event_adapter import EventBridge
+from mitocode.core.chat_provider.sample_chat_provider import _SampleChatProvider
+from mitocode.core.tool.tool_manager import ToolManager
 
 
 class FakeChunk:

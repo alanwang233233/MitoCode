@@ -16,7 +16,7 @@ from textual.widgets import Header, Footer, Input, Static, RichLog
 from textual.widgets import Tree
 from textual.widgets._tree import TreeNode
 
-from mitocode.backend.agent.agent_orchestrator import AgentOrchestrator
+from mitocode.core.agent.agent_orchestrator import AgentOrchestrator
 
 STATUS_ICONS = {
     "idle": "\u26aa",

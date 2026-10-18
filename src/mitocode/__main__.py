@@ -6,10 +6,10 @@ from pyexpat.errors import messages
 
 from httpx import stream
 
-from mitocode.backend.agent.agent_orchestrator import AgentOrchestrator
-from mitocode.backend.chat_provider.scenario_provider import ScenarioProvider
-from mitocode.backend.chat_provider.chat_provider_openai import ChatProviderOpenAI
-from mitocode.backend.tool.tool_manager import ToolManager
+from mitocode.core.agent.agent_orchestrator import AgentOrchestrator
+from mitocode.core.chat_provider.scenario_provider import ScenarioProvider
+from mitocode.core.chat_provider.chat_provider_openai import ChatProviderOpenAI
+from mitocode.core.tool.tool_manager import ToolManager
 from mitocode.tui.ui_main import VibeFrontend
 
 

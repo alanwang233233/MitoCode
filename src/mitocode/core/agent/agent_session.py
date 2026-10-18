@@ -6,7 +6,7 @@ from typing import List, Any, Dict, Callable
 
 from loguru import logger as loguru_logger
 
-from mitocode.backend.tool.tool_manager import ToolManager
+from mitocode.core.tool.tool_manager import ToolManager
 
 from .agent_node import AgentNode
 from .agent_state import AgentState

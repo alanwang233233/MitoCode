@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`mitocode.backend.mcp.mcp_config`.
+"""Unit tests for :mod:`mitocode.core.mcp.mcp_config`.
 
 The module is pure: it normalises a ``{"mcpServers": {...}}`` document into
 frozen :class:`McpServerConfig` values and assembles a fastmcp transport
@@ -63,9 +63,9 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mitocode.backend.exception.mitocode_exception import MitoCodeMcpConfigError
-from mitocode.backend.mcp import mcp_config
-from mitocode.backend.mcp.mcp_config import McpServerConfig, McpServerKind
+from mitocode.core.exception.mitocode_exception import MitoCodeMcpConfigError
+from mitocode.core.mcp import mcp_config
+from mitocode.core.mcp.mcp_config import McpServerConfig, McpServerKind
 
 # A valid https endpoint used wherever the transport selector is incidental.
 HTTP_ENDPOINT = "https://weather.example.com/mcp"
@@ -79,7 +79,7 @@ SECRET_URL = "url-password-URL-DO-NOT-LEAK"
 
 
 def test_mcp_config_error_is_a_mitocode_base_error():
-    from mitocode.backend.exception.mitocode_exception import MitoCodeMcpError
+    from mitocode.core.exception.mitocode_exception import MitoCodeMcpError
 
     assert issubclass(MitoCodeMcpConfigError, MitoCodeMcpError)
 

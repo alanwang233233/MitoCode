@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, NoReturn
 
-from mitocode.backend.exception.mitocode_exception import MitoCodeMcpConfigError
+from mitocode.core.exception.mitocode_exception import MitoCodeMcpConfigError
 
 try:
     from fastmcp.client.transports import (

@@ -1,5 +1,5 @@
 """
-Unit tests for Workspace class in mitocode.backend.workspace.workspace_manager.
+Unit tests for Workspace class in mitocode.core.workspace.workspace_manager.
 
 Covers: _convert_to_path, __init__, new_workspace, init_from_path, dump, _validate_within_workspace.
 """
@@ -10,12 +10,12 @@ from unittest.mock import mock_open, patch
 
 import pytest
 
-from mitocode.backend.exception.mitocode_exception import (
+from mitocode.core.exception.mitocode_exception import (
     MitoCodePathConvertError,
     MitoCodeWorkspaceInitError,
     MitoCodeWorkspaceDumpError,
 )
-from mitocode.backend.workspace.workspace import (
+from mitocode.core.workspace.workspace import (
     MITOCODE_CONFIG_PATH,
     Workspace,
 )

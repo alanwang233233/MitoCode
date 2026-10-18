@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Union, Awaitable
 
 from mitocode import MITOCODE_CONFIG_PATH, APP_VERSION
-from mitocode.backend.exception.mitocode_exception import (
+from mitocode.core.exception.mitocode_exception import (
     MitoCodePathConvertError,
     MitoCodeWorkspaceInitError,
     MitoCodeWorkspaceDumpError,
