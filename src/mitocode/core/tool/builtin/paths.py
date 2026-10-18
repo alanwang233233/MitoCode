@@ -43,7 +43,13 @@ requiring a fully-resolved path from 3.13 on), and it never raises for a path
 it dislikes.  ``resolve_within`` is still used, but only *after* ``is_within``
 has already said yes, purely as the thing that produces the resolved path —
 its exception means nothing here, because it is only reached on a path already
-known to be in bounds.
+known to be in bounds.  One inaccuracy follows from collapsing the two "not
+within" cases into one branch and is known: the ``reason`` an escape request
+carries reads "resolves outside the workspace root" even for a target that was
+rejected for being in-root-but-unresolvable, a symlink loop being the case that
+matters.  It is tracked against the milestone that ships an interactive
+approver, which is the first thing that will put the sentence in front of a
+human.
 
 **A denial is a string, not an exception.**  ``AgentRuntime`` feeds a tool's
 return value straight back to the model, so a refusal that arrives as prose is
@@ -86,13 +92,15 @@ def _resolve_best_effort(candidate: Path) -> Path:
     approver about the path, which needs a *description* of the path in order
     to ask, not an abort.
 
-    Falling back to the un-normalised candidate is safe precisely because the
-    caller has already decided what to do with it: the containment gate has
-    rejected it, and the only paths that reach here un-normalised are ones that
-    cannot be normalised.  Whatever the verdict, the string handed to the
-    approver names the path the model actually asked for, and the returned
-    path — on an allow — is the same path that will fail at ``open()`` with a
-    far more specific error than anything this module could invent.
+    Falling back to the un-normalised candidate is safe at both call sites, for
+    the same underlying reason: the caller has already decided what to do with
+    the result.  At the escape site the containment gate rejected it and the
+    approver has ruled on it; at the no-workspace site there is no gate and no
+    boundary to protect, so there is nothing for the fallback to defeat.  Either
+    way the string handed to the approver names the path the model actually
+    asked for, and a returned path that is still un-normalised is the same path
+    that will fail at ``open()`` with a far more specific error than anything
+    this module could invent.
 
     Args:
         candidate: An **absolute** path, already joined to the root by the
@@ -147,7 +155,10 @@ async def resolve(
     Returns:
         ``(path, None)`` when the target may be operated on.  *path* is fully
         resolved, so a caller may hand it straight to ``open()``, ``glob()`` or
-        ``os.walk()`` without re-deriving it.
+        ``os.walk()`` without re-deriving it — **except** on the two branches
+        where no containment gate vouched for it (no workspace, and an approved
+        escape), where a target that cannot be resolved at all comes back
+        un-normalised and will fail at ``open()``.
 
         ``(None, error)`` when the target may not be.  *error* is a refusal
         string beginning with ``"Error: "`` — the shape
@@ -173,6 +184,24 @@ async def resolve(
             is deliberately not re-submitted to the approver, because doing so
             on a race would mean asking about a path whose answer depends on
             when the question was asked.
+        FileNotFoundError: Propagated from ``ctx.root()`` when there is no
+            workspace and the process working directory has been deleted, since
+            :meth:`pathlib.Path.cwd` has nothing left to read.  Nothing is
+            returned in that case: the root is needed before a candidate even
+            exists.
+        RuntimeError: Propagated verbatim from an approver that raises, because
+            ``await ctx.approver.request(...)`` is not wrapped.  The
+            :class:`~mitocode.core.tool.builtin.approval.Approver` protocol
+            disclaims raising, so an approver that honours it cannot produce
+            this; one that does not is a bug in the approver, and it reaches the
+            model through :func:`~mitocode.core.tool.builtin.errors.tool_boundary`
+            like any other escaped exception.
+
+    That is a list of the failures worth naming, not an exhaustive account of
+    everything a caller may see: nothing raised by the workspace, the approver
+    or the filesystem on the way out is caught, so whatever any of them raises
+    propagates and is rendered by
+    :func:`~mitocode.core.tool.builtin.errors.tool_boundary`.
     """
     root = ctx.root()
     candidate = Path(target)
