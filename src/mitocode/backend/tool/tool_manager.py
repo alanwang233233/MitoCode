@@ -16,6 +16,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Set,
     TYPE_CHECKING,
     Union,
     get_args,
@@ -426,20 +427,33 @@ class ToolManager:
         is populated.  A tool whose composed name is already taken is skipped
         with a warning rather than overwriting the existing registration.
 
+        Registration is all-or-nothing.  Every tool is read, normalised and
+        composed first, and nothing is published until the whole catalogue has
+        survived that pass, because a caller can only ever reclaim what it was
+        told it registered: a catalogue whose later entry is malformed would
+        otherwise leave its healthy predecessors published, unreported, and
+        therefore removable by nobody.  A failure while publishing is undone
+        the same way.
+
         Args:
             client: A connected MCP client exposing ``server_name`` and ``tools``.
 
         Returns:
             The specs that were successfully registered, in discovery order.
         """
-        registered: List[ToolSpec] = []
+        prepared: List[Dict[str, Any]] = []
+        claimed: Set[str] = set()
         for tool in client.tools:
             tool_name = self.build_mcp_tool_name(client.server_name, tool.name)
-            if self.get_spec(tool_name) is not None:
+            if tool_name in claimed or self.get_spec(tool_name) is not None:
                 logger.warning(
                     f"Skipping MCP tool '{tool_name}': name already registered"
                 )
                 continue
+            # Claimed as well as taken, so two tools in one catalogue composing
+            # the same name resolve exactly as they did when each was published
+            # as it was read: the first wins and the second is skipped.
+            claimed.add(tool_name)
 
             description = (tool.description or "").strip()
             if not description:
@@ -448,16 +462,25 @@ class ToolManager:
                     f"'{client.server_name}'."
                 )
 
-            registered.append(
-                self.register(
-                    _make_invoke(client, tool.name),
-                    name=tool_name,
-                    human_doc=f"[{client.server_name}] {description}",
-                    agent_doc=f"[{client.server_name}] {description}",
-                    parameters_schema=_normalize_input_schema(tool.input_schema),
-                    display_action=f"mcp:{client.server_name}",
-                )
+            prepared.append(
+                {
+                    "func": _make_invoke(client, tool.name),
+                    "name": tool_name,
+                    "human_doc": f"[{client.server_name}] {description}",
+                    "agent_doc": f"[{client.server_name}] {description}",
+                    "parameters_schema": _normalize_input_schema(tool.input_schema),
+                    "display_action": f"mcp:{client.server_name}",
+                }
             )
+
+        registered: List[ToolSpec] = []
+        try:
+            for pending in prepared:
+                registered.append(self.register(**pending))
+        except Exception:  # pylint: disable=broad-except
+            for spec in registered:
+                self._tools.pop(spec.name, None)
+            raise
         return registered
 
     def tools_map(self) -> Dict[str, Callable]:
