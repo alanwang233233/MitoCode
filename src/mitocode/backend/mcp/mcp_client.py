@@ -337,6 +337,12 @@ class McpClient:
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
         """Invoke *tool_name* on the connected server and render the result as text.
 
+        Whatever the server said about a failure is carried over as it wrote
+        it, which is what makes the error diagnosable — minus two scrubs, both
+        applied because this text is rendered into the TUI error pane and the
+        log: the arguments it quoted back, and the endpoint it names when a
+        call is refused.  Host, path and the exception's own type survive both.
+
         Args:
             tool_name: The tool's name **as advertised by the server**, without
                 the ``mcp__<server>__`` namespace prefix.
@@ -364,17 +370,25 @@ class McpClient:
                 timeout=timeout,
             )
         except ToolError as exc:
-            # The server's own text is the most likely place for the arguments to
-            # reappear: an argument-validation failure quotes the value it
-            # rejected, so the payload is cut before anything is interpolated.
+            # The server's own text is the most likely place for either kind of
+            # secret to reappear: an argument-validation failure quotes the
+            # value it rejected, and a refused call routinely names the endpoint
+            # it was made against.  Both are cut before anything is
+            # interpolated.
             raise MitoCodeMcpToolCallError(
                 f"MCP tool '{tool_name}' on server '{server}' failed: "
-                f"{_redact_arguments(str(exc))}"
+                f"{_scrub_endpoint(_redact_arguments(str(exc)))}"
             ) from exc
         except asyncio.TimeoutError as exc:
+            # Scrubbed like the two branches above even though the only text the
+            # server chose here is the tool name: the rule is applied where the
+            # message is built, not where the leak was noticed, so a later edit
+            # that quotes something else here cannot reintroduce one silently.
             raise MitoCodeMcpToolCallError(
-                f"MCP tool '{tool_name}' on server '{server}' timed out "
-                f"after {timeout} seconds"
+                _scrub_endpoint(
+                    f"MCP tool '{tool_name}' on server '{server}' timed out "
+                    f"after {timeout} seconds"
+                )
             ) from exc
         except MitoCodeMcpToolCallError:
             raise
@@ -382,10 +396,13 @@ class McpClient:
             # Arguments are never echoed here either: they routinely carry file
             # contents and credentials, and this text reaches the TUI error pane
             # and logs.  A local validation failure can quote them just as a
-            # server-side one does, so the same redaction applies.
+            # server-side one does, so the same redaction applies -- and a
+            # transport failure quotes the endpoint for the same reason a
+            # handshake does, so the endpoint scrub applies here too.
             raise MitoCodeMcpToolCallError(
                 f"MCP tool '{tool_name}' on server '{server}' raised "
-                f"{type(exc).__name__}: {_redact_arguments(str(exc))}"
+                f"{type(exc).__name__}: "
+                f"{_scrub_endpoint(_redact_arguments(str(exc)))}"
             ) from exc
         return self._render_result(result)
 

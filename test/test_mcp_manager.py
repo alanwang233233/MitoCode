@@ -1027,6 +1027,54 @@ async def test_stop_completes_both_phases_and_then_propagates_a_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_stop_completes_the_teardown_before_re_raising_a_shutdown_signal(
+    monkeypatch,
+):
+    """A signal out of ``unregister`` must not skip the disconnections either.
+
+    The phase loop deferred a cancellation and nothing else, but the work it
+    drives re-raises the whole ``BaseException`` family once every server has
+    been visited — so a signal out of the removal phase walked straight out of
+    ``stop()``, leaving every connection open and ``status`` still reporting
+    ``connected``.  Deferring the family as a whole is what ``stop``'s own
+    docstring promises: neither phase can cost the other its work.
+    """
+    tool_manager = ToolManager()
+    factory = _factory({"bad": (True, ("x",)), "good": (True, ("y",))})
+    manager = McpManager(
+        _config(
+            ("bad", {"url": "https://bad.invalid/mcp"}),
+            ("good", {"url": "https://good.invalid/mcp"}),
+        ),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    await manager.start()
+
+    real_unregister = tool_manager.unregister
+
+    def _unregister(name):
+        if name == "mcp__bad__x":
+            raise _ShutdownSignal("application is shutting down")
+        return real_unregister(name)
+
+    monkeypatch.setattr(tool_manager, "unregister", _unregister)
+
+    with pytest.raises(_ShutdownSignal):
+        await manager.stop()
+
+    assert (
+        factory.made["bad"].state is McpConnectionState.DISCONNECTED
+    ), "the signal skipped the disconnection phase"
+    assert factory.made["good"].state is McpConnectionState.DISCONNECTED
+    assert "shutting down" in manager.status()["bad"].error, "and was not swallowed"
+    # The removal was cut short, so the tool is still in the registry -- and
+    # still claimed there, so status() and the registry agree.
+    assert set(tool_manager.tools_map()) == {"mcp__bad__x"}
+    assert manager.status()["bad"].tool_count == 1
+
+
+@pytest.mark.asyncio
 async def test_refresh_records_a_cancellation_and_lets_it_out():
     """``refresh`` propagates a cancellation for the same reason ``start`` does."""
     tool_manager = ToolManager()

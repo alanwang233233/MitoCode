@@ -1282,6 +1282,67 @@ async def test_call_tool_unexpected_error_redacts_the_payload_and_keeps_the_repo
     assert "input_type=str" in message
 
 
+#: An endpoint carrying a credential in its query, the shape a remote server
+#: quotes back when it refuses a call.  Distinct from the connect-side secret
+#: so a failing assertion says which surface leaked.
+_CALL_SECRET = "sk-CALLSECRET-DO-NOT-LEAK"
+_CALL_ENDPOINT = f"https://host.invalid/mcp?access_token={_CALL_SECRET}"
+
+
+@pytest.mark.asyncio
+async def test_call_tool_tool_error_scrubs_the_endpoint_the_server_quoted():
+    """A server that quotes its own endpoint must not publish its token.
+
+    The connect path is scrubbed because a failed handshake quotes the URL it
+    was made against; the call path is the same shape reached from the other
+    direction — a tool error naming the endpoint the request went to, or the
+    proxy in front of it refusing.  It lands in ``MitoCodeMcpToolCallError``,
+    which the TUI error pane and the log render, and the argument redaction
+    cannot see a URL at all.
+    """
+    client = McpClient(_in_memory_config())
+
+    class _EndpointQuotingCall:
+        """Client whose tool error quotes the endpoint it was reached through."""
+
+        async def call_tool(self, name, arguments, **kwargs):
+            raise ToolError(f"upstream refused: GET {_CALL_ENDPOINT}")
+
+    client._client = _EndpointQuotingCall()
+
+    with pytest.raises(MitoCodeMcpToolCallError) as excinfo:
+        await client.call_tool("echo", {"text": "hi"})
+
+    message = str(excinfo.value)
+    assert _CALL_SECRET not in message, f"the endpoint's token leaked: {message}"
+    assert "<redacted>" in message, "the credential was cut, not the whole endpoint"
+    assert "https://host.invalid/mcp" in message, "so which endpoint failed survives"
+    assert "upstream refused" in message, "the server's own text survived"
+
+
+@pytest.mark.asyncio
+async def test_call_tool_unexpected_error_scrubs_the_endpoint_it_quoted():
+    """The generic handler quotes the same text, one prefix further along."""
+    client = McpClient(_in_memory_config())
+
+    class _EndpointQuotingCall:
+        """Client that fails locally while naming the endpoint it dialed."""
+
+        async def call_tool(self, name, arguments, **kwargs):
+            raise RuntimeError(f"upstream refused: GET {_CALL_ENDPOINT}")
+
+    client._client = _EndpointQuotingCall()
+
+    with pytest.raises(MitoCodeMcpToolCallError) as excinfo:
+        await client.call_tool("echo", {"text": "hi"})
+
+    message = str(excinfo.value)
+    assert _CALL_SECRET not in message, f"the endpoint's token leaked: {message}"
+    assert "https://host.invalid/mcp?<redacted>" in message, "host and path survive"
+    assert "upstream refused" in message, "the server's own text survived"
+    assert "MCP tool 'echo' on server 'probe' raised RuntimeError" in message
+
+
 @pytest.mark.asyncio
 async def test_call_tool_forwards_the_configured_timeout_to_the_server_call():
     """The per-call deadline must reach the server call, not just the local wait.

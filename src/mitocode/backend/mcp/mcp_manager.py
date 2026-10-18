@@ -245,29 +245,33 @@ class McpManager:
         leave a registered tool pointing at a dead client, which fails at
         call time in the model's hands rather than here.
 
-        Both phases are isolated per server, and a cancellation in the first
-        does not skip the second: the disconnection phase releases the
-        subprocesses, and leaving every one of them running because an
-        unregistration was cancelled is the failure mode this method exists to
-        prevent.  A registry that refuses to give a tool back must not skip that
-        teardown either, and a connection that refuses to close must not strand
-        the others; either is recorded against its server in :meth:`status`
-        instead.
+        Both phases are isolated per server, and nothing raised by the first
+        skips the second: the disconnection phase releases the subprocesses,
+        and leaving every one of them running because an unregistration was
+        cancelled — or aborted by a shutdown signal — is the failure mode this
+        method exists to prevent.  A registry that refuses to give a tool back
+        must not skip that teardown either, and a connection that refuses to
+        close must not strand the others; either is recorded against its server
+        in :meth:`status` instead.
 
         Raises:
-            asyncio.CancelledError: If one server's unregistration or
-                disconnection is cancelled, after both phases have run.
+            BaseException: The first cancellation or shutdown signal a phase
+                raised, after both phases have run.
         """
-        cancelled: Optional[asyncio.CancelledError] = None
+        deferred: Optional[BaseException] = None
         for phase in (self._unregister_one, self._disconnect_one):
             try:
                 await self._run_each(list(self._clients), phase)
-            except asyncio.CancelledError as exc:
+            except BaseException as exc:  # pylint: disable=broad-except
                 # Remember the first one and carry on to the next phase; the
-                # caller is told afterwards, not in place of the teardown.
-                cancelled = cancelled or exc
-        if cancelled is not None:
-            raise cancelled
+                # caller is told afterwards, not in place of the teardown.  The
+                # whole family is deferred, not just a cancellation: the work
+                # below re-raises anything that is not an Exception, and
+                # catching only the cancellation let every other one out of
+                # this method with the connections still open.
+                deferred = deferred or exc
+        if deferred is not None:
+            raise deferred
 
     async def refresh(self, server_name: Optional[str] = None) -> None:
         """Reconnect servers so a changed tool catalogue is picked up.
