@@ -1,5 +1,4 @@
-"""buggy, deprecated, dont reference this file any longer.
-"""
+"""buggy, deprecated, dont reference this file any longer."""
 
 import json
 import time
