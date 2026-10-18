@@ -1,6 +1,10 @@
 import asyncio
+import contextlib
+import json
 import os
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
 import pytest
@@ -14,6 +18,7 @@ from mitocode.backend.mcp.mcp_client import (
     McpClient,
     McpConnectionState,
     _redact_arguments,
+    _scrub_endpoint,
 )
 from mitocode.backend.mcp.mcp_config import McpServerConfig
 
@@ -124,6 +129,55 @@ class _ShutdownSignal(BaseException):
     """
 
 
+@contextlib.contextmanager
+def _jsonrpc_error_stub():
+    """Run a local HTTP server whose error messages quote the request path.
+
+    A real handshake against it, rather than a hand-raised exception: the whole
+    question is what the MCP SDK and the HTTP layer actually put in the message,
+    so the guarantee has to be pinned against the genuine article.  Bound to the
+    loopback interface on an ephemeral port, so the suite stays offline.
+
+    Yields:
+        The ``http://127.0.0.1:<port>`` base URL to point a client at.
+    """
+
+    class _Handler(BaseHTTPRequestHandler):
+        """Answers every call with a JSON-RPC error naming the requested path."""
+
+        def do_POST(self):  # noqa: N802 - name fixed by BaseHTTPRequestHandler
+            """Refuse the call, quoting the path that was requested."""
+            payload = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {
+                        "code": -32603,
+                        "message": f"Internal error while proxying {self.path}",
+                    },
+                }
+            ).encode()
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            """Stay quiet; the stub's output is not this test's subject."""
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address[:2]
+        yield f"http://{host}:{port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 async def _cancel_twice_during_teardown(
     client: McpClient, built: _HandshakeHangingClient
 ) -> None:
@@ -208,6 +262,34 @@ async def test_connect_failure_is_recorded_not_raised():
     assert client.state is McpConnectionState.FAILED
     assert client.last_error != ""
     assert client.tools == []
+
+
+@pytest.mark.asyncio
+async def test_connect_failure_never_echoes_a_credential_in_the_endpoint():
+    """The connect path is where a credential in a URL reaches the error pane.
+
+    ``McpServerConfig`` deliberately permits ``?access_token=…``, and a server
+    or proxy that fails the handshake routinely quotes the endpoint it was
+    called on — including its query string.  That text ends up in ``last_error``,
+    which :meth:`~mitocode.backend.mcp.mcp_manager.McpManager.status` publishes
+    verbatim and the TUI pane an operator reads.  The scrubbing is therefore
+    pinned against a *real* transport, not a hand-written exception: the
+    assertion has to survive whatever the MCP SDK chooses to put in the message.
+    """
+    secret = "sk-CONNECT-QUERY-DO-NOT-LEAK"
+    with _jsonrpc_error_stub() as base_url:
+        config = McpServerConfig.parse(
+            "remote",
+            {"url": f"{base_url}/mcp?access_token={secret}", "connect_timeout": 10.0},
+        )
+        client = McpClient(config)
+
+        assert await client.connect() is False
+
+    assert client.state is McpConnectionState.FAILED
+    assert secret not in client.last_error, f"the URL query leaked: {client.last_error}"
+    assert "<redacted>" in client.last_error, "and the endpoint is still reported"
+    assert "/mcp" in client.last_error, "so which endpoint failed survives"
 
 
 @pytest.mark.asyncio
@@ -556,6 +638,80 @@ def test_redaction_covers_an_input_value_with_no_type_suffix():
     assert "server said no" in redacted
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "MCPError: Internal error while proxying /mcp?access_token=sk-QUERY",
+        "Failed to reach https://host.invalid/mcp?access_token=sk-QUERY",
+        "url 'http://h.invalid/mcp?a=1&b=sk-QUERY' is not allowed",
+        "endpoint mcp?token=sk-QUERY refused",
+        "MCPError: handshake with https://host.invalid/mcp?a=sk-QUERY#frag failed",
+    ],
+)
+def test_endpoint_scrubbing_cuts_query_strings_wherever_they_are_quoted(text):
+    """A credential in a query must not survive, in either endpoint shape."""
+    scrubbed = _scrub_endpoint(text)
+
+    assert "sk-QUERY" not in scrubbed, f"the query survived: {scrubbed}"
+    assert "<redacted>" in scrubbed
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        # userinfo
+        (
+            "https://user:pw@host.invalid/mcp",
+            "https://<redacted>@host.invalid/mcp",
+        ),
+        # query
+        (
+            "https://host.invalid/mcp?access_token=sk-X",
+            "https://host.invalid/mcp?<redacted>",
+        ),
+        # fragment
+        (
+            "https://host.invalid/mcp#frag",
+            "https://host.invalid/mcp#<redacted>",
+        ),
+        # all three at once
+        (
+            "http://u:p@host.invalid:8443/mcp?token=sk-X#frag",
+            "http://<redacted>@host.invalid:8443/mcp?<redacted>#<redacted>",
+        ),
+        # a bare host with no path is still an endpoint
+        ("https://host.invalid?token=sk-X", "https://host.invalid?<redacted>"),
+        # nothing to scrub: left byte-identical
+        ("https://host.invalid/mcp", "https://host.invalid/mcp"),
+        ("https://host.invalid/mcp?", "https://host.invalid/mcp?<redacted>"),
+    ],
+)
+def test_endpoint_scrubbing_keeps_the_host_and_the_path(url, expected):
+    """The scrub is surgical: what an operator needs to fix the endpoint stays."""
+    assert _scrub_endpoint(f"failed on {url} (retry later)") == (
+        f"failed on {expected} (retry later)"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # prose that merely mentions a host is not an endpoint
+        "RuntimeError: handshake exploded",
+        "bad transport arguments",
+        "All connection attempts failed for host.invalid",
+        # a question mark in prose is not a query string
+        "MCPError: server said no? really",
+        "why did it fail? no idea",
+        # scheme-less references with nothing to cut
+        "POST /mcp returned 404",
+    ],
+)
+def test_endpoint_scrubbing_leaves_text_without_a_credential_untouched(text):
+    """A message with no credential in it must survive byte-identical."""
+    assert _scrub_endpoint(text) == text
+
+
 @pytest.mark.asyncio
 async def test_call_tool_joins_text_content_blocks():
     client = McpClient(_in_memory_config())
@@ -831,13 +987,14 @@ async def test_connect_shutdown_signal_closes_the_transport_and_still_propagates
 
 
 @pytest.mark.asyncio
-async def test_connect_failure_reports_the_handshake_error_not_the_teardown_error():
-    """A failing teardown must not replace the error that explains the failure.
+async def test_connect_failure_reports_the_handshake_error_and_the_teardown_error():
+    """A failing teardown must neither replace nor be lost behind the failure.
 
-    ``_force_close`` records cleanup problems in ``last_error`` and ``connect``
-    then overwrites it with the exception that caused the failure.  The message a
-    user reads is therefore the handshake error alone; the fact that teardown
-    *also* failed is only visible in the teardown's own effects.
+    ``connect`` records the handshake error first — that is what an operator
+    needs in order to fix the configuration — and *appends* whatever
+    ``_force_close`` could not release.  On the timeout path that appended half
+    is the whole warning: it is the difference between "the handshake timed out"
+    and "the handshake timed out and the child may still be running".
     """
     client = McpClient(_in_memory_config())
 
@@ -867,7 +1024,13 @@ async def test_connect_failure_reports_the_handshake_error_not_the_teardown_erro
     assert await client.connect() is False
 
     assert built.closed is True
-    assert client.last_error == "RuntimeError: handshake exploded"
+    assert client.last_error.startswith(
+        "RuntimeError: handshake exploded"
+    ), "the failure that ended the connect leads the report"
+    assert client.last_error == (
+        "RuntimeError: handshake exploded; "
+        "close failed: OSError: process group wedged"
+    ), "and the teardown's own diagnostic follows it instead of being dropped"
     assert client.state is McpConnectionState.FAILED
 
 

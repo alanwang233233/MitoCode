@@ -34,7 +34,7 @@ from typing import (
 from loguru import logger as loguru_logger
 
 from mitocode.backend.exception.mitocode_exception import MitoCodeMcpConfigError
-from mitocode.backend.mcp.mcp_client import McpClient
+from mitocode.backend.mcp.mcp_client import McpClient, _scrub_endpoint
 from mitocode.backend.mcp.mcp_config import McpServerConfig
 
 if TYPE_CHECKING:
@@ -50,7 +50,13 @@ logger = loguru_logger.bind(name=__name__)
 
 
 def _describe(exc: BaseException) -> str:
-    """Render an exception as its type plus its message.
+    """Render an exception as its type plus its scrubbed message.
+
+    The message is scrubbed of endpoint credentials because this string is what
+    :meth:`McpManager.status` publishes and what the log line carries: an
+    operation that fails while a server is unreachable is exactly the operation
+    whose text quotes the endpoint it failed to reach, and an endpoint is
+    allowed to carry a token.
 
     Args:
         exc: The exception to describe.
@@ -59,7 +65,7 @@ def _describe(exc: BaseException) -> str:
         ``"<TypeName>: <message>"``, or just the type when the exception
         carries no message — a bare ``CancelledError`` has none.
     """
-    message = str(exc)
+    message = _scrub_endpoint(str(exc))
     return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
 
 
@@ -332,6 +338,14 @@ class McpManager:
         recorded against that server and re-raised, because a cancellation is
         an instruction to unwind, not a server that failed.
 
+        The same holds for the rest of that family.  ``gather`` catches whatever
+        a child raises, so a ``KeyboardInterrupt`` or a framework's own shutdown
+        signal — neither an ``Exception`` — arrives here as a *result*; a child
+        failing that way is recorded against its server and re-raised once every
+        name has been visited, so no server's failure is reported without a
+        reason and none is swallowed.  A cancellation still short-circuits: it
+        travels one server's worth of work, not the whole batch's.
+
         Args:
             names: Servers to run *operation* for, each visited exactly once.
             operation: One server's worth of work, e.g. :meth:`_connect_one`.
@@ -339,15 +353,25 @@ class McpManager:
 
         Raises:
             asyncio.CancelledError: If *operation* was cancelled for one server.
+            BaseException: The first non-``Exception`` ``BaseException`` any
+                server's work raised, after every server has been visited.
         """
         results = await asyncio.gather(
             *(operation(name) for name in names),
             return_exceptions=True,
         )
+        deferred: Optional[BaseException] = None
         for name, result in zip(names, results):
             if isinstance(result, asyncio.CancelledError):
                 self._record_failure(name, result, "cancelled before it finished")
                 raise result
+            if isinstance(result, BaseException):
+                self._record_failure(
+                    name, result, "aborted with a signal that is not an Exception"
+                )
+                deferred = deferred or result
+        if deferred is not None:
+            raise deferred
 
     async def _connect_one(self, name: str) -> None:
         """Connect one server and register the tools it advertises.

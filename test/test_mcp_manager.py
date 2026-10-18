@@ -195,6 +195,15 @@ class FakeClient:
         return f"{tool_name}:{arguments}"
 
 
+class _ShutdownSignal(BaseException):
+    """A shutdown request that is neither an ``Exception`` nor a cancellation.
+
+    ``KeyboardInterrupt`` and ``SystemExit`` cannot be used to drive this
+    because asyncio re-raises those out of the event loop itself rather than
+    delivering them to the awaiting coroutine, which is the whole point here.
+    """
+
+
 class RudeClient(FakeClient):
     """FakeClient that raises from one chosen method.
 
@@ -203,7 +212,16 @@ class RudeClient(FakeClient):
     client that breaks its contract instead.
     """
 
-    def __init__(self, config, succeed=True, fail_on="", cancel_on="", tools=()):
+    def __init__(
+        self,
+        config,
+        succeed=True,
+        fail_on="",
+        cancel_on="",
+        signal_on="",
+        message="",
+        tools=(),
+    ):
         """Arm one method to raise, independently of the scripted outcome.
 
         Args:
@@ -214,11 +232,17 @@ class RudeClient(FakeClient):
                 cancellation rather than a failure.  Checked first, because a
                 cancelled teardown has to reach the caller while a failed one
                 must be recorded and swallowed.
+            signal_on: ``"connect"``, ``"disconnect"`` or ``""``, for a
+                ``BaseException`` that is neither of those two.
+            message: Message the raised failure carries, so a test can quote an
+                endpoint the way a real handshake failure would.
             tools: Names this stand-in advertises once connected.
         """
         super().__init__(config, succeed=succeed, tools=tools)
         self._fail_on = fail_on
         self._cancel_on = cancel_on
+        self._signal_on = signal_on
+        self._message = message
 
     async def connect(self):
         """Raise instead of connecting when this client is armed for it.
@@ -229,17 +253,22 @@ class RudeClient(FakeClient):
         if self._cancel_on == "connect":
             self.attempts += 1
             raise asyncio.CancelledError()
+        if self._signal_on == "connect":
+            self.attempts += 1
+            raise _ShutdownSignal("application is shutting down")
         if self._fail_on == "connect":
             self.attempts += 1
-            raise RuntimeError("handshake exploded")
+            raise RuntimeError(self._message or "handshake exploded")
         return await super().connect()
 
     async def disconnect(self):
         """Raise instead of closing when this client is armed for it."""
         if self._cancel_on == "disconnect":
             raise asyncio.CancelledError()
+        if self._signal_on == "disconnect":
+            raise _ShutdownSignal("application is shutting down")
         if self._fail_on == "disconnect":
-            raise RuntimeError("teardown exploded")
+            raise RuntimeError(self._message or "teardown exploded")
         await super().disconnect()
 
 
@@ -423,7 +452,9 @@ def _hostile_factory(script):
             names the one that raises :class:`asyncio.CancelledError` instead,
             ``catalogue_raises`` swaps in a client whose tool list cannot be
             read, ``malformed`` swaps in one whose second advertised tool
-            cannot be described, and ``succeed``/``tools``/``healthy_tool``
+            cannot be described, ``signal_on`` names the one that raises a
+            ``BaseException`` which is neither an ``Exception`` nor a
+            cancellation, and ``succeed``/``tools``/``healthy_tool``/``message``
             configure the rest.  A server the script does not mention is well
             behaved.
 
@@ -446,6 +477,8 @@ def _hostile_factory(script):
                 succeed=spec.pop("succeed", True),
                 fail_on=spec.pop("rude", ""),
                 cancel_on=spec.pop("cancel_on", ""),
+                signal_on=spec.pop("signal_on", ""),
+                message=spec.pop("message", ""),
                 tools=spec.pop("tools", ()),
             )
         made[config.name] = client
@@ -2011,6 +2044,10 @@ async def test_status_error_is_the_exception_text_verbatim(stubborn_registry):
     the exception's own text is the whole contract: a server name, a tool name
     or a configuration value interpolated here would be text the exception
     never contained, arriving at the one surface a user reads.
+
+    Asserted with ``in`` rather than ``==`` on purpose: a future endpoint
+    scrubber is not a regression, and an exact-match assertion would have to be
+    rewritten to let one in.
     """
     tool_manager, _armed = stubborn_registry("mcp__weather__a")
     factory = _hostile_factory({"weather": {"tools": ("a",)}})
@@ -2024,7 +2061,7 @@ async def test_status_error_is_the_exception_text_verbatim(stubborn_registry):
     await manager.stop()
 
     assert (
-        manager.status()["weather"].error == "RuntimeError: registry exploded"
+        "RuntimeError: registry exploded" in manager.status()["weather"].error
     ), "no server name, no tool name, no decoration"
 
 
@@ -2059,6 +2096,110 @@ async def test_the_log_names_the_tool_a_failed_unregistration_could_not_release(
     assert (
         "mcp__weather__a" not in manager.status()["weather"].error
     ), "status describes the server, not the tool"
+
+
+@pytest.mark.asyncio
+async def test_a_connect_failure_does_not_publish_a_credential_from_the_endpoint():
+    """The error the manager records is scrubbed of endpoint credentials.
+
+    An unreachable server is the failure most likely to quote the endpoint it
+    was called on, and a remote endpoint may legitimately carry its token in the
+    query string.  ``status()`` is the pane an operator reads, so the scrub has
+    to happen on the way in rather than being left to the reader to notice.
+    """
+    manager = McpManager(
+        _config(
+            (
+                "remote",
+                _http_secret_spec("remote"),
+            )
+        ),
+        tool_manager=ToolManager(),
+        client_factory=_hostile_factory(
+            {
+                "remote": {
+                    "rude": "connect",
+                    "message": (
+                        "Internal error while proxying "
+                        f"https://user:{_SECRET_USERINFO}@remote.invalid/mcp"
+                        f"?access_token={_SECRET_HEADER}"
+                    ),
+                }
+            }
+        ),
+    )
+
+    await manager.start()
+
+    error = manager.status()["remote"].error
+    assert error != "", "the failure was recorded at all"
+    assert "remote.invalid" in error, "and it still says which server failed"
+    assert "<redacted>" in error, "with the credential-bearing parts marked"
+    _assert_carries_no_secret(error, "status() for a failed connect")
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_shutdown_signal_from_a_server_is_recorded_and_re_raised():
+    """A ``BaseException`` that is neither an ``Exception`` nor a cancel is neither
+    swallowed nor silently dropped.
+
+    ``gather(..., return_exceptions=True)`` hands back *any* exception a child
+    raised as a plain result, so a ``KeyboardInterrupt`` or a framework's own
+    shutdown signal arrives at the manager as data.  Inspecting only for
+    ``Exception`` and ``CancelledError`` left it on the floor: no record, no log,
+    and ``start()`` returning normally while a server was being torn down by the
+    whole process.
+    """
+    tool_manager = ToolManager()
+    factory = _hostile_factory(
+        {
+            "first": {"signal_on": "connect"},
+            "second": {"tools": ("b",)},
+        }
+    )
+    manager = McpManager(
+        _config(
+            ("first", {"url": "https://first.invalid/mcp"}),
+            ("second", {"url": "https://second.invalid/mcp"}),
+        ),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+
+    with pytest.raises(_ShutdownSignal):
+        await manager.start()
+
+    assert (
+        factory.made["first"].attempts == 1
+    ), "the server that signalled was still given its turn"
+    assert (
+        "shutting down" in manager.status()["first"].error
+    ), "and the signal was recorded against it"
+    assert set(tool_manager.tools_map()) == {
+        "mcp__second__b"
+    }, "a signal from one server must not cost another its tools"
+
+
+@pytest.mark.asyncio
+async def test_a_shutdown_signal_from_a_teardown_is_recorded_and_re_raised():
+    """The same rule governs ``stop()``, which runs the same gather."""
+    tool_manager = ToolManager()
+    factory = _hostile_factory({"weather": {"tools": ("a",)}})
+    manager = McpManager(
+        _config(("weather", {"url": "https://w.invalid/mcp"})),
+        tool_manager=tool_manager,
+        client_factory=factory,
+    )
+    await manager.start()
+    factory.made["weather"]._signal_on = "disconnect"
+
+    with pytest.raises(_ShutdownSignal):
+        await manager.stop()
+
+    assert (
+        "shutting down" in manager.status()["weather"].error
+    ), "the teardown's shutdown signal was recorded, not dropped"
 
 
 def test_a_duplicate_name_error_does_not_echo_any_configuration_value():

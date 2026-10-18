@@ -43,6 +43,21 @@ _ARGUMENT_PAYLOAD = re.compile(
     r"input_value=(?:(?P<payload>.*)(?P<suffix>, input_type=[^\]\n]*)|[^\n]*)"
 )
 
+#: An endpoint quoted inside free-form error text, in either of the two shapes
+#: that can carry a credential.  The first branch is a full URL — what httpx, a
+#: proxy or fastmcp's own transport ``repr`` renders — and runs to the first
+#: character that cannot belong to one: whitespace, the quotes an error wraps a
+#: URL in, or the brackets a repr or traceback puts around it.  The second is
+#: the scheme-less reference a JSON-RPC server echoes back in its own error text
+#: (``/mcp?access_token=…``), which is precisely the shape the MCP SDK's own
+#: URL scrubbing cannot see because it only ever parses URLs it is handed.  That
+#: branch requires a ``key=`` in the query so ordinary prose containing a
+#: question mark is not mistaken for an endpoint.
+_ENDPOINT_RUN = re.compile(
+    r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s'\"<>)\]}`]+"
+    r"|(?:/[^\s'\"<>)\]}`]*|[A-Za-z0-9_.~-]+)\?[A-Za-z0-9_.~-]+=[^\s'\"<>)\]}`]*"
+)
+
 
 def _redact_arguments(text: str) -> str:
     """Cut argument payloads out of error text while keeping it diagnosable.
@@ -59,6 +74,69 @@ def _redact_arguments(text: str) -> str:
         :data:`_REDACTED`.
     """
     return _ARGUMENT_PAYLOAD.sub(rf"input_value={_REDACTED}\g<suffix>", text)
+
+
+def _scrub_endpoint_run(match: "re.Match[str]") -> str:
+    """Rewrite one matched endpoint with its credential-bearing parts removed.
+
+    Args:
+        match: One :data:`_ENDPOINT_RUN` match, either a full URL or a
+            scheme-less reference.
+
+    Returns:
+        The endpoint with its userinfo, query and fragment replaced by
+        :data:`_REDACTED`.  Scheme, host, port and path are kept, and so is
+        the fact that something was there at all.
+    """
+    run = match.group(0)
+    if "://" not in run:
+        # A scheme-less reference: only a query can have been scrubbed, because
+        # userinfo needs an authority to live in and there is none.
+        return f"{run.split('?', 1)[0]}?{_REDACTED}"
+
+    scheme, marker, rest = run.partition("://")
+    # Fragment before query: a query string may legally contain a '#', so the
+    # fragment has to be split off first for the query's end to be the real one.
+    rest, fragment_sep, _fragment = rest.partition("#")
+    rest, query_sep, _query = rest.partition("?")
+    authority, slash, path = rest.partition("/")
+    _userinfo, at_sign, host = authority.rpartition("@")
+
+    scrubbed = f"{scheme}{marker}"
+    if at_sign:
+        scrubbed += f"{_REDACTED}@"
+    scrubbed += f"{host}{slash}{path}"
+    if query_sep:
+        scrubbed += f"?{_REDACTED}"
+    if fragment_sep:
+        scrubbed += f"#{_REDACTED}"
+    return scrubbed
+
+
+def _scrub_endpoint(text: str) -> str:
+    """Cut credentials out of any endpoint quoted in *text*.
+
+    A remote MCP endpoint may legitimately carry a secret in its userinfo, its
+    query string or its fragment — ``?access_token=…`` is common enough that
+    :class:`~mitocode.backend.mcp.mcp_config.McpServerConfig` has to accept it
+    — and a handshake failure routinely quotes the endpoint it was made
+    against, in text that reaches the TUI error pane and the log.  The MCP SDK
+    strips the same parts from the URLs *it* builds, but nothing strips them
+    from text a remote server chose to write.
+
+    The scrub is deliberately URL-shaped rather than blanket: host, path and
+    the exception's own type survive, so the message still says which endpoint
+    failed, and a message that merely mentions a host, or nothing at all, is
+    left byte-identical.
+
+    Args:
+        text: Error text as reported, possibly quoting an endpoint.
+
+    Returns:
+        The same text with every endpoint's userinfo, query and fragment
+        replaced by :data:`_REDACTED`.
+    """
+    return _ENDPOINT_RUN.sub(_scrub_endpoint_run, text)
 
 
 class McpConnectionState(str, Enum):
@@ -173,9 +251,16 @@ class McpClient:
             # would be cancelled and the subprocess orphaned after all.  The
             # shield keeps a *repeat* cancellation — a second Ctrl-C, or an
             # enclosing wait_for firing as well — from interrupting it too.
-            await asyncio.shield(self._force_close())
+            cleanup_errors = await asyncio.shield(self._force_close())
             self._state = McpConnectionState.FAILED
-            self._last_error = f"{type(exc).__name__}: {exc}"
+            self._last_error = f"{type(exc).__name__}: {_scrub_endpoint(str(exc))}"
+            if cleanup_errors:
+                # Appended, never substituted.  The first half is what ended the
+                # connect; the rest is the teardown saying it could not release
+                # the transport either, which on the timeout path is the whole
+                # warning — a subprocess that may still be running.  Discarding it
+                # the way this used to leaves the one diagnostic an operator needs.
+                self._last_error += "; " + "; ".join(cleanup_errors)
             if isinstance(exc, Exception):
                 return False
             raise
@@ -184,13 +269,23 @@ class McpClient:
         self._last_error = ""
         return True
 
-    async def _force_close(self) -> None:
-        """Tear the connection down, swallowing and recording cleanup errors.
+    async def _force_close(self) -> List[str]:
+        """Tear the connection down, swallowing but reporting cleanup errors.
 
         Shared by the failure path of :meth:`connect` and by
         :meth:`disconnect` so there is exactly one way to release a connection.
         The handles are dropped before the awaits so that a transport which
         raises while closing still leaves the object in a clean state.
+
+        The collected errors are *returned* rather than written to
+        :attr:`last_error` here, because the two callers owe that attribute
+        different things: :meth:`disconnect` records them, while
+        :meth:`connect` is about to overwrite it with the failure that triggered
+        the cleanup and can only append them to that.
+
+        Returns:
+            One description per handle that could not be released, empty when
+            the teardown was clean.
         """
         client = self._client
         stack = self._stack
@@ -203,14 +298,18 @@ class McpClient:
             try:
                 await client.close()
             except Exception as exc:  # pylint: disable=broad-except
-                errors.append(f"close failed: {type(exc).__name__}: {exc}")
+                errors.append(
+                    f"close failed: {type(exc).__name__}: {_scrub_endpoint(str(exc))}"
+                )
         if stack is not None:
             try:
                 await stack.aclose()
             except Exception as exc:  # pylint: disable=broad-except
-                errors.append(f"stack close failed: {type(exc).__name__}: {exc}")
-        if errors:
-            self._last_error = "; ".join(errors)
+                errors.append(
+                    f"stack close failed: {type(exc).__name__}: "
+                    f"{_scrub_endpoint(str(exc))}"
+                )
+        return errors
 
     async def disconnect(self) -> None:
         """Close the connection if one is open.  Idempotent.
@@ -221,7 +320,9 @@ class McpClient:
         """
         if self._stack is None and self._client is None:
             return
-        await self._force_close()
+        errors = await self._force_close()
+        if errors:
+            self._last_error = "; ".join(errors)
         self._state = McpConnectionState.DISCONNECTED
 
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:

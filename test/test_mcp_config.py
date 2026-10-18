@@ -40,6 +40,17 @@ that belongs to the module's owner, not to this suite:
   ``parse``/``parse_config`` list entry keys via ``sorted(map(str, ...))``, so
   ``env: {"sk-live-XXXX": 8080}`` puts the token in the message.  Only the
   *values* are guaranteed silent; that is the documented contract.
+* **The guarantee does not extend to text this package never authored.**
+  A *validated* entry is what the messages above are about.  Once a server is
+  actually contacted, the text that reaches ``last_error`` — and from there the
+  TUI pane and the log — is written by the transport and by the remote server,
+  which routinely quote the endpoint they failed on.  Two narrower guarantees
+  cover that surface and are pinned in ``test_mcp_client.py`` instead: an
+  endpoint's userinfo, query and fragment are cut by
+  ``mcp_client._scrub_endpoint``, and a rejected tool *argument* is cut by
+  ``mcp_client._redact_arguments``.  Anything else a remote server chooses to
+  quote into its own error text is still echoed: the guarantee is
+  "credentials we know the shape of", not "no server text reaches a log".
 """
 
 import os

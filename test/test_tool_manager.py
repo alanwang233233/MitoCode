@@ -1198,21 +1198,17 @@ async def test_registered_mcp_tool_exposes_no_dispatch_bindings_as_keywords():
     ], "the client and upstream tool name must be captured, never bound as keywords"
 
 
-@pytest.mark.xfail(
-    reason="defect: _invoke's defaults shared a namespace with **kwargs",
-    strict=False,
-)
 @pytest.mark.asyncio
 async def test_registered_mcp_tool_cannot_redirect_the_dispatch_with_a_tool_name_argument():
     """A ``_tool_name`` argument must be forwarded, never bind over the captured name.
 
-    FIXME(tool_manager): the defect was ``async def _invoke(_client=client,
+    The defect this pins was ``async def _invoke(_client=client,
     _tool_name=tool.name, **kwargs)`` — the captured values sat in the same
     namespace as the model's keywords, so this argument silently redirected the
-    call to a *different* tool on that server, bypassing the name-collision guard
-    entirely.  Fixed by ``_make_invoke``; the ``xfail`` stays non-strict so the
-    suite is green both ways and can be promoted to a plain assertion once the
-    closure factory has shipped everywhere.
+    call to a *different* tool on that server, bypassing the name-collision
+    guard entirely.  ``_make_invoke`` closed it; the callable's signature is
+    pinned separately by
+    ``test_registered_mcp_tool_exposes_no_dispatch_bindings_as_keywords``.
     """
     calls = []
     manager = ToolManager()
@@ -1226,18 +1222,14 @@ async def test_registered_mcp_tool_cannot_redirect_the_dispatch_with_a_tool_name
     ], "the dispatch must stay on the registered tool, with _tool_name as a plain argument"
 
 
-@pytest.mark.xfail(
-    reason="defect: _invoke's defaults shared a namespace with **kwargs",
-    strict=False,
-)
 @pytest.mark.asyncio
 async def test_registered_mcp_tool_cannot_redirect_the_dispatch_with_a_client_argument():
     """A ``_client`` argument must be forwarded, never replace the captured client.
 
-    FIXME(tool_manager): same namespace collision as ``_tool_name``.  The
-    defect raised ``AttributeError`` from the model's own argument before the
-    server was ever reached; this asserts the dispatch contract instead of that
-    incidental error message, so it also accepts a clearer error from a fix.
+    Same namespace collision as ``_tool_name``.  The defect raised
+    ``AttributeError`` from the model's own argument before the server was ever
+    reached; this asserts the dispatch contract instead of that incidental
+    error message, so it also accepts a clearer error from a future regression.
     """
     calls = []
     manager = ToolManager()

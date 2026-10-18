@@ -11,7 +11,8 @@
 - [x] 重构Agent对外接口 (Agent → AgentSession/AgentRuntime/AgentOrchestrator 三层分离)
 - [ ] 添加上下文管理功能
 - [ ] 添加索引功能
-- [x] 添加MCP功能
+- [x] 添加MCP核心类 (配置解析 / 客户端连接 / 服务端生命周期 / 工具注册)
+- [ ] MCP 接入 __main__ 与 TUI (创建McpManager、加载配置、展示status、配置项)
 - [ ] 添加Agent Skills功能
 - [x] 完成TUI (TUI直接调用backend，移除HTTP/SSE层)
 - [x] 添加工具管理功能:PR #6
