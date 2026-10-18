@@ -59,33 +59,38 @@ responses from the model — one means go and do something else, the other means
 the handle is wrong and the call must be made again — so they are not
 collapsed into a single empty answer.
 
-**Delivery waits for the caller to be idle.**  This is the subtle one.
-:meth:`~mitocode.core.agent.agent_orchestrator.AgentOrchestrator.send_message`
+**Delivery waits for the caller to be idle, and the rule that decides that
+lives in :mod:`~mitocode.core.tool.builtin.delivery_gate`.**  This is the subtle
+one.  :meth:`~mitocode.core.agent.agent_orchestrator.AgentOrchestrator.send_message`
 *cancels* a session that is currently running and awaits the cancelled task
 before appending the new prompt.  A completion callback that delivered
 immediately would therefore interrupt the very turn that launched the
 background call, discarding whatever that agent was in the middle of doing —
 and it would do so on every single completion, not occasionally.  So
-:meth:`BackgroundRegistry.dispatch_pending` skips any task whose caller is
-still running and leaves it parked; the next dispatch, from whoever notices the
-session went idle, delivers it.  Each handle is claimed before the await and
-un-claimed if the send fails, so a dispatch interrupted mid-flight cannot
-deliver the same notification twice.
+:meth:`BackgroundRegistry.dispatch_pending` asks that module whether each caller
+may be delivered into and leaves the rest parked; the next dispatch, from
+whoever notices the session went idle, delivers them.  Each handle is claimed
+before the await and un-claimed if the send fails, so a dispatch interrupted
+mid-flight cannot deliver the same notification twice.
 
-The "is it running" test reads ``session.state`` by its ``.value`` string
-rather than comparing against :class:`~mitocode.core.agent.agent_state.AgentState`.
-That is a deliberate constraint, not a shortcut.  The dependency between the two
-packages is one-way — ``agent_session`` imports ``tool_manager``, so the tool
-package must never import the agent package at runtime — and ``TYPE_CHECKING``
-does not help here because the value is needed at runtime for the comparison.
-``"running"`` is the string the enum member carries; :func:`_state_value`
-accepts either the enum or a bare string so a test double needs no import of
-the agent package at all.  Do not "fix" this by importing the enum.
+The gate itself — which states may be delivered into, why the answer is
+recognised-and-not-running rather than simply not-running, why an unrecognised
+value parks *and is logged*, and what breaks if the duplicated state literal
+drifts from :class:`~mitocode.core.agent.agent_state.AgentState` — is documented
+in full in that module rather than here.  The short form is that delivery
+happens only on a value this build positively recognises as safe, so drift in the
+enum can stop a notification but can never start one into a live turn.
+
+The session and its state are read live, inside the dispatch loop, on every
+iteration — never captured at launch.  A caller that finished an hour ago must
+still be delivered to, so there is nothing to invalidate.
 
 For the same reason :class:`ToolContext` is imported here under
 ``TYPE_CHECKING`` only.  ``context.py`` imports this module at module level
 (to build ``field(default_factory=BackgroundRegistry)``), so a runtime import
-back would be a cycle.
+back would be a cycle.  :mod:`~mitocode.core.tool.builtin.delivery_gate` is
+imported at module level instead, and imports nothing from here: that direction
+is one-way for the same reason.
 """
 
 from __future__ import annotations
@@ -107,6 +112,11 @@ from typing import (
 
 from loguru import logger as loguru_logger
 
+from mitocode.core.tool.builtin.delivery_gate import (
+    PARKED_UNKNOWN_STATE,
+    log_unrecognised_state,
+    park_reason,
+)
 from mitocode.core.tool.builtin.errors import (
     MitoCodeBuiltinToolError,
     safe_exception_message,
@@ -128,26 +138,6 @@ CoroFactory = Callable[[], Awaitable[Any]]
 
 #: ``result`` handed back for a handle this registry never issued.
 UNKNOWN_HANDLE = "unknown handle"
-
-#: Value of ``AgentState.RUNNING``, compared as a string so this module never
-#: imports the agent package.  See the module docstring.
-#:
-#: **This constant must stay equal to
-#: :attr:`mitocode.core.agent.agent_state.AgentState.RUNNING.value`, and nothing
-#: in this repository enforces that.**  It is duplicated rather than imported
-#: only because the import direction is one-way: ``agent_session`` imports
-#: ``tool_manager``, so the tool package may not import the agent package at
-#: runtime, and ``TYPE_CHECKING`` cannot help because the value is needed at
-#: runtime for the comparison.  The consequence of drift is asymmetric and bad:
-#: this guard **fails open**.  Rename the member, change its value, or move the
-#: enum, and :meth:`BackgroundRegistry.dispatch_pending` stops recognising a
-#: running caller, delivers straight into it, and ``send_message`` cancels and
-#: awaits the turn that launched the background call — destroying the caller's
-#: own work on every completion.  That is precisely the failure this deferral
-#: exists to prevent, arriving through a one-word edit in another package.
-#: Anything that changes ``AgentState`` must re-check this line; a test is the
-#: right home for that check and none exists yet.
-RUNNING_STATE_VALUE = "running"
 
 #: How many times a single handle's notification may fail to send before it is
 #: retired from notification entirely.  Bounded because an orchestrator that
@@ -470,17 +460,40 @@ class BackgroundRegistry:
         succeeded and drops the notification outright if the loop is closing —
         strictly worse than the hazard described above.
 
-        Skips, without marking delivered, anything that must not be sent yet:
+        Skips, without marking delivered, anything not positively identifiable as
+        safe to deliver into:
 
         * a task launched with ``caller_id=None`` — there is no session to
           message, and it will never acquire one;
         * a context with no orchestrator attached;
-        * a caller whose session has since been removed;
         * **a caller that is currently running.**  This is the case the whole
           method exists for.  ``send_message`` cancels a running session and
           awaits the cancelled task before appending its prompt, so delivering
           into one would destroy the turn that launched the background call in
           the first place.  Parking is cheap and the next dispatch retries.
+        * a caller whose session has been removed;
+        * **a caller in any state this build does not recognise** — an unknown
+          string, a missing or non-string ``state``, a malformed session
+          object.  These park *and are logged*
+          (see :func:`~mitocode.core.tool.builtin.delivery_gate.log_unrecognised_state`),
+          because they should never occur: a silent park is indistinguishable
+          from a busy caller, so an ``AgentState`` rename would otherwise turn
+          every notification into an invisible stall.
+
+        What is *not* parked: a caller in ``cancelled`` or ``error``.
+        ``send_message`` only cancels a session that is running, so neither can
+        lose a turn, and
+        :data:`~mitocode.core.tool.builtin.delivery_gate.DELIVERABLE_STATE_VALUES`
+        names every state this build recognises as safe.  The gate is
+        "positively safe to deliver", not "not running" — an identifiable, safe
+        state delivers even when the session will never run again, though
+        whether a terminal session *should* receive a new prompt is a judgement
+        this module cannot make; see the gate module's docstring.
+
+        Every one of those reads is **live**: the session and its state are
+        fetched from the orchestrator inside the loop, on every call, and never
+        captured when the task was launched.  A caller that finished an hour ago
+        is therefore still delivered to on the next dispatch.
 
         A handle is claimed *before* the await and un-claimed on **every** way
         the await can end badly — a raising ``send_message`` and a cancelled
@@ -520,14 +533,20 @@ class BackgroundRegistry:
             caller_id = record.caller_id
             if caller_id is None or ctx is None or ctx.orchestrator is None:
                 continue
+            # Read live, every iteration: the session and its state are fetched
+            # here and not cached, so a caller that finished since the task
+            # launched is seen as finished.  Nothing to invalidate.
             session = ctx.orchestrator.get_session(caller_id)
-            if session is None:
-                # The agent is gone.  Left pending rather than dropped: the
-                # registry cannot tell "removed for now" from "removed for
-                # good", and a stale notification is cheaper than a lost one.
-                continue
-            if _state_value(session.state) == RUNNING_STATE_VALUE:
-                # Parked.  See the method docstring.
+            parked = park_reason(session)
+            if parked is not None:
+                if parked[0] == PARKED_UNKNOWN_STATE:
+                    # The only park that is an anomaly rather than the
+                    # ordinary "not yet" case.  Logged so enum drift is
+                    # visible; the other two are expected and stay silent.
+                    log_unrecognised_state(record.handle, parked[1])
+                # Parked, not dropped: the registry cannot tell "removed for
+                # now" from "removed for good", and a stale notification is
+                # cheaper than a lost one.
                 continue
             text = NOTIFICATION_TEXT.format(
                 handle=record.handle, state=record.state.value, result=record.result
@@ -862,24 +881,3 @@ def _render(value: Any) -> str:
         return str(value)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         return safe_exception_message(exc)
-
-
-def _state_value(state: Any) -> str:
-    """Return the ``"idle"``/``"running"``-style value behind *state*.
-
-    Accepts an enum member, a bare string, or anything else, so a caller — or
-    a test double — can supply either shape without this module having to know
-    which.  Deliberately duck-typed: see the module docstring on why the
-    agent package is never imported to answer this.
-
-    Args:
-        state: A session's ``state`` attribute.
-
-    Returns:
-        The enum's ``.value`` when there is one, the object itself when it is
-        already a string, and an empty string otherwise — which never equals
-        :data:`RUNNING_STATE_VALUE`, so an unrecognised state is treated as
-        "not running" and the notification goes out.
-    """
-    value = getattr(state, "value", state)
-    return value if isinstance(value, str) else ""
