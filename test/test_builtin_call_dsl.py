@@ -798,12 +798,14 @@ def test_a_keyword_beyond_the_positional_prefix_is_not_a_collision(mixed_spec):
     )
 
 
-def test_call_name_is_not_checked_against_the_spec_name(mixed_spec):
-    """FINDING/TRAP: ``bind_arguments`` never compares the two names.
+def test_call_name_is_checked_against_the_spec_name(mixed_spec):
+    """A call naming a different tool than the spec is refused, not mis-bound.
 
-    The dispatching task must resolve ``parsed.tool_name`` against the registry
-    *before* calling this.  If it picks a spec any other way, a call aimed at
-    one tool binds cleanly against another's parameters with no signal at all.
+    This closed a defect.  ``bind_arguments`` never compared the two names, so
+    ``bind_arguments(spec_named_Two, parse_call('Write("payload")'))`` bound
+    Write's argument to Two's parameter with no signal at all.  The check is a
+    consistency assertion, not an allowlist: it adds no knowledge of which
+    tools exist, it only confirms the handed spec is the spec the call named.
     """
     parsed = parse_call('Write("payload")')
     assert parsed.tool_name == "Write", "precondition: the call must name a different tool"
@@ -811,11 +813,62 @@ def test_call_name_is_not_checked_against_the_spec_name(mixed_spec):
         "precondition: the call name and the spec name must differ for this test to prove anything"
     )
 
-    bound = bind_arguments(mixed_spec, parsed)
+    with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
+        bind_arguments(mixed_spec, parsed)
 
-    assert bound == {"first": "payload"}, (
-        f"binding ignores the call's own tool name entirely, got {bound!r}"
+    message = str(excinfo.value)
+    assert "names 'Write'" in message, f"the message must name what the call asked for, got: {message}"
+    assert "this spec is 'Mixed'" in message, (
+        f"the message must name the spec that was handed in, got: {message}"
     )
+    assert "payload" not in message, (
+        f"no argument may be bound before the mismatch is caught, got: {message}"
+    )
+
+
+def test_a_matching_call_name_still_binds(mixed_spec):
+    """The companion: equal names are unaffected by the consistency check.
+
+    Present so the check cannot be satisfied by rejecting every call.
+    """
+    bound = bind_arguments(mixed_spec, parse_call('Mixed("payload")'))
+
+    assert bound == {"first": "payload"}, f"got {bound!r}"
+
+
+def test_name_mismatch_is_reported_before_any_other_validation():
+    """The mismatch is checked first, so it wins over a would-be arity error.
+
+    Fail fast: a dispatcher bug is the more fundamental problem and the one the
+    operator needs to see first.
+    """
+    manager = ToolManager()
+    spec = manager.register(_two_param_tool, name="Two")
+    assert spec is not None, "the Two fixture tool must register"
+
+    # Three positionals would otherwise raise "Too many positional arguments".
+    with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
+        bind_arguments(spec, parse_call('Write("a", "b", "c")'))
+
+    assert "refusing to bind" in str(excinfo.value), f"got: {excinfo.value}"
+
+
+def test_name_mismatch_names_are_bounded_in_the_message():
+    """A huge tool name is clipped rather than echoed whole.
+
+    Both names are attacker-influenced -- the call's from the model, the spec's
+    from a third-party MCP server -- so neither may be echoed unbounded.
+    """
+    manager = ToolManager()
+    spec = manager.register(_two_param_tool, name="n" * 50_000)
+    assert spec is not None, "the oversized-name fixture tool must register"
+
+    with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
+        bind_arguments(spec, parse_call('Write("payload")'))
+
+    message = str(excinfo.value)
+    assert len(message) < 400, f"the message must stay bounded, got {len(message)} characters"
+    assert "more characters" in message, f"the clipping marker is missing: {message}"
 
 
 # ---------------------------------------------------------------------------
@@ -1411,3 +1464,194 @@ def test_bind_arguments_does_not_mutate_the_spec_schema_or_the_parsed_call():
     assert bound == {"b": "MUTATED", "a": "y"}, (
         f"the returned dict must be the caller's own, got {bound!r}"
     )
+
+# ---------------------------------------------------------------------------
+# Error messages are bounded in the size AND the count of the identifiers they
+# echo.  `_MAX_EXCERPT` capped the offending *body*; a parameter name is
+# unbounded too, and Python has no identifier length limit.
+# ---------------------------------------------------------------------------
+
+
+def _huge_name() -> str:
+    """A 50 000-character identifier, the size the review probe used."""
+    return "n" * 50_000
+
+
+def test_repeated_keyword_message_does_not_echo_the_whole_identifier():
+    """A huge repeated keyword is clipped, not reproduced."""
+    name = _huge_name()
+
+    with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
+        parse_call(f'Bash({name}=1, {name}=2)')
+
+    message = str(excinfo.value)
+    assert len(message) < 600, f"the message must stay bounded, got {len(message)} characters"
+    assert name not in message, "the whole identifier leaked into the message"
+    assert "is repeated" in message, f"got: {message}"
+    assert "more characters" in message, f"the clipping marker is missing: {message}"
+
+
+def test_literal_failure_label_does_not_echo_the_whole_identifier():
+    """The `for parameter '<name>'` label is clipped too.
+
+    This label reaches the message through ``_literal``, so it is a separate
+    echo site from the repeated-keyword one.
+    """
+    name = _huge_name()
+
+    with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
+        parse_call(f'Bash({name}=eval("x"))')
+
+    message = str(excinfo.value)
+    assert len(message) < 600, f"the message must stay bounded, got {len(message)} characters"
+    assert name not in message, "the whole identifier leaked into the message"
+    assert "is not a literal value" in message, f"got: {message}"
+
+
+def test_unknown_parameter_message_does_not_echo_the_whole_identifier():
+    """A huge unknown keyword is clipped."""
+    name = _huge_name()
+    spec = _spec_named(
+        "Two",
+        {"type": "object", "properties": {"first": {"type": "string"}}, "required": ["first"]},
+    )
+
+    with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
+        bind_arguments(spec, ParsedCall(tool_name="Two", kwargs={name: "v"}))
+
+    message = str(excinfo.value)
+    assert len(message) < 400, f"the message must stay bounded, got {len(message)} characters"
+    assert name not in message, "the whole identifier leaked into the message"
+    assert "Unknown parameter" in message, f"got: {message}"
+
+
+def test_summary_does_not_echo_a_whole_schema_supplied_parameter_name():
+    """An MCP schema's property name is a second untrusted source.
+
+    The name reaches the message through `summary`, which is appended to four
+    different messages, so it is the widest-reaching echo site in the module.
+    """
+    spec = _spec_named("Mcp", {"type": "object", "properties": {_huge_name(): {"type": "string"}}})
+
+    with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
+        bind_arguments(spec, ParsedCall(tool_name="Mcp", kwargs={"nope": 1}))
+
+    message = str(excinfo.value)
+    assert len(message) < 400, f"the message must stay bounded, got {len(message)} characters"
+    assert _huge_name() not in message, "the whole schema name leaked into the message"
+    assert "expects parameters:" in message, f"got: {message}"
+
+
+def test_summary_bounds_the_number_of_parameter_names_not_just_their_length():
+    """Clipping each name is not enough; the *count* must be bounded too.
+
+    A schema declaring ten thousand short properties would otherwise still
+    produce a message proportional to the schema.
+    """
+    spec = _spec_named(
+        "Wide",
+        {"type": "object", "properties": {f"p{index}": {"type": "string"} for index in range(10_000)}},
+    )
+
+    with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
+        bind_arguments(spec, ParsedCall(tool_name="Wide", kwargs={"nope": 1}))
+
+    message = str(excinfo.value)
+    assert len(message) < 400, f"the message must stay bounded, got {len(message)} characters"
+    assert "and 9992 more" in message, f"the overflow marker is missing: {message}"
+    assert "p9999" not in message, f"names past the limit must be summarised, got: {message}"
+
+
+def test_missing_required_message_bounds_the_number_of_names():
+    """The missing-parameter list is bounded in count as well as length."""
+    spec = _spec_named(
+        "Wide",
+        {
+            "type": "object",
+            "properties": {f"p{index}": {"type": "string"} for index in range(10_000)},
+            "required": [f"p{index}" for index in range(10_000)],
+        },
+    )
+
+    with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
+        bind_arguments(spec, ParsedCall(tool_name="Wide"))
+
+    message = str(excinfo.value)
+    assert len(message) < 500, f"the message must stay bounded, got {len(message)} characters"
+    assert "and 9992 more" in message, f"the overflow marker is missing: {message}"
+
+
+def test_collision_message_bounds_the_names_it_lists():
+    """The collision list is bounded too.
+
+    Collided names come from the schema side of the intersection, so this is the
+    MCP-sourced variant of the same bound.
+    """
+    spec = _spec_named("Mcp", {"type": "object", "properties": {_huge_name(): {"type": "string"}}})
+
+    with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
+        bind_arguments(spec, ParsedCall(tool_name="Mcp", args=["v"], kwargs={_huge_name(): "w"}))
+
+    message = str(excinfo.value)
+    assert len(message) < 500, f"the message must stay bounded, got {len(message)} characters"
+    assert _huge_name() not in message, "the whole identifier leaked into the message"
+    assert "Got multiple values" in message, f"got: {message}"
+
+
+@pytest.mark.parametrize("size", [10, 1_000, 10_000, 100_000, 1_000_000])
+def test_message_length_is_flat_in_the_identifier_length(size):
+    """The bound must be constant, not merely smaller than the input.
+
+    A cap that only trims by a fixed fraction would still grow with the input;
+    this asserts the message length plateaus.
+    """
+    name = "n" * size
+
+    with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
+        parse_call(f'Bash({name}=1, {name}=2)')
+
+    assert len(str(excinfo.value)) < 600, (
+        f"a {size}-character identifier produced a {len(str(excinfo.value))}-character message"
+    )
+
+
+def test_ordinary_parameter_names_are_not_clipped():
+    """The bound must not fire on the names real tools actually use.
+
+    Without this, a fix that clipped at an absurdly small limit would pass every
+    test above.
+    """
+    parsed = parse_call('Bash(command="ls", timeout=300000)')
+    assert parsed.kwargs == {"command": "ls", "timeout": 300000}, f"got {parsed.kwargs!r}"
+
+    manager = ToolManager()
+    spec = manager.register(_mixed_tool, name="Mixed")
+    assert spec is not None, "the Mixed fixture tool must register"
+
+    with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
+        bind_arguments(spec, parse_call('Mixed("a", "b", first="x")'))
+
+    message = str(excinfo.value)
+    assert "first" in message and "second" in message and "third" in message, (
+        f"real parameter names must appear in full, got: {message}"
+    )
+    assert "more characters" not in message, (
+        f"real parameter names must not be marked as truncated, got: {message}"
+    )
+    assert "and " not in message.split("expects parameters:")[1], (
+        f"three real names fit under the count limit, got: {message}"
+    )
+
+
+def test_non_string_schema_keys_do_not_crash_the_message():
+    """A non-``str`` schema key renders as its type instead of raising.
+
+    ``', '.join(expected)`` would raise ``TypeError`` here, which is the same
+    bug class as the error path that raises while reporting an error.
+    """
+    spec = _spec_named("Odd", {"type": "object", "properties": {7: {"type": "string"}}})
+
+    with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
+        bind_arguments(spec, ParsedCall(tool_name="Odd", kwargs={"nope": 1}))
+
+    assert "expects parameters: <int>" in str(excinfo.value), f"got: {excinfo.value}"

@@ -52,7 +52,7 @@ malformed string cannot escape as a raw parser error.
 
 import ast
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 from mitocode.core.tool.builtin.errors import MitoCodeBuiltinToolError
 from mitocode.core.tool.tool_manager import ToolSpec
@@ -61,6 +61,19 @@ from mitocode.core.tool.tool_manager import ToolSpec
 #: The input is untrusted and unbounded, and an error pane has no use for a
 #: megabyte of model output.
 _MAX_EXCERPT = 200
+
+#: Longest single identifier echoed back in an error message.  The same
+#: unbounded-input reasoning as :data:`_MAX_EXCERPT` applies verbatim to a
+#: parameter name: ``keyword.arg`` comes from the model, and a property name
+#: comes from a third-party MCP schema.  Python has no identifier length
+#: limit, so without this a 50 000-character name lands in the message whole.
+_MAX_NAME = 60
+
+#: How many parameter names a single message will list.  Clipping each name is
+#: not sufficient on its own: a schema declaring ten thousand properties would
+#: still produce a message proportional to the schema, so the *count* is
+#: bounded too.
+_MAX_NAMES = 8
 
 #: Failures :func:`ast.parse` can raise on hostile input.  ``SyntaxError``
 #: covers malformed text; ``ValueError`` covers a NUL byte in the source,
@@ -131,6 +144,59 @@ def _excerpt(text: Any) -> str:
     if len(text) <= _MAX_EXCERPT:
         return repr(text)
     return repr(text[:_MAX_EXCERPT]) + f"... ({len(text)} characters total)"
+
+
+def _clip_name(name: Any, limit: int = _MAX_NAME) -> str:
+    """Render one identifier for an error message, bounded.
+
+    A sibling of :func:`_excerpt` rather than a reuse of it, because the two
+    render different things.  :func:`_excerpt` renders *source text* and so
+    wraps it in ``repr`` quotes and escapes non-ASCII; an identifier already
+    carries its own quoting at the call site, so routing it through a ``repr``
+    helper would emit doubled quotes and mangle a non-ASCII name into escape
+    sequences.  This returns the name as written, clipped.
+
+    Like :func:`_excerpt`, this is total and never raises: it builds error
+    messages and must not be able to fail while reporting a failure.
+
+    Args:
+        name: The identifier to render.  Expected to be a ``str``, but a schema
+            key need not be, so a non-string renders as its type.
+        limit: Longest prefix to keep.
+
+    Returns:
+        *name* unchanged when it is within *limit*, otherwise its first *limit*
+        characters followed by a marker reporting how many were dropped.
+    """
+    if not isinstance(name, str):
+        return f"<{type(name).__name__}>"
+    if len(name) <= limit:
+        return name
+    return f"{name[:limit]}... (+{len(name) - limit} more characters)"
+
+
+def _clip_names(
+    names: Sequence[Any], limit: int = _MAX_NAMES, quote: bool = False
+) -> str:
+    """Render a list of identifiers for an error message, bounded in size and count.
+
+    Args:
+        names: The identifiers to render.
+        limit: How many names to show before summarising the remainder.
+        quote: Whether to wrap each name in ``repr`` quotes, which the
+            collision message does and the other messages do not.
+
+    Returns:
+        A comma-separated list of at most *limit* clipped names, a trailing
+        ``"and N more"`` marker when *names* is longer, or ``"(none)"`` when
+        *names* is empty.
+    """
+    shown = [_clip_name(name) for name in names[:limit]]
+    if len(names) > limit:
+        shown.append(f"... and {len(names) - limit} more")
+    if not shown:
+        return "(none)"
+    return ", ".join(repr(name) for name in shown) if quote else ", ".join(shown)
 
 
 def _literal(node: ast.expr, label: str) -> Any:
@@ -232,10 +298,12 @@ def parse_call(text: str) -> ParsedCall:
             # aligned with the language the DSL borrows its syntax from.
             raise MitoCodeBuiltinToolError(
                 f"{_excerpt(text)} is not a tool call: keyword argument "
-                f"'{keyword.arg}' is repeated; give each parameter exactly one "
-                "value."
+                f"'{_clip_name(keyword.arg)}' is repeated; give each parameter "
+                "exactly one value."
             )
-        kwargs[keyword.arg] = _literal(keyword.value, f"for parameter '{keyword.arg}'")
+        kwargs[keyword.arg] = _literal(
+            keyword.value, f"for parameter '{_clip_name(keyword.arg)}'"
+        )
 
     return ParsedCall(tool_name=node.func.id, args=args, kwargs=kwargs)
 
@@ -257,6 +325,13 @@ def bind_arguments(spec: ToolSpec, parsed: ParsedCall) -> Dict[str, Any]:
     in :func:`parse_call`, which has no spec: ``Tool("a", command="b")`` is a
     collision exactly when the first positional binds to ``command``.
 
+    The call's own name is checked against *spec* before anything else happens.
+    That is a consistency assertion, not an allowlist: it adds no knowledge of
+    which tools exist -- the registry stays the single source of truth for that
+    -- it only confirms that the spec this function was handed is the spec the
+    call actually named.  Without it, a dispatcher that resolved the wrong spec
+    would bind one tool's arguments to another's parameters silently.
+
     The schema's ``type`` is not consulted; see this module's docstring for why
     that widening is accepted.
 
@@ -268,12 +343,19 @@ def bind_arguments(spec: ToolSpec, parsed: ParsedCall) -> Dict[str, Any]:
         A dict of bound keyword arguments ready to be passed to the tool.
 
     Raises:
-        MitoCodeBuiltinToolError: If the call has more positional arguments
-            than the tool declares, names an unknown keyword, supplies one
-            parameter both positionally and by keyword, or omits a required
-            parameter.  Each message names the tool and lists the parameters it
-            expected.
+        MitoCodeBuiltinToolError: If the call names a different tool than
+            *spec* does, has more positional arguments than the tool declares,
+            names an unknown keyword, supplies one parameter both positionally
+            and by keyword, or omits a required parameter.  Each message names
+            the tool and lists the parameters it expected.
     """
+    if parsed.tool_name != spec.name:
+        raise MitoCodeBuiltinToolError(
+            f"Tool call names '{_clip_name(parsed.tool_name)}' but this spec is "
+            f"'{_clip_name(spec.name)}': refusing to bind arguments intended for "
+            "one tool to another. Resolve the spec from the call's own name."
+        )
+
     schema = spec.parameters_schema if isinstance(spec.parameters_schema, dict) else {}
     properties = schema.get("properties")
     properties = properties if isinstance(properties, dict) else {}
@@ -281,13 +363,12 @@ def bind_arguments(spec: ToolSpec, parsed: ParsedCall) -> Dict[str, Any]:
     required = schema.get("required")
     required = list(required) if isinstance(required, list) else []
 
-    summary = (
-        f"Tool '{spec.name}' expects parameters: {', '.join(expected) or '(none)'}."
-    )
+    tool = _clip_name(spec.name)
+    summary = f"Tool '{tool}' expects parameters: {_clip_names(expected)}."
 
     if len(parsed.args) > len(expected):
         raise MitoCodeBuiltinToolError(
-            f"Too many positional arguments for tool '{spec.name}': "
+            f"Too many positional arguments for tool '{tool}': "
             f"{len(parsed.args)} given but only {len(expected)} "
             f"{'parameter is' if len(expected) == 1 else 'parameters are'} "
             f"declared. {summary}"
@@ -304,9 +385,9 @@ def bind_arguments(spec: ToolSpec, parsed: ParsedCall) -> Dict[str, Any]:
     if repeated:
         raise MitoCodeBuiltinToolError(
             f"Got multiple values for parameter{'s' if len(repeated) > 1 else ''} "
-            f"{', '.join(repr(name) for name in repeated)} for tool "
-            f"'{spec.name}': supplied both positionally and by keyword. "
-            f"Give each parameter exactly one value. {summary}"
+            f"{_clip_names(repeated, quote=True)} for tool '{tool}': supplied both "
+            "positionally and by keyword. Give each parameter exactly one value. "
+            f"{summary}"
         )
 
     bound: Dict[str, Any] = dict(zip(expected, parsed.args))
@@ -314,7 +395,7 @@ def bind_arguments(spec: ToolSpec, parsed: ParsedCall) -> Dict[str, Any]:
     for name, value in parsed.kwargs.items():
         if name not in properties:
             raise MitoCodeBuiltinToolError(
-                f"Unknown parameter '{name}' for tool '{spec.name}'. {summary}"
+                f"Unknown parameter '{_clip_name(name)}' for tool '{tool}'. {summary}"
             )
         bound[name] = value
 
@@ -322,7 +403,7 @@ def bind_arguments(spec: ToolSpec, parsed: ParsedCall) -> Dict[str, Any]:
     if missing:
         raise MitoCodeBuiltinToolError(
             f"Missing required parameter{'s' if len(missing) > 1 else ''} "
-            f"for tool '{spec.name}': {', '.join(missing)}. {summary}"
+            f"for tool '{tool}': {_clip_names(missing)}. {summary}"
         )
 
     return bound
