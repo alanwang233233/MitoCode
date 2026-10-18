@@ -69,17 +69,19 @@ def main():
     tool_manager = ToolManager()
     _register_tools(tool_manager)
 
-    provider = asyncio.run(ChatProviderOpenAI.factory(
-        default_model= "nvidia/nemotron-3.5-lightning:free",
-        default_model_list= None,
-        default_messages= None,
-        default_tools= None,
-        stream= True,
-        settings={
-            "api_key": "sk-别看了这次我不会再把key提交到仓库了！",
-            "base_url": "https://openrouter.ai/api/v1",
-            "timeout": 60,
-        })
+    provider = asyncio.run(
+        ChatProviderOpenAI.factory(
+            default_model="nvidia/nemotron-3.5-lightning:free",
+            default_model_list=None,
+            default_messages=None,
+            default_tools=None,
+            stream=True,
+            settings={
+                "api_key": "sk-别看了这次我不会再把key提交到仓库了！",
+                "base_url": "https://openrouter.ai/api/v1",
+                "timeout": 60,
+            },
+        )
     )
 
     # print(asyncio.run(provider.chat(

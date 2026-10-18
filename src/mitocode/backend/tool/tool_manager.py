@@ -2,6 +2,10 @@
 
 Converts Python type annotations into JSON Schema tool definitions and
 keeps separate human/agent-facing documentation per registered tool.
+
+A caller may also supply the schema outright, which is what tools
+discovered on an MCP server need: their arguments are described by the
+server, not by anything introspectable in this process.
 """
 
 import inspect
@@ -12,11 +16,15 @@ from typing import (
     Dict,
     List,
     Optional,
+    Set,
+    TYPE_CHECKING,
     Union,
     get_args,
     get_origin,
     Literal,
 )
+
+from loguru import logger as loguru_logger
 
 try:
     import types
@@ -27,6 +35,84 @@ except ImportError:
     UnionType = Union
 
 from mitocode.backend.exception.mitocode_exception import MitoCodeToolDefinitionError
+
+if TYPE_CHECKING:
+    # Imported for type checking only.  The runtime stays on duck typing so
+    # this module keeps importing in an environment without fastmcp installed.
+    from mitocode.backend.mcp.mcp_client import McpClient
+
+logger = loguru_logger.bind(name=__name__)
+
+#: Prefix every namespaced MCP tool name carries, so a remote tool is
+#: recognisably remote and cannot be confused with a built-in one.
+MCP_TOOL_PREFIX = "mcp__"
+
+#: Separator between the server name and the tool name inside that prefix.
+MCP_TOOL_SEPARATOR = "__"
+
+#: Longest function name OpenAI's function-calling API accepts.  Not an MCP
+#: constraint — the specification imposes nothing here — but the composed name is
+#: published to the model verbatim, so a long server name plus a long tool name
+#: can break a request at the provider after passing every local check.
+MAX_TOOL_NAME_LENGTH = 64
+
+
+def _normalize_input_schema(raw: Any) -> Dict[str, Any]:
+    """Coerce an MCP tool's advertised input schema into a usable JSON Schema.
+
+    Servers are not required to send a complete schema.  This fills in the
+    pieces :meth:`ToolManager.tool_schemas` always needs so a malformed
+    schema cannot poison an entire LLM request.
+
+    Args:
+        raw: The ``input_schema`` value advertised by the MCP server.
+
+    Returns:
+        A dict with at least ``type`` and ``properties`` keys.
+    """
+    if not isinstance(raw, dict):
+        return {"type": "object", "properties": {}}
+    normalized = dict(raw)
+    normalized.setdefault("type", "object")
+    if not isinstance(normalized.get("properties"), dict):
+        normalized["properties"] = {}
+    return normalized
+
+
+def _make_invoke(client: "McpClient", upstream_name: str) -> Callable:
+    """Build the async callable that dispatches one MCP tool.
+
+    The client and the upstream tool name are captured in the closure, so the
+    generated callable takes ``**kwargs`` and nothing else.  Two earlier shapes
+    were wrong and must not come back:
+
+    * Binding them as default arguments — ``async def _invoke(_client=client,
+      _tool_name=tool.name, **kwargs)`` — puts them in the *same* namespace as
+      the model's keyword arguments.  A server tool advertising an argument
+      literally named ``_client`` or ``_tool_name`` then binds over the captured
+      values, and ``_tool_name`` in particular silently redirects the call to a
+      different tool on that server, bypassing the name-collision guard that
+      ``register_mcp_client`` relies on.
+    * Closing over the loop variables directly would route every tool registered
+      from one catalogue to whichever tool happened to come last.
+
+    A closure factory gives the isolation the default arguments were reaching
+    for without exposing either value as a keyword.
+
+    Args:
+        client: The connected MCP client to dispatch through.
+        upstream_name: The tool's name *on the server*, which is not the
+            namespaced name MitoCode registers it under.
+
+    Returns:
+        An async callable forwarding its keyword arguments to that one tool.
+    """
+
+    async def _invoke(**kwargs):
+        """Forward the model's keyword arguments to the server tool."""
+        return await client.call_tool(upstream_name, kwargs)
+
+    return _invoke
 
 
 def _annotation_to_schema(annotation: Any) -> Dict[str, Any]:
@@ -219,12 +305,13 @@ class ToolManager:
         """
         self._tools: Dict[str, ToolSpec] = {}
 
-    def tool(
+    def tool(  # pylint: disable=too-many-arguments
         self,
         name: Optional[str] = None,
         *,
         human_doc: Optional[str] = None,
         agent_doc: Optional[str] = None,
+        parameters_schema: Optional[Dict[str, Any]] = None,
         display_action: Optional[str] = None,
         display_param: Optional[str] = None,
     ):
@@ -236,6 +323,9 @@ class ToolManager:
             human_doc: Human-readable description for UI purposes.
             agent_doc: Description sent to the LLM in tool schemas.
                 Defaults to *human_doc* if not provided.
+            parameters_schema: JSON Schema of accepted arguments.
+                Defaults to one derived from the function's type
+                annotations.
             display_action: Optional action key used by the TUI for
                 styling the tool invocation.
             display_param: Parameter whose value should be highlighted
@@ -251,6 +341,7 @@ class ToolManager:
                 name=name,
                 human_doc=human_doc,
                 agent_doc=agent_doc,
+                parameters_schema=parameters_schema,
                 display_action=display_action,
                 display_param=display_param,
             )
@@ -258,13 +349,14 @@ class ToolManager:
 
         return _decorator
 
-    def register(
+    def register(  # pylint: disable=too-many-arguments
         self,
         func: Callable,
         *,
         name: Optional[str] = None,
         human_doc: Optional[str] = None,
         agent_doc: Optional[str] = None,
+        parameters_schema: Optional[Dict[str, Any]] = None,
         display_action: Optional[str] = None,
         display_param: Optional[str] = None,
     ) -> ToolSpec:
@@ -274,10 +366,26 @@ class ToolManager:
         :func:`declare_tool`, which in turn takes precedence over the
         function's own name and docstring.
 
+        ``parameters_schema`` is needed for arguments that cannot be read off
+        a signature — an MCP server advertises its own JSON Schema — so when it
+        is supplied it is used verbatim instead of being derived.  Annotation
+        inference is the last resort.  Between the two sits a third source, a
+        ``parameters_schema`` key in the ``declare_tool`` metadata, which
+        :func:`declare_tool` publishes no argument for: only a caller writing
+        ``func.__mitocode_tool_meta__["parameters_schema"]`` directly can set
+        it.  It is honoured when present and non-``None``, like the explicit
+        argument — an empty dict is a schema that declares no arguments, not an
+        absent one — but it is not part of the public surface.
+
         Returns:
             The registered :class:`ToolSpec`.
         """
         meta = getattr(func, "__mitocode_tool_meta__", {})
+        if parameters_schema is None:
+            # An empty dict is a schema, not an absence of one, in this tier too.
+            parameters_schema = meta.get("parameters_schema")
+            if parameters_schema is None:
+                parameters_schema = _build_parameters_schema(func)
 
         tool_name = name or meta.get("name") or func.__name__
         human_description = (
@@ -292,12 +400,119 @@ class ToolManager:
             func=func,
             human_doc=human_description,
             agent_doc=agent_description,
-            parameters_schema=_build_parameters_schema(func),
+            parameters_schema=parameters_schema,
             display_action=display,
             display_param=param,
         )
         self._tools[tool_name] = spec
         return spec
+
+    def unregister(self, name: str) -> bool:
+        """Remove a tool from the registry.
+
+        Args:
+            name: The tool name to remove.
+
+        Returns:
+            True if a tool was registered under *name* and has been removed,
+            False if no such tool existed.
+        """
+        return self._tools.pop(name, None) is not None
+
+    @staticmethod
+    def build_mcp_tool_name(server_name: str, tool_name: str) -> str:
+        """Compose the namespaced MitoCode name for an MCP tool.
+
+        Args:
+            server_name: The MCP server's configured name.
+            tool_name: The tool's name as advertised by that server.
+
+        Returns:
+            ``mcp__<server_name>__<tool_name>``.
+        """
+        return f"{MCP_TOOL_PREFIX}{server_name}{MCP_TOOL_SEPARATOR}{tool_name}"
+
+    def register_mcp_client(self, client: "McpClient") -> List[ToolSpec]:
+        """Register every tool an MCP client has discovered.
+
+        The client must already be connected so that its cached tool catalogue
+        is populated.  A tool whose composed name is already taken is skipped
+        with a warning rather than overwriting the existing registration.
+
+        Registration is all-or-nothing.  Every tool is read, normalised and
+        composed first, and ``self._tools`` is not touched until the whole
+        catalogue has survived that pass, because a caller can only ever
+        reclaim what it was told it registered: a catalogue whose later entry
+        is malformed would otherwise leave its healthy predecessors published,
+        unreported, and therefore removable by nobody.
+
+        Publishing afterwards cannot itself fail for these inputs -- the name
+        is an f-string result, so it is always hashable, and the docs and
+        schema were normalised in the first pass -- which is what makes the
+        single pass sufficient rather than a prefix of a wider one.  If
+        :meth:`register` ever grows a step that can raise, this needs a
+        rollback as well.
+
+        The composed name is emitted straight into :meth:`tool_schemas`, so it
+        has to survive whatever the model API does with a function name.  The
+        usual constraint is ``^[a-zA-Z0-9_-]{1,64}$``: the namespace prefix and
+        separator are already within that character set, but the *length* is
+        the server author's and the tool author's to spend, and a long server
+        name plus a long tool name can exceed 64 characters.  Nothing here
+        fails such a tool — the name is not truncated, because a truncated name
+        is a different tool — but a warning says what the provider will say
+        later, when the whole request is rejected for a name this harness
+        composed.
+
+        Args:
+            client: A connected MCP client exposing ``server_name`` and ``tools``.
+
+        Returns:
+            The specs that were successfully registered, in discovery order.
+        """
+        prepared: List[Dict[str, Any]] = []
+        claimed: Set[str] = set()
+        for tool in client.tools:
+            tool_name = self.build_mcp_tool_name(client.server_name, tool.name)
+            if tool_name in claimed or self.get_spec(tool_name) is not None:
+                logger.warning(
+                    f"Skipping MCP tool '{tool_name}': name already registered"
+                )
+                continue
+            # Claimed as well as taken, so two tools in one catalogue composing
+            # the same name resolve exactly as they did when each was published
+            # as it was read: the first wins and the second is skipped.
+            claimed.add(tool_name)
+
+            if len(tool_name) > MAX_TOOL_NAME_LENGTH:
+                logger.warning(
+                    f"MCP tool '{tool_name}' is {len(tool_name)} characters, past "
+                    f"the {MAX_TOOL_NAME_LENGTH} an OpenAI-compatible function name "
+                    "may be; the model API will reject the request that carries it"
+                )
+
+            description = (tool.description or "").strip()
+            if not description:
+                description = (
+                    f"Tool '{tool.name}' provided by MCP server "
+                    f"'{client.server_name}'."
+                )
+
+            prepared.append(
+                {
+                    "func": _make_invoke(client, tool.name),
+                    "name": tool_name,
+                    "human_doc": f"[{client.server_name}] {description}",
+                    "agent_doc": f"[{client.server_name}] {description}",
+                    "parameters_schema": _normalize_input_schema(tool.input_schema),
+                    "display_action": f"mcp:{client.server_name}",
+                }
+            )
+
+        registered: List[ToolSpec] = []
+        for pending in prepared:
+            registered.append(self.register(**pending))
+        return registered
 
     def tools_map(self) -> Dict[str, Callable]:
         """Return a name-to-callable mapping of all registered tools."""

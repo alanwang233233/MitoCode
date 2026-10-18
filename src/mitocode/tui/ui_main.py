@@ -1,9 +1,4 @@
-"""Textual-based TUI for MitoCode.
-
-Renders the agent tree on the left, one or more :class:`AgentView` chat
-panels in a dynamic grid, and routes streaming events from the
-:class:`AgentOrchestrator` into the focused view.
-"""
+"""buggy, deprecated, dont reference this file any longer."""
 
 import json
 import time
