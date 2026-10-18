@@ -27,13 +27,13 @@ failure, not about state.
 
 from __future__ import annotations
 
-import importlib
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING, Tuple
 
 from mitocode.core.tool.builtin.approval import AlwaysAllow, Approver
+from mitocode.core.tool.builtin.background import BackgroundRegistry
 
 if TYPE_CHECKING:
     # Imported for type checking only.  The runtime stays on duck typing so
@@ -43,15 +43,6 @@ if TYPE_CHECKING:
     # this module in return.
     from mitocode.core.tool.tool_manager import ToolManager
     from mitocode.core.workspace.workspace import Workspace
-
-#: Dotted path of the background registry module, loaded by name in
-#: :meth:`ToolContext.__post_init__`.  See that method for why it is a string
-#: rather than an import statement.
-BACKGROUND_MODULE = "mitocode.core.tool.builtin.background"
-
-#: Class :meth:`ToolContext.__post_init__` instantiates from
-#: :data:`BACKGROUND_MODULE`.
-BACKGROUND_REGISTRY_NAME = "BackgroundRegistry"
 
 #: The id carried by ``current_agent_id`` when no agent is running a turn.
 #:
@@ -96,8 +87,13 @@ class ToolContext:
             import the agent package, which would invert the one-way
             dependency ``tool_manager -> agent_session``.  It is attached after
             construction by :meth:`attach_orchestrator`.
-        background: Registry of detached calls.  Untyped in this task because
-            the registry does not exist yet; see :meth:`__post_init__`.
+        background: Registry of detached calls.  A fresh instance per context,
+            built by ``default_factory`` rather than shared: handles are
+            process-wide strings, so two contexts sharing one registry would
+            let one agent collect or cancel the other's work.  The import of
+            :mod:`~mitocode.core.tool.builtin.background` is at module level
+            and therefore one-way -- that module imports *this* one only under
+            ``TYPE_CHECKING``.
         max_output_chars: Soft ceiling on how much text a tool hands back to
             the model.  Not a hard one -- ``clamp``'s marker is added on top
             of the budget, so a clamped result can exceed it by the marker's
@@ -113,39 +109,9 @@ class ToolContext:
     tool_manager: Optional[ToolManager] = None
     approver: Approver = field(default_factory=AlwaysAllow)
     orchestrator: Any = None
-    background: Any = field(default=None)
+    background: BackgroundRegistry = field(default_factory=BackgroundRegistry)
     max_output_chars: int = 30_000
     max_sub_agent_depth: int = 4
-
-    def __post_init__(self) -> None:
-        """Fill in the background registry without importing it at module load.
-
-        The registry lives in ``background.py``, which imports this module, so
-        importing it at the top of this file would be a cycle.  Loading it
-        here instead breaks the cycle in both directions: whichever of the two
-        modules the process happens to import first, the other is already in
-        ``sys.modules`` by the time an instance is built.  Until that module
-        lands the field simply stays ``None``, which no shipped tool reads
-        yet.  When it does land this method is deleted and the field becomes
-        ``field(default_factory=BackgroundRegistry)``.
-
-        The module is loaded by name rather than with a ``from ... import
-        ...`` statement for a second reason: a static import of a module that
-        does not exist is an unresolvable reference, and every type checker
-        and IDE run between now and then would report it on every file that
-        touches a context.  A name that may legitimately be absent should not
-        look like a typo.
-        """
-        if self.background is not None:
-            return
-        try:
-            registry_module = importlib.import_module(BACKGROUND_MODULE)
-            registry_type = getattr(registry_module, BACKGROUND_REGISTRY_NAME)
-        except (ImportError, AttributeError):
-            # ImportError: the module has not landed yet.
-            # AttributeError: it landed without the class the field documents.
-            return
-        self.background = registry_type()
 
     def root(self) -> Path:
         """Return the directory every path argument is resolved against.

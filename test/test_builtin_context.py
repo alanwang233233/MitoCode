@@ -5,7 +5,6 @@ import contextlib
 import inspect
 import os
 import sys
-import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,9 +15,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import mitocode.core.tool.builtin.context as context_module
 from mitocode.core.tool.builtin.approval import AlwaysAllow
+from mitocode.core.tool.builtin.background import BackgroundRegistry
 from mitocode.core.tool.builtin.context import (
-    BACKGROUND_MODULE,
-    BACKGROUND_REGISTRY_NAME,
     ToolContext,
     clamp,
     current,
@@ -291,17 +289,35 @@ def test_each_context_gets_its_own_approver():
     assert first.approver is not second.approver
 
 
-def test_background_is_none_until_the_registry_module_lands():
-    """Documents the interim state Task 6 replaces.
+def test_background_defaults_to_a_fresh_registry_and_keeps_an_explicit_one():
+    """The field is a real registry, built per context, and never clobbered.
 
-    ``background.py`` does not exist yet, so ``__post_init__``'s lazy import
-    finds nothing and the field stays ``None``.  The assertion is what makes
-    that a checked transitional state rather than a silent hole: when Task 6
-    switches the field to ``default_factory=BackgroundRegistry`` this test
-    fails and has to be deleted deliberately.
+    ``background.py`` exists now, so ``context.py`` imports
+    :class:`BackgroundRegistry` at module level and builds one through
+    ``default_factory``.  Two properties have to hold, and neither is free:
+    a *shared* registry would let one agent collect or cancel another agent's
+    detached calls, since handles are process-wide strings; and an explicit
+    value must survive construction verbatim, so that re-adding a
+    ``__post_init__`` which overwrites the field would fail here rather than
+    silently retarget a caller's registry.
+
+    The registry's own behaviour is covered by Task 6's dedicated test module;
+    what is asserted here is only that the field is wired to it.
     """
-    assert ToolContext().background is None
-    assert ToolContext(background="explicit").background == "explicit"
+
+    assert isinstance(ToolContext().background, BackgroundRegistry)
+
+    first = ToolContext()
+    second = ToolContext()
+    assert first.background is not second.background, (
+        "the registry is built per context, so one cannot hand state to another"
+    )
+
+    sentinel = object()
+    assert ToolContext(background=sentinel).background is sentinel, (
+        "an explicitly supplied registry must be stored verbatim, not replaced "
+        "by a fresh one"
+    )
 
 
 def test_attach_orchestrator_installs_the_orchestrator():
@@ -837,7 +853,7 @@ def test_root_accepts_any_object_exposing_a_path(tmp_path):
     assert ToolContext(workspace=stub).root() == tmp_path.resolve()
 
 
-# --- ToolContext fields and the lazy background import ---
+# --- ToolContext fields ---
 
 
 def test_explicit_budget_overrides_are_stored_verbatim_including_zero():
@@ -853,85 +869,6 @@ def test_explicit_budget_overrides_are_stored_verbatim_including_zero():
 
     assert context.max_output_chars == 0, "a zero budget must not fall back to 30_000"
     assert context.max_sub_agent_depth == 0, "depth 0 must not fall back to 4"
-
-
-def test_importing_the_context_module_does_not_import_the_background_module():
-    """The lazy import exists to break an import cycle, so it has to stay lazy.
-
-    ``background.py`` imports this module, so a top-level
-    ``from ... import BackgroundRegistry`` here would be a cycle whichever of
-    the two the process imported first.  Publishing the name under
-    ``sys.modules`` is only safe because nothing imports it until a context is
-    actually built — which is what the two tests below then check.
-    """
-
-    assert BACKGROUND_MODULE not in sys.modules, (
-        f"{BACKGROUND_MODULE} must not be imported as a side effect of importing "
-        "the context module"
-    )
-
-
-class _FakeBackgroundRegistry:
-    """Stand-in for the registry Task 6 will ship."""
-
-    def __init__(self) -> None:
-        """Record nothing: existing as an instance is the whole contract here."""
-
-
-def _fake_background_module(*, with_registry: bool) -> types.ModuleType:
-    """Build a stand-in module for the lazy import in ``__post_init__``.
-
-    Args:
-        with_registry: Whether the module carries the class the field
-            documents.  Omitting it is how the ``AttributeError`` branch of the
-            lazy import is reached without editing the package.
-
-    Returns:
-        A module object to publish under
-        :data:`~mitocode.core.tool.builtin.context.BACKGROUND_MODULE`.
-    """
-    module = types.ModuleType(BACKGROUND_MODULE)
-    if with_registry:
-        setattr(module, BACKGROUND_REGISTRY_NAME, _FakeBackgroundRegistry)
-    return module
-
-
-def test_post_init_instantiates_the_registry_once_the_module_lands(monkeypatch):
-    """The success branch of the lazy import, which Task 6 makes the norm.
-
-    Publishing a stand-in module under the real dotted path exercises
-    ``__post_init__``'s happy path end to end; without it only the two "nothing
-    to do" branches are ever covered, and the line that actually assigns the
-    field would ship untested.
-    """
-
-    monkeypatch.setitem(
-        sys.modules, BACKGROUND_MODULE, _fake_background_module(with_registry=True)
-    )
-
-    context = ToolContext()
-
-    assert isinstance(context.background, _FakeBackgroundRegistry), (
-        "__post_init__ must instantiate the registry the module provides"
-    )
-    assert ToolContext().background is not context.background, (
-        "the registry is built per context, so one cannot hand state to another"
-    )
-
-
-def test_post_init_leaves_background_none_when_the_module_has_no_registry(monkeypatch):
-    """A module that landed without the class must not break construction.
-
-    ``getattr`` on a missing name raises ``AttributeError``, which the method
-    catches precisely so a half-landed Task 6 cannot take every tool down at
-    registration time.
-    """
-
-    monkeypatch.setitem(
-        sys.modules, BACKGROUND_MODULE, _fake_background_module(with_registry=False)
-    )
-
-    assert ToolContext().background is None
 
 
 # --- current_agent_context(): the id and the context together ---
