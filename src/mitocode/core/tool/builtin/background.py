@@ -820,11 +820,15 @@ class BackgroundRegistry:
             return
         error = task.exception()
         if error is None:
-            # Unreachable while `_run` is the only thing creating tasks: it
-            # always records.  Treated as success rather than left RUNNING so
-            # a future caller cannot observe a permanently un-settled handle,
-            # but the empty result is the honest reading of "the wrapper
-            # returned without settling".
+            # Reachable whenever the wrapper body completed without recording
+            # anything, which `_run` itself never does — every one of its exits
+            # settles the record.  Kept as the honest reading of "the wrapper
+            # returned without settling": success rather than a handle left
+            # RUNNING forever, with an empty result because there is nothing
+            # better to say.  Unreachable only while `_run` is the sole creator
+            # of these tasks; a future caller that creates one differently would
+            # land here, and leaving the record RUNNING would be the worse
+            # outcome.
             record.state = TaskState.DONE
             record.result = ""
             return
