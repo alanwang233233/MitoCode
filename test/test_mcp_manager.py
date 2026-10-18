@@ -221,11 +221,16 @@ class RudeClient(FakeClient):
         self._cancel_on = cancel_on
 
     async def connect(self):
-        """Raise instead of connecting when this client is armed for it."""
+        """Raise instead of connecting when this client is armed for it.
+
+        ``attempts`` counts every entry, whichever way this call ends, so a
+        test can never read ``0`` from a client that was handed a turn.
+        """
         if self._cancel_on == "connect":
             self.attempts += 1
             raise asyncio.CancelledError()
         if self._fail_on == "connect":
+            self.attempts += 1
             raise RuntimeError("handshake exploded")
         return await super().connect()
 
@@ -281,6 +286,69 @@ class ExplodingCatalogueClient:
             self.last_error = "connection refused"
             return False
         self.state = McpConnectionState.CONNECTED
+        return True
+
+    async def disconnect(self):
+        """Close the connection and go back to DISCONNECTED."""
+        self.connected = False
+        self.state = McpConnectionState.DISCONNECTED
+
+
+def _mcp_tool(name, description):
+    """Build one advertised tool of the shape the registry reads.
+
+    Args:
+        name: The tool name as advertised, without the namespace prefix.
+        description: Whatever the server sent.  The malformed case sends a
+            value that is not a string, which is what a server advertising a
+            field of the wrong JSON type looks like from here.
+
+    Returns:
+        A ``SimpleNamespace`` carrying ``name``, ``description`` and
+        ``input_schema``.
+    """
+    return SimpleNamespace(
+        name=name,
+        description=description,
+        input_schema={"type": "object", "properties": {}},
+    )
+
+
+class MalformedCatalogueClient:
+    """Stand-in advertising a healthy tool followed by an undescribable one.
+
+    ``ToolManager.register_mcp_client`` reads every tool's description, so a
+    catalogue whose *second* entry carries something that is not a string is
+    what makes a registration fail part way through.  The first tool is
+    entirely well formed, which is what gives the case its teeth: a registry
+    that publishes as it reads leaves that tool behind, and a caller told
+    "the registration failed" has no way to reclaim it.
+    """
+
+    #: A description type a well behaved server never sends.
+    MALFORMED_DESCRIPTION = 123
+
+    def __init__(self, config, healthy_tool="healthy"):
+        """Advertise one readable tool and one that cannot be described.
+
+        Args:
+            config: The ``McpServerConfig`` this stand-in represents.
+            healthy_tool: Name of the well formed tool.  A test sets it to a
+                name another layer already owns to reach the collision path.
+        """
+        self.server_name = config.name
+        self.tools = [
+            _mcp_tool(healthy_tool, f"{healthy_tool} on {config.name}"),
+            _mcp_tool("malformed", self.MALFORMED_DESCRIPTION),
+        ]
+        self.state = McpConnectionState.DISCONNECTED
+        self.last_error = ""
+        self.connected = False
+
+    async def connect(self):
+        """Connect; publishing is the registry's business, not the client's."""
+        self.state = McpConnectionState.CONNECTED
+        self.connected = True
         return True
 
     async def disconnect(self):
@@ -354,9 +422,10 @@ def _hostile_factory(script):
             method that raises ``"connect"`` or ``"disconnect"``, ``cancel_on``
             names the one that raises :class:`asyncio.CancelledError` instead,
             ``catalogue_raises`` swaps in a client whose tool list cannot be
-            read, and ``succeed``/``tools`` configure an otherwise ordinary
-            :class:`RudeClient`.  A server the script does not mention is
-            well behaved.
+            read, ``malformed`` swaps in one whose second advertised tool
+            cannot be described, and ``succeed``/``tools``/``healthy_tool``
+            configure the rest.  A server the script does not mention is well
+            behaved.
 
     Returns:
         The factory, with every client it built exposed as ``made``.
@@ -365,7 +434,11 @@ def _hostile_factory(script):
 
     def _make(config):
         spec = dict(script.get(config.name, {}))
-        if spec.pop("catalogue_raises", False):
+        if spec.pop("malformed", False):
+            client = MalformedCatalogueClient(
+                config, healthy_tool=spec.pop("healthy_tool", "healthy")
+            )
+        elif spec.pop("catalogue_raises", False):
             client = ExplodingCatalogueClient(config, succeed=spec.pop("succeed", True))
         else:
             client = RudeClient(
@@ -485,6 +558,40 @@ def _run_import_probe(script):
         # A wedged child must fail the test rather than hang the whole suite.
         timeout=120,
     )
+
+
+@pytest.fixture
+def stubborn_registry(monkeypatch):
+    """Build a registry that can be told to refuse to release particular tools.
+
+    ``unregister`` is the seam the manager's ownership record is written
+    against, and "the removal raised" is the one outcome no client-side
+    stand-in can produce, so every test that needs a tool to stay in the
+    registry reaches it through here.
+
+    Args:
+        monkeypatch: Patched here and undone by pytest when the test ends.
+
+    Returns:
+        A factory taking the tool names to refuse.  It returns a
+        ``(tool_manager, armed)`` pair; edit the ``armed`` set in place to arm
+        or disarm the refusal at any point in the test.
+    """
+
+    def _build(*names):
+        tool_manager = ToolManager()
+        real_unregister = tool_manager.unregister
+        armed = set(names)
+
+        def _unregister(name):
+            if name in armed:
+                raise RuntimeError("registry exploded")
+            return real_unregister(name)
+
+        monkeypatch.setattr(tool_manager, "unregister", _unregister)
+        return tool_manager, armed
+
+    return _build
 
 
 @pytest.mark.asyncio
@@ -787,7 +894,7 @@ async def test_start_records_a_cancelled_server_and_lets_the_cancellation_out():
 
 
 @pytest.mark.asyncio
-async def test_start_keeps_owning_a_tool_it_could_not_unregister(monkeypatch):
+async def test_start_keeps_owning_a_tool_it_could_not_unregister(stubborn_registry):
     """A second ``start`` must not forget a tool the registry refused to remove.
 
     ``register_mcp_client`` skips a name that is still registered, so its
@@ -795,16 +902,7 @@ async def test_start_keeps_owning_a_tool_it_could_not_unregister(monkeypatch):
     would forget the tool while it is still in the registry — dispatchable,
     counted nowhere, and reclaimable by nobody.
     """
-    tool_manager = ToolManager()
-    real_unregister = tool_manager.unregister
-    armed = {"bad": False}
-
-    def _unregister(name):
-        if armed["bad"] and name == "mcp__weather__x":
-            raise RuntimeError("registry exploded")
-        return real_unregister(name)
-
-    monkeypatch.setattr(tool_manager, "unregister", _unregister)
+    tool_manager, armed = stubborn_registry()
     factory = _factory({"weather": (True, ("x",))})
     manager = McpManager(
         _config(("weather", {"url": "https://w.invalid/mcp"})),
@@ -812,7 +910,7 @@ async def test_start_keeps_owning_a_tool_it_could_not_unregister(monkeypatch):
         client_factory=factory,
     )
     await manager.start()
-    armed["bad"] = True
+    armed.add("mcp__weather__x")
 
     await manager.start()
 
@@ -821,7 +919,7 @@ async def test_start_keeps_owning_a_tool_it_could_not_unregister(monkeypatch):
     ), "the tool is still in the registry, so status() must still count it"
     assert "registry exploded" in manager.status()["weather"].error
 
-    armed["bad"] = False
+    armed.clear()
     await manager.stop()
 
     assert (
@@ -830,18 +928,9 @@ async def test_start_keeps_owning_a_tool_it_could_not_unregister(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_start_owns_the_tools_a_refresh_could_not_unregister(monkeypatch):
+async def test_start_owns_the_tools_a_refresh_could_not_unregister(stubborn_registry):
     """The same guarantee holds on ``refresh``, the other path through it."""
-    tool_manager = ToolManager()
-    real_unregister = tool_manager.unregister
-    armed = {"bad": False}
-
-    def _unregister(name):
-        if armed["bad"] and name == "mcp__weather__a":
-            raise RuntimeError("registry exploded")
-        return real_unregister(name)
-
-    monkeypatch.setattr(tool_manager, "unregister", _unregister)
+    tool_manager, armed = stubborn_registry()
     factory = _factory({"weather": (True, ("a", "b"))})
     manager = McpManager(
         _config(("weather", {"url": "https://w.invalid/mcp"})),
@@ -849,7 +938,7 @@ async def test_start_owns_the_tools_a_refresh_could_not_unregister(monkeypatch):
         client_factory=factory,
     )
     await manager.start()
-    armed["bad"] = True
+    armed.add("mcp__weather__a")
 
     await manager.refresh("weather")
 
@@ -857,7 +946,7 @@ async def test_start_owns_the_tools_a_refresh_could_not_unregister(monkeypatch):
         manager.status()["weather"].tool_count == 2
     ), "'a' is stuck in the registry and 'b' was registered, so both are owned"
 
-    armed["bad"] = False
+    armed.clear()
     await manager.stop()
 
     assert tool_manager.tools_map() == {}
@@ -952,22 +1041,13 @@ async def test_stop_disconnects_every_server_when_one_teardown_raises():
 
 
 @pytest.mark.asyncio
-async def test_stop_completes_teardown_when_an_unregister_raises(monkeypatch):
+async def test_stop_completes_teardown_when_an_unregister_raises(stubborn_registry):
     """A registry that refuses to give a tool back must not strand a connection.
 
     Unregistration runs before the disconnects, so an unguarded failure here
     would skip the teardown entirely and leave every server connected.
     """
-    tool_manager = ToolManager()
-    real_unregister = tool_manager.unregister
-    armed = {"bad": False}
-
-    def _unregister(name):
-        if armed["bad"] and name == "mcp__bad__x":
-            raise RuntimeError("registry exploded")
-        return real_unregister(name)
-
-    monkeypatch.setattr(tool_manager, "unregister", _unregister)
+    tool_manager, armed = stubborn_registry()
     factory = _factory({"bad": (True, ("x",)), "good": (True, ("y",))})
     manager = McpManager(
         _config(
@@ -978,7 +1058,7 @@ async def test_stop_completes_teardown_when_an_unregister_raises(monkeypatch):
         client_factory=factory,
     )
     await manager.start()
-    armed["bad"] = True
+    armed.add("mcp__bad__x")
 
     await manager.stop()
 
@@ -993,22 +1073,13 @@ async def test_stop_completes_teardown_when_an_unregister_raises(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stop_retries_an_unregister_that_previously_failed(monkeypatch):
+async def test_stop_retries_an_unregister_that_previously_failed(stubborn_registry):
     """A failed removal stays owned, so a later stop() can finish the job.
 
     The manager pops its ownership record only once a removal is confirmed;
     forgetting a tool it never removed would leave it dispatchable forever.
     """
-    tool_manager = ToolManager()
-    real_unregister = tool_manager.unregister
-    armed = {"bad": False}
-
-    def _unregister(name):
-        if armed["bad"] and name == "mcp__bad__x":
-            raise RuntimeError("registry exploded")
-        return real_unregister(name)
-
-    monkeypatch.setattr(tool_manager, "unregister", _unregister)
+    tool_manager, armed = stubborn_registry()
     factory = _factory({"bad": (True, ("x",))})
     manager = McpManager(
         _config(("bad", {"url": "https://bad.invalid/mcp"})),
@@ -1016,11 +1087,11 @@ async def test_stop_retries_an_unregister_that_previously_failed(monkeypatch):
         client_factory=factory,
     )
     await manager.start()
-    armed["bad"] = True
+    armed.add("mcp__bad__x")
     await manager.stop()
     assert manager.status()["bad"].tool_count == 1, "still owned, so still counted"
 
-    armed["bad"] = False
+    armed.clear()
     await manager.stop()
 
     assert tool_manager.tools_map() == {}
@@ -1031,7 +1102,7 @@ async def test_stop_retries_an_unregister_that_previously_failed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stop_forgets_a_tool_that_was_already_removed(monkeypatch):
+async def test_stop_forgets_a_tool_that_was_already_removed():
     """``unregister`` reporting "nothing was there" ends the manager's claim.
 
     A tool someone else removed from the registry cannot be removed again, so
@@ -1743,7 +1814,7 @@ def test_each_status_entry_is_a_frozen_snapshot():
 
 @pytest.mark.asyncio
 async def test_status_counts_exactly_the_tools_surviving_a_half_finished_stop(
-    monkeypatch,
+    stubborn_registry,
 ):
     """One tool out of two refuses to leave; only that one is still owned.
 
@@ -1752,16 +1823,7 @@ async def test_status_counts_exactly_the_tools_surviving_a_half_finished_stop(
     one that left.  Keeping both would make ``status`` promise a tool nobody
     could find in the registry.
     """
-    tool_manager = ToolManager()
-    real_unregister = tool_manager.unregister
-    armed = {"bad": False}
-
-    def _unregister(name):
-        if armed["bad"] and name == "mcp__weather__a":
-            raise RuntimeError("registry exploded")
-        return real_unregister(name)
-
-    monkeypatch.setattr(tool_manager, "unregister", _unregister)
+    tool_manager, armed = stubborn_registry()
     factory = _hostile_factory({"weather": {"tools": ("a", "b")}})
     manager = McpManager(
         _config(("weather", {"url": "https://w.invalid/mcp"})),
@@ -1769,7 +1831,7 @@ async def test_status_counts_exactly_the_tools_surviving_a_half_finished_stop(
         client_factory=factory,
     )
     await manager.start()
-    armed["bad"] = True
+    armed.add("mcp__weather__a")
 
     await manager.stop()
 
@@ -1942,7 +2004,7 @@ async def test_every_cancelled_server_is_visited_before_the_cancellation_is_rais
 
 
 @pytest.mark.asyncio
-async def test_status_error_is_the_exception_text_verbatim(monkeypatch):
+async def test_status_error_is_the_exception_text_verbatim(stubborn_registry):
     """The recorded error is the exception and nothing the manager adds.
 
     ``status`` is rendered into the TUI and written to the log, so forwarding
@@ -1950,15 +2012,7 @@ async def test_status_error_is_the_exception_text_verbatim(monkeypatch):
     or a configuration value interpolated here would be text the exception
     never contained, arriving at the one surface a user reads.
     """
-    tool_manager = ToolManager()
-    real_unregister = tool_manager.unregister
-
-    def _unregister(name):
-        if name == "mcp__weather__a":
-            raise RuntimeError("registry exploded")
-        return real_unregister(name)
-
-    monkeypatch.setattr(tool_manager, "unregister", _unregister)
+    tool_manager, _armed = stubborn_registry("mcp__weather__a")
     factory = _hostile_factory({"weather": {"tools": ("a",)}})
     manager = McpManager(
         _config(("weather", {"url": "https://w.invalid/mcp"})),
@@ -1976,7 +2030,7 @@ async def test_status_error_is_the_exception_text_verbatim(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_the_log_names_the_tool_a_failed_unregistration_could_not_release(
-    monkeypatch,
+    stubborn_registry,
 ):
     """The tool that stayed is named in the log, and not in ``status``.
 
@@ -1985,15 +2039,7 @@ async def test_the_log_names_the_tool_a_failed_unregistration_could_not_release(
     from the server, so the two surfaces deliberately carry different amounts
     and each has to be checked on its own.
     """
-    tool_manager = ToolManager()
-    real_unregister = tool_manager.unregister
-
-    def _unregister(name):
-        if name == "mcp__weather__a":
-            raise RuntimeError("registry exploded")
-        return real_unregister(name)
-
-    monkeypatch.setattr(tool_manager, "unregister", _unregister)
+    tool_manager, _armed = stubborn_registry("mcp__weather__a")
     factory = _hostile_factory({"weather": {"tools": ("a",)}})
     manager = McpManager(
         _config(("weather", {"url": "https://w.invalid/mcp"})),
@@ -2089,45 +2135,26 @@ async def test_an_unknown_refresh_name_error_does_not_echo_any_configuration_val
 
 
 @pytest.mark.asyncio
-async def test_a_registration_that_raises_partway_leaves_no_tool_in_the_registry(
-    monkeypatch,
-):
-    """A registration that dies half way must not strand what it already did.
+async def test_a_registration_that_raises_partway_publishes_nothing_at_all():
+    """A catalogue that cannot be read whole publishes no part of itself.
 
-    ``_connect_one`` merges the tools it could not release into the ownership
-    record, precisely so a dispatchable tool is never left unowned.  That
-    defence covers a partial ``unregister``.  This is the same hazard from the
-    other side: registration publishes tools as it goes, so an exception half
-    way leaves its earlier output in the registry with no record of it, and no
-    later ``stop`` can ever reclaim it.
+    Driven through the real ``ToolManager``, not a patched one: the second
+    advertised tool carries a description that is not a string, so the
+    registry raises while reading it, after the first tool would otherwise
+    have been published.  ``start`` is told the registration failed and
+    records no ownership for the server, so anything left behind would be a
+    dispatchable tool that ``status`` does not count and ``stop`` can never
+    reclaim -- the hazard the ``stuck`` merge defends against, arriving from
+    the registration side instead.
     """
     tool_manager = ToolManager()
-    real_register = tool_manager.register_mcp_client
-
-    async def half_registered(**_kwargs):
-        """Stand-in for a tool the registry published before it failed.
-
-        Returns:
-            ``None``; nothing dispatches it in this test.
-        """
-        return None
-
-    def _register(client):
-        if client.server_name == "bad":
-            tool_manager.register(
-                half_registered, name="mcp__bad__a", human_doc="half registered"
-            )
-            raise RuntimeError("catalogue exploded midway")
-        return real_register(client)
-
-    monkeypatch.setattr(tool_manager, "register_mcp_client", _register)
     factory = _hostile_factory(
-        {"bad": {"tools": ("a", "b")}, "good": {"tools": ("g",)}}
+        {"weather": {"malformed": True}, "healthy": {"tools": ("g",)}}
     )
     manager = McpManager(
         _config(
-            ("bad", {"url": "https://bad.invalid/mcp"}),
-            ("good", {"url": "https://good.invalid/mcp"}),
+            ("weather", {"url": "https://w.invalid/mcp"}),
+            ("healthy", {"url": "https://healthy.invalid/mcp"}),
         ),
         tool_manager=tool_manager,
         client_factory=factory,
@@ -2136,16 +2163,63 @@ async def test_a_registration_that_raises_partway_leaves_no_tool_in_the_registry
     await manager.start()
 
     assert set(tool_manager.tools_map()) == {
-        "mcp__good__g"
-    }, "the healthy server still publishes"
-    assert manager.status()["bad"].tool_count == 0
+        "mcp__healthy__g"
+    }, "the other server still publishes, and the broken one publishes nothing"
+    assert manager.status()["weather"].error != "", "the failure was recorded"
+    assert (
+        manager.status()["weather"].tool_count == 0
+    ), "a server whose registration failed owns nothing"
 
     await manager.stop()
 
-    assert [
-        name for name in tool_manager.tools_map() if name.startswith("mcp__bad__")
-    ] == [], "a tool the manager cannot name is a tool nobody can remove"
-    assert tool_manager.tools_map() == {}
+    assert (
+        tool_manager.tools_map() == {}
+    ), "a tool the manager cannot name is a tool nobody can remove"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_registration_does_not_adopt_a_name_another_layer_owns():
+    """The constraint that rules out composing ownership from the catalogue.
+
+    The catalogue's first tool collides with a tool some other layer
+    registered, so the registry skips it, and its second tool cannot be
+    described, so the registration fails.  A manager that adopted the
+    advertised catalogue on failure would put both names into its ownership
+    record -- including the one it skipped -- and ``stop`` would then delete a
+    tool it never published.  Green today; the lock on what any fix here has
+    to preserve.
+    """
+    tool_manager = ToolManager()
+
+    async def pre_existing(**_kwargs):
+        """Stand-in for a tool some other layer registered.
+
+        Returns:
+            A fixed string, so a dispatch proves the original survived.
+        """
+        return "not from MCP"
+
+    tool_manager.register(pre_existing, name="mcp__weather__healthy", human_doc="mine")
+    manager = McpManager(
+        _config(("weather", {"url": "https://w.invalid/mcp"})),
+        tool_manager=tool_manager,
+        client_factory=_hostile_factory(
+            {"weather": {"malformed": True, "healthy_tool": "healthy"}}
+        ),
+    )
+
+    await manager.start()
+
+    assert (
+        manager.status()["weather"].tool_count == 0
+    ), "the registration failed, so the manager owns nothing at all"
+
+    await manager.stop()
+
+    assert set(tool_manager.tools_map()) == {
+        "mcp__weather__healthy"
+    }, "the tool another layer owns survived a start/stop cycle"
+    assert await tool_manager.tools_map()["mcp__weather__healthy"]() == "not from MCP"
 
 
 @pytest.mark.asyncio
