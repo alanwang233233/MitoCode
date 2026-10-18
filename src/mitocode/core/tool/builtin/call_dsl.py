@@ -189,14 +189,19 @@ def _clip_names(
     Returns:
         A comma-separated list of at most *limit* clipped names, a trailing
         ``"and N more"`` marker when *names* is longer, or ``"(none)"`` when
-        *names* is empty.
+        *names* is empty.  The marker is never quoted even when *quote* is
+        true: it is a statement *about* the list rather than an entry in it, so
+        quoting it would render ``'... and 4 more'`` indistinguishable in kind
+        from a real parameter name.
     """
-    shown = [_clip_name(name) for name in names[:limit]]
-    if len(names) > limit:
-        shown.append(f"... and {len(names) - limit} more")
-    if not shown:
+    clipped = [_clip_name(name) for name in names[:limit]]
+    overflow = len(names) - limit
+    if not clipped and overflow <= 0:
         return "(none)"
-    return ", ".join(repr(name) for name in shown) if quote else ", ".join(shown)
+    parts = [repr(name) if quote else name for name in clipped]
+    if overflow > 0:
+        parts.append(f"... and {overflow} more")
+    return ", ".join(parts)
 
 
 def _literal(node: ast.expr, label: str) -> Any:

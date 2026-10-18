@@ -16,6 +16,15 @@ Several behaviours are traps rather than defects-with-a-right-answer, so they
 are pinned as-is and flagged by name: grep for ``silent_``, ``DEFECT``, ``not
 checked``, ``without_type_check`` or ``FINDING`` to list every one.  They are
 described individually in the docstring of the test that pins them.
+
+**On the coverage number.**  This module reports 100% line *and* branch
+coverage, which certifies only that every line executed at least once.  It has
+already let real defects through: a clip site that no test reached, and a
+``quote=True``/overflow combination whose two halves were each covered
+separately, both read as 100%.  Coverage is a floor here, never evidence of
+correctness.  What holds the module in place is that every bound and gate has a
+test that *distinguishes* it from its removal; when adding a guard, check that
+by deleting it and watching a test fail.
 """
 
 import copy
@@ -30,7 +39,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mitocode.core.tool.builtin.call_dsl import ParsedCall, bind_arguments, parse_call
+from mitocode.core.tool.builtin.call_dsl import _MAX_NAMES, ParsedCall, bind_arguments, parse_call
 from mitocode.core.tool.builtin.errors import MitoCodeBuiltinToolError
 from mitocode.core.tool.tool_manager import ToolManager, ToolSpec
 
@@ -683,24 +692,28 @@ def test_duplicate_keyword_is_rejected_instead_of_silently_last_wins(dsl, repeat
 
 
 @pytest.mark.parametrize(
-    "dsl",
+    ("dsl", "expected_kwargs"),
     [
-        'Bash(command="a")',
-        'Bash(a="1", b="2")',
-        'Bash("a", key="v")',
+        ('Bash(command="a")', {"command": "a"}),
+        ('Bash(a="1", b="2")', {"a": "1", "b": "2"}),
+        ('Bash("a", key="v")', {"key": "v"}),
     ],
     ids=["single", "distinct", "positional-and-keyword"],
 )
-def test_distinct_keywords_are_unaffected(dsl):
+def test_distinct_keywords_are_unaffected(dsl, expected_kwargs):
     """The duplicate check must not fire on a keyword supplied exactly once.
 
     Present so that widening the rejection cannot be satisfied by rejecting all
-    keyword arguments.
+    keyword arguments.  Each keyword is compared *exactly*, because a bound on
+    the count would be satisfied just as well by a parser that dropped every
+    keyword -- which is the failure this test exists to exclude.
     """
     parsed = parse_call(dsl)
 
     assert parsed.tool_name == "Bash", f"got {parsed.tool_name!r}"
-    assert len(parsed.kwargs) <= 2, f"got {parsed.kwargs!r}"
+    assert parsed.kwargs == expected_kwargs, (
+        f"every keyword must survive exactly as written, got {parsed.kwargs!r}"
+    )
 
 
 def test_duplicate_keyword_rejection_agrees_with_cpython_compile():
@@ -867,6 +880,25 @@ def test_name_mismatch_names_are_bounded_in_the_message():
         bind_arguments(spec, parse_call('Write("payload")'))
 
     message = str(excinfo.value)
+    assert len(message) < 400, f"the message must stay bounded, got {len(message)} characters"
+    assert "more characters" in message, f"the clipping marker is missing: {message}"
+
+
+def test_mismatch_message_clips_the_model_supplied_call_name(mixed_spec):
+    """The name on the *call* side is clipped too, not only the spec side.
+
+    The sibling test above proves the clip on ``spec.name``, but the mismatch
+    message is assembled from *both* names, and the other one is the more
+    exposed of the two: it comes from the DSL text the model emitted, so it is
+    attacker-controlled, and it is rendered before anything else has happened.
+    """
+    name = "n" * 50_000
+
+    with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
+        bind_arguments(mixed_spec, parse_call(f'{name}("payload")'))
+
+    message = str(excinfo.value)
+    assert name not in message, "the model-supplied tool name leaked into the message"
     assert len(message) < 400, f"the message must stay bounded, got {len(message)} characters"
     assert "more characters" in message, f"the clipping marker is missing: {message}"
 
@@ -1477,6 +1509,53 @@ def _huge_name() -> str:
     return "n" * 50_000
 
 
+#: Bound once so the parametrized cases below can name it without recomputing a
+#: 50 000-character string per case.
+_HUGE = _huge_name()
+
+
+@pytest.mark.parametrize(
+    ("parsed_call", "marker"),
+    [
+        (ParsedCall(tool_name=_HUGE, args=["a", "b", "c"]), "Too many positional arguments"),
+        (ParsedCall(tool_name=_HUGE, kwargs={"nope": 1}), "Unknown parameter"),
+        (ParsedCall(tool_name=_HUGE, args=["v"], kwargs={_HUGE: "w"}), "Got multiple values"),
+        (ParsedCall(tool_name=_HUGE), "Missing required parameter"),
+    ],
+    ids=["too-many-positional", "unknown-parameter", "collision", "missing-required"],
+)
+def test_every_message_naming_the_tool_clips_an_oversized_tool_name(parsed_call, marker):
+    """The clip on ``spec.name`` is reached by every message that echoes the tool.
+
+    ``test_name_mismatch_names_are_bounded_in_the_message`` proves the clip on
+    the spec side, but only through the *mismatch* message, which returns
+    before ``tool`` is ever computed.  ``tool`` then feeds the expected-parameter
+    summary plus four error messages, and none of them were observed.  That
+    matters here because ``spec.name`` is a second untrusted source: it comes
+    from a third-party MCP schema rather than from the model.
+    """
+    spec = _spec_named(
+        _HUGE,
+        {
+            "type": "object",
+            "properties": {_HUGE: {"type": "string"}},
+            "required": [_HUGE],
+        },
+    )
+
+    with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
+        bind_arguments(spec, parsed_call)
+
+    message = str(excinfo.value)
+    assert marker in message, f"this case must reach the {marker!r} message, got: {message}"
+    assert "expects parameters:" in message, f"the summary must be reached too, got: {message}"
+    assert _HUGE not in message, f"the whole tool name leaked into the message: {message!r}"
+    assert len(message) < 700, (
+        f"the message must stay bounded, got {len(message)} characters; a bound that "
+        f"grew with the name would reach {4 * len(_HUGE)}"
+    )
+
+
 def test_repeated_keyword_message_does_not_echo_the_whole_identifier():
     """A huge repeated keyword is clipped, not reproduced."""
     name = _huge_name()
@@ -1598,7 +1677,86 @@ def test_collision_message_bounds_the_names_it_lists():
     assert "Got multiple values" in message, f"got: {message}"
 
 
-@pytest.mark.parametrize("size", [10, 1_000, 10_000, 100_000, 1_000_000])
+def test_the_overflow_marker_is_not_quoted_like_a_parameter_name():
+    """``_clip_names(quote=True)`` must not quote the marker it appends.
+
+    The collision message quotes real parameter names so that they read as
+    literals in the prose.  The ``... and N more`` marker is a statement *about*
+    the list rather than an entry in it, so quoting it as well renders
+    ``'... and 4 more'`` -- indistinguishable in kind from a real parameter name
+    the model might have supplied, in a message whose whole purpose is to name
+    the collided parameters.
+
+    Both halves of the ``quote`` flag were covered before this test existed, so
+    branch coverage read 100% while this combination went unchecked.
+    """
+    count = 12
+    spec = _spec_named(
+        "Wide",
+        {
+            "type": "object",
+            "properties": {f"p{index}": {"type": "string"} for index in range(count)},
+        },
+    )
+    parsed = ParsedCall(
+        tool_name="Wide",
+        args=["v"] * count,
+        kwargs={f"p{index}": index for index in range(count)},
+    )
+
+    with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
+        bind_arguments(spec, parsed)
+
+    headline = str(excinfo.value).split(" for tool ")[0]
+    assert "'p0'" in headline, f"real parameter names must still be quoted, got: {headline}"
+    assert "... and " in headline, f"the overflow marker must still be shown, got: {headline}"
+    assert "'... and " not in headline, (
+        f"the overflow marker must not be quoted as a parameter name, got: {headline}"
+    )
+
+
+@pytest.mark.parametrize(
+    "count",
+    [0, 1, _MAX_NAMES - 1, _MAX_NAMES, _MAX_NAMES + 1, _MAX_NAMES + 4],
+    ids=["empty", "one", "just-under", "exactly-at-limit", "just-over", "four-over"],
+)
+def test_the_overflow_marker_fires_strictly_above_the_name_count_limit(count):
+    """A list that fits exactly is never marked as overflowing.
+
+    The count bound is where an off-by-one hides: every other test around it
+    uses either three names or ten thousand, so replacing ``>`` with ``>=``
+    passes the whole suite while appending ``... and 0 more`` to a list that
+    fits perfectly.  The counts are derived from the module's own limit on
+    purpose -- the property under test is the *relation* between the count and
+    the limit, not the value of the limit.
+    """
+    names = [f"p{index}" for index in range(count)]
+    spec = _spec_named(
+        "Wide",
+        {"type": "object", "properties": {name: {"type": "string"} for name in names}},
+    )
+
+    with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
+        bind_arguments(spec, ParsedCall(tool_name="Wide", kwargs={"nope": 1}))
+
+    message = str(excinfo.value)
+    split = message.split("expects parameters: ")
+    assert len(split) == 2, f"the summary must be present, got: {message}"
+    summary = split[1]
+
+    if count <= _MAX_NAMES:
+        assert "and " not in summary, (
+            f"{count} names fit within the limit of {_MAX_NAMES}, so nothing must be "
+            f"summarised, got: {summary}"
+        )
+    else:
+        assert f"... and {count - _MAX_NAMES} more" in summary, (
+            f"{count} names exceed the limit of {_MAX_NAMES}, so the overflow must be "
+            f"reported, got: {summary}"
+        )
+
+
+@pytest.mark.parametrize("size", [1_000, 10_000, 100_000, 1_000_000])
 def test_message_length_is_flat_in_the_identifier_length(size):
     """The bound must be constant, not merely smaller than the input.
 
@@ -1638,9 +1796,9 @@ def test_ordinary_parameter_names_are_not_clipped():
     assert "more characters" not in message, (
         f"real parameter names must not be marked as truncated, got: {message}"
     )
-    assert "and " not in message.split("expects parameters:")[1], (
-        f"three real names fit under the count limit, got: {message}"
-    )
+    split = message.split("expects parameters:")
+    assert len(split) == 2, f"the summary must be present, got: {message}"
+    assert "and " not in split[1], f"three real names fit under the count limit, got: {message}"
 
 
 def test_non_string_schema_keys_do_not_crash_the_message():
