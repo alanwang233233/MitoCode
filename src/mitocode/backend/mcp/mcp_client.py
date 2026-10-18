@@ -61,7 +61,7 @@ _ENDPOINT_RUN = re.compile(
 #: The three parts of a URL that can carry a credential.  Each matches only the
 #: first occurrence, and each is applied to a run :data:`_ENDPOINT_RUN` already
 #: bounded, so none of them can reach past the endpoint into the sentence.
-_ENDPOINT_USERINFO = re.compile(r"://[^/?#@]*@")
+_ENDPOINT_USERINFO = re.compile(r"://[^/?#]*@")
 _ENDPOINT_QUERY = re.compile(r"\?[^#\s]*")
 _ENDPOINT_FRAGMENT = re.compile(r"#[^\s]*")
 
