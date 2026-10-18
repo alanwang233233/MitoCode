@@ -11,6 +11,7 @@ from mitocode.core.exception.mitocode_exception import (
     MitoCodePathConvertError,
     MitoCodeWorkspaceInitError,
     MitoCodeWorkspaceDumpError,
+    MitoCodeWorkspacePathError,
     MitoCodeWorkspaceTooOldError,
     MitoCodeAppTooOldError,
 )
@@ -266,30 +267,83 @@ class Workspace:
             return str_path
         raise MitoCodePathConvertError("Fail :" + str(str_path))
 
-    def _validate_within_workspace(self, target: Path) -> Path:
-        """Resolve the given path against the workspace root and verify it stays within bounds.
+    def resolve_within(self, target: Union[str, Path]) -> Path:
+        """Resolve *target* against the workspace root and verify it stays within bounds.
 
-        This is a security barrier against path traversal attacks — any ``..`` components,
-        absolute symlinks pointing outside the workspace are rejected here.
+        This is the workspace's public containment barrier against path
+        traversal: any ``..`` components that climb out of the root, and any
+        symlink pointing outside it, are rejected here.
+
+        Resolution rules, in order:
+
+        1. An **absolute** target is taken as-is.  If it lies inside the root
+           it is returned; if it lies outside, it raises.  It is deliberately
+           *not* re-rooted against the workspace — a tool such as ``Glob``
+           hands the model absolute paths, and ``Read`` must honour exactly
+           what it was given rather than silently resolving a different file.
+        2. A **relative** target is joined to the workspace root.
+
+        Both forms are normalised with :meth:`pathlib.Path.resolve` before the
+        containment check, so ``..`` segments and symlinks are collapsed first
+        and cannot smuggle a path past the check.
 
         Args:
-            target: A relative path to resolve against ``self.path``.
+            target: A relative or absolute path to resolve against ``self.path``.
 
         Returns:
             The fully resolved absolute path if it lies within the workspace.
 
         Raises:
-            ValueError: If the resolved path escapes the workspace root.
+            MitoCodeWorkspacePathError: If the resolved path escapes the
+                workspace root.  The class also inherits ``ValueError``.
         """
-        target = Path(str(target).lstrip("/"))
-        full_path = (self.path / target).resolve()
+        candidate = Path(target)
+        if candidate.is_absolute():
+            full_path = candidate.resolve()
+        else:
+            full_path = (self.path / candidate).resolve()
         workspace_root = self.path.resolve()
         if not full_path.is_relative_to(workspace_root):
-            raise ValueError(
+            raise MitoCodeWorkspacePathError(
                 f"Path traversal detected: '{target}' resolves to '{full_path}', "
                 f"which is outside the workspace root '{workspace_root}'"
             )
         return full_path
+
+    def is_within(self, target: Union[str, Path]) -> bool:
+        """Report whether *target* resolves inside the workspace root, never raising.
+
+        A predicate rather than an assertion, so callers that only need the
+        answer do not have to catch.  Anything that cannot be resolved into a
+        usable path — a traversal, a symlink leaving the root, an embedded NUL
+        byte, a non-path argument — simply counts as "not within".
+
+        Args:
+            target: A relative or absolute path to check against ``self.path``.
+
+        Returns:
+            True if :meth:`resolve_within` would accept *target*, False otherwise.
+        """
+        try:
+            self.resolve_within(target)
+        except (ValueError, TypeError, OSError):
+            return False
+        return True
+
+    def _validate_within_workspace(self, target: Path) -> Path:
+        """Delegate to :meth:`resolve_within`; retained as the private alias.
+
+        Args:
+            target: A relative or absolute path to resolve against ``self.path``.
+
+        Returns:
+            The fully resolved absolute path if it lies within the workspace.
+
+        Raises:
+            MitoCodeWorkspacePathError: If the resolved path escapes the
+                workspace root.
+        """
+        return self.resolve_within(target)
 
     def validate(self) -> bool | Awaitable[bool]:
         """Validate the workspace configuration on disk.

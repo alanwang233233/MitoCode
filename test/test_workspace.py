@@ -12,8 +12,10 @@ import pytest
 
 from mitocode.core.exception.mitocode_exception import (
     MitoCodePathConvertError,
+    MitoCodeWorkspaceError,
     MitoCodeWorkspaceInitError,
     MitoCodeWorkspaceDumpError,
+    MitoCodeWorkspacePathError,
 )
 from mitocode.core.workspace.workspace import (
     MITOCODE_CONFIG_PATH,
@@ -477,3 +479,44 @@ class TestIsOutdated:
         finally:
             # Restore for other tests
             existing_workspace.dump()
+
+
+# ──────────────────────────────────────────────
+# resolve_within / is_within (public path API)
+# ──────────────────────────────────────────────
+
+
+def test_resolve_within_accepts_relative_path_inside(existing_workspace):
+    resolved = existing_workspace.resolve_within("agent/inside.txt")
+    assert resolved == (existing_workspace.path.resolve() / "agent/inside.txt")
+
+
+def test_resolve_within_accepts_absolute_path_inside(existing_workspace):
+    absolute = existing_workspace.path.resolve() / "agent/inside.txt"
+    assert existing_workspace.resolve_within(absolute) == absolute
+
+
+def test_resolve_within_rejects_traversal(existing_workspace):
+    with pytest.raises(ValueError, match="Path traversal detected"):
+        existing_workspace.resolve_within(Path("../../../etc/passwd"))
+
+
+def test_resolve_within_rejects_absolute_outside(existing_workspace):
+    with pytest.raises(MitoCodeWorkspacePathError):
+        existing_workspace.resolve_within(Path("/etc/passwd"))
+
+
+def test_resolve_within_error_is_a_value_error(existing_workspace):
+    """The new type must stay a ValueError so existing raises(ValueError) calls hold."""
+    assert issubclass(MitoCodeWorkspacePathError, ValueError)
+    assert issubclass(MitoCodeWorkspacePathError, MitoCodeWorkspaceError)
+
+
+def test_is_within_does_not_raise(existing_workspace):
+    assert existing_workspace.is_within("agent/inside.txt") is True
+    assert existing_workspace.is_within("/etc/passwd") is False
+
+
+def test_private_alias_delegates_and_keeps_message(existing_workspace):
+    with pytest.raises(ValueError, match="Path traversal detected"):
+        existing_workspace._validate_within_workspace(Path("../../../etc/passwd"))
