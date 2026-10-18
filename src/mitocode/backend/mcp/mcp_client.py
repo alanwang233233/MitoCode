@@ -253,7 +253,9 @@ class McpClient:
             # Cleanup runs outside the timed-out await, or the teardown itself
             # would be cancelled and the subprocess orphaned after all.  The
             # shield keeps a *repeat* cancellation — a second Ctrl-C, or an
-            # enclosing wait_for firing as well — from interrupting it too.
+            # enclosing wait_for firing as well — from interrupting it too, for
+            # as long as the loop outlives it.  See disconnect() for why that
+            # is the limit of shield().
             cleanup_errors = await asyncio.shield(self._force_close())
             self._state = McpConnectionState.FAILED
             self._last_error = f"{type(exc).__name__}: {_scrub_endpoint(str(exc))}"
@@ -331,16 +333,23 @@ class McpClient:
         *repeat* cancellation — a second Ctrl-C, or an enclosing ``wait_for``
         firing in the same tick — must not interrupt ``Client.close()`` midway
         and leave stdio's detached connect task holding the child process alive.
-        Only the fact that ``close`` ran to completion tells a shielded teardown
-        from a plain await; both leave the handles cleared.
+        That holds as long as the event loop outlives the cancellation, which is
+        as far as :func:`asyncio.shield` reaches: a loop torn down with the
+        teardown still in flight cancels it like any other await, and the second
+        Ctrl-C is often about to bring that about.  Only the fact that ``close``
+        ran to completion tells a shielded teardown from a plain await; both
+        leave the handles cleared.
 
         :attr:`state` is set before that await rather than after it, for the
         same reason :meth:`_force_close` drops the handles before its own
-        awaits: the transport is gone from the instant the teardown starts, so a
+        awaits: the teardown counts as begun from the instant it starts, so a
         caller cancelled part-way through it must not find a client still
         reporting ``CONNECTED``.  That is not cosmetic — :meth:`connect` returns
         early for a connected client, so the state left behind would hand the
-        next reconnect a client with no transport under it.
+        next reconnect a client with no transport under it.  The state means
+        "closing", not "released": for the one iteration between the assignment
+        and ``_force_close``'s first statement the handles are still live, and
+        nothing observable runs inside that window.
         """
         if self._stack is None and self._client is None:
             return

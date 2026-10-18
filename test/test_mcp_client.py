@@ -238,10 +238,12 @@ async def _cancel_during_disconnect_teardown(
 
     The cancellation is timed off ``close_started`` so it cannot race the
     teardown: without it the test would pass whether or not the teardown is
-    shielded.  No message is attached, because a task that ends cancelled is
-    re-cancelled with a fresh, empty ``CancelledError`` by the loop -- the text
-    a caller passes to ``cancel()`` does not survive to the awaiter, so a
-    ``match=`` here could only ever fail.
+    shielded.  No message is attached, because on the 3.10 interpreter this was
+    observed on, a task that ends cancelled is re-cancelled with a fresh, empty
+    ``CancelledError`` by the loop -- the text a caller passes to ``cancel()``
+    does not survive to the awaiter, so a ``match=`` here could only ever fail.
+    3.14 keeps the message, which is the interpreter CI runs, so the omission
+    is a concession to the local venv rather than a claim about every runtime.
 
     Args:
         client: The client whose :meth:`disconnect` must be cancelled.
@@ -841,6 +843,10 @@ async def test_force_close_does_not_swallow_a_shutdown_signal_raised_while_closi
 
     built = _ShutdownOnClose()
     client._client = built
+    # Only a client that was connected has a state worth watching here: a fresh
+    # one already reads DISCONNECTED, which would make the assertion below true
+    # whatever disconnect() did.
+    client._state = McpConnectionState.CONNECTED
 
     with pytest.raises(_ShutdownSignal):
         await client.disconnect()
@@ -853,6 +859,12 @@ async def test_force_close_does_not_swallow_a_shutdown_signal_raised_while_closi
     # part-way still leaks no reference to the transport.
     assert client._client is None
     assert client._stack is None
+    # The state was set before the await too, so a teardown abandoned part-way
+    # still reports the transport as gone rather than leaving CONNECTED behind
+    # for the next connect() to adopt.
+    assert (
+        client.state is McpConnectionState.DISCONNECTED
+    ), "a signal during teardown must not leave a CONNECTED client behind"
 
 
 @pytest.mark.asyncio
@@ -886,6 +898,9 @@ async def test_force_close_does_not_swallow_a_shutdown_signal_from_the_stack():
 
     built = _ShutdownOnStackClose()
     client._stack = built
+    # Same precondition as the client-side twin above: the state is the thing
+    # under test, and a never-connected client already reads DISCONNECTED.
+    client._state = McpConnectionState.CONNECTED
 
     with pytest.raises(_ShutdownSignal):
         await client.disconnect()
@@ -894,6 +909,10 @@ async def test_force_close_does_not_swallow_a_shutdown_signal_from_the_stack():
     assert client.last_error == "", "a signal is not a cleanup failure to record"
     assert client._client is None, "the client was still released first"
     assert client._stack is None, "and the stack handle is dropped too"
+    assert client.state is McpConnectionState.DISCONNECTED, (
+        "the state was set before the await, so an abandoned teardown still "
+        "reports the transport as gone"
+    )
 
 
 @pytest.mark.asyncio
