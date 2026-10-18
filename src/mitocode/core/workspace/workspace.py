@@ -3,6 +3,7 @@
 import asyncio
 import json
 import shutil
+import stat
 from pathlib import Path
 from typing import Union, Awaitable
 
@@ -296,6 +297,12 @@ class Workspace:
         Raises:
             MitoCodeWorkspacePathError: If the resolved path escapes the
                 workspace root.  The class also inherits ``ValueError``.
+
+        Note:
+            "Escapes the root" is the only thing checked here.  A symlink loop
+            behaves differently by version — ``RuntimeError`` on 3.10-3.12,
+            returned unresolved on 3.13+ — so a caller that needs a yes/no
+            answer should use :meth:`is_within`, which handles both.
         """
         candidate = Path(target)
         if candidate.is_absolute():
@@ -315,19 +322,91 @@ class Workspace:
 
         A predicate rather than an assertion, so callers that only need the
         answer do not have to catch.  Anything that cannot be resolved into a
-        usable path — a traversal, a symlink leaving the root, an embedded NUL
-        byte, a non-path argument — simply counts as "not within".
+        usable path — a traversal, a symlink leaving the root, a symlink loop,
+        an embedded NUL byte, a non-path argument — simply counts as
+        "not within".
+
+        True is reported only when *target* is both inside the root **and
+        fully resolved**.  The second half is not redundant: a caller that
+        trusts this verdict goes on to ``open()`` the path, and a partially
+        resolved path cannot be opened at all, so "inside the root" alone
+        would hand it something useless and label it trusted.
+
+        Symlink loops are the case that forces this, and the case where the
+        behaviour of the underlying call is version-dependent.
+        ``Path.resolve()`` on a loop changed in Python 3.13:
+
+        * On 3.10-3.12 it raises ``RuntimeError`` ("Symlink loop from ..."),
+          which this method catches and reports as not-within.
+        * On 3.13+ it no longer raises.  It returns the path with the looping
+          component left unresolved, and because that string still sits under
+          the root the containment check alone would answer True and pass on a
+          path that only ever yields ELOOP.
+
+        Catching ``RuntimeError`` therefore fixes 3.10-3.12 and leaves CI's
+        3.14 broken.  Both are covered without sniffing the interpreter version
+        by :meth:`_is_fully_resolved`: a correctly resolved path has no symlink
+        left anywhere in it, and a loop is precisely a resolution that stopped
+        early and left one behind.  That check is one ``lstat`` per component, a
+        syscall whose behaviour has not changed across any supported version
+        — unlike ``resolve()``, which is why the check exists rather than the
+        catch alone.  Do not "simplify" this back to a bare containment test.
 
         Args:
             target: A relative or absolute path to check against ``self.path``.
 
         Returns:
-            True if :meth:`resolve_within` would accept *target*, False otherwise.
+            True if *target* is inside the workspace root and fully resolvable;
+            False otherwise, including for every input that cannot even be
+            turned into a path.
         """
         try:
-            self.resolve_within(target)
-        except (ValueError, TypeError, OSError):
+            resolved = self.resolve_within(target)
+        except (ValueError, TypeError, OSError, RuntimeError):
             return False
+        return self._is_fully_resolved(resolved)
+
+    @staticmethod
+    def _is_fully_resolved(path: Path) -> bool:
+        """Report whether *path* is the complete resolution of itself.
+
+        Walks *path* and its ancestors with :meth:`pathlib.Path.lstat` looking
+        for any component that is still a symbolic link.  ``resolve()`` follows
+        every symlink it can, so a finished resolution has none left; a
+        resolution that stopped early — because it hit a loop — has exactly
+        one.
+
+        Deliberately uses ``lstat()`` rather than the ``is_symlink()``
+        convenience method: the latter swallows ``OSError`` and answers False,
+        which would collapse "this component is a symlink", "this component
+        does not exist" and "this component cannot be traversed" into one
+        indistinguishable answer, and the first of those three is the one being
+        hunted.  Distinguishing them is the whole point, so this catches
+        ``FileNotFoundError`` and ``OSError`` separately.
+
+        Args:
+            path: An absolute path, normally the result of
+                :meth:`resolve_within`, so already normalised against the root.
+
+        Returns:
+            True if no component of *path* is an unresolved symlink, False if
+            one is, or if a component cannot be inspected (a loop in a middle
+            component raises ``ELOOP`` here, and ``EACCES`` means the path
+            cannot be traversed at all — neither is usable).
+        """
+        for component in (path, *path.parents):
+            try:
+                if stat.S_ISLNK(component.lstat().st_mode):
+                    return False
+            except FileNotFoundError:
+                # Nothing exists here, so nothing below can exist either and
+                # none of it can be a symlink.  This is the Write-a-new-file
+                # case, and stopping here keeps it to a single lstat.
+                return True
+            except OSError:
+                # ELOOP on a looping middle component, or EACCES on a directory
+                # we may not traverse.  Either way the path cannot be opened.
+                return False
         return True
 
     def _validate_within_workspace(self, target: Path) -> Path:

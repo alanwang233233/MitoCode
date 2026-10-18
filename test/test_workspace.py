@@ -520,3 +520,203 @@ def test_is_within_does_not_raise(existing_workspace):
 def test_private_alias_delegates_and_keeps_message(existing_workspace):
     with pytest.raises(ValueError, match="Path traversal detected"):
         existing_workspace._validate_within_workspace(Path("../../../etc/passwd"))
+
+
+# ──────────────────────────────────────────────
+# resolve_within / is_within — uncovered branches
+# ──────────────────────────────────────────────
+
+
+class _FspathRaisingOSError:
+    """An os.PathLike whose __fspath__ fails, to reach the OSError arm of is_within."""
+
+    def __fspath__(self):
+        """Fail the way a broken path provider would.
+
+        Returns:
+            Never returns; always raises.
+
+        Raises:
+            OSError: Always, to exercise is_within's OSError handling.
+        """
+        raise OSError("path provider unavailable")
+
+
+def test_resolve_within_normalises_dot_and_dotdot_segments(existing_workspace):
+    """Relative and absolute spellings of a/./b/../c must both come back as a/c."""
+    root = existing_workspace.path.resolve()
+
+    assert existing_workspace.resolve_within("a/./b/../c") == root / "a/c", (
+        "relative '.' and '..' segments must be collapsed before the check"
+    )
+    spelled_absolute = root / "a" / "b" / ".." / "c"
+    assert existing_workspace.resolve_within(spelled_absolute) == root / "a/c", (
+        "an absolute target with an in-bound '..' must be normalised too"
+    )
+
+
+def test_resolve_within_accepts_the_workspace_root_itself(existing_workspace):
+    """Containment is inclusive: the root, however spelled, resolves to the root."""
+    root = existing_workspace.path.resolve()
+
+    assert existing_workspace.resolve_within(".") == root, "'.' must name the root"
+    assert existing_workspace.resolve_within(str(existing_workspace.path)) == root, (
+        "an absolute path to the root is inside the root"
+    )
+
+
+def test_resolve_within_rejects_sibling_directory_sharing_root_prefix(
+    existing_workspace,
+):
+    """A sibling whose name extends the root's name is outside — the check is per-component."""
+    root = existing_workspace.path
+    sibling = root.parent / (root.name + "_evil")
+    sibling.mkdir()
+    outside_file = sibling / "loot.txt"
+    outside_file.write_text("secret")
+    assert str(outside_file).startswith(str(root)), (
+        "precondition: the two paths share a string prefix, so a str.startswith check "
+        "would wrongly accept this"
+    )
+
+    with pytest.raises(MitoCodeWorkspacePathError, match="Path traversal detected"):
+        existing_workspace.resolve_within(outside_file)
+
+
+def test_resolve_within_rejects_symlink_inside_pointing_outside(existing_workspace):
+    """A symlink in the workspace pointing at an outside file is refused by both entry points."""
+    outside_file = existing_workspace.path.parent / "outside_target.txt"
+    outside_file.write_text("secret")
+    (existing_workspace.path / "escape_link").symlink_to(outside_file)
+
+    with pytest.raises(MitoCodeWorkspacePathError, match="Path traversal detected"):
+        existing_workspace.resolve_within("escape_link")
+    assert existing_workspace.is_within("escape_link") is False, (
+        "the predicate must agree with the raiser on an escaping symlink"
+    )
+
+
+def test_resolve_within_accepts_symlink_inside_pointing_inside(existing_workspace):
+    """A symlink to another in-workspace location is legitimate and resolves to its target."""
+    agent_dir = existing_workspace.path / "agent"
+    agent_dir.mkdir()
+    real_file = agent_dir / "real.txt"
+    real_file.write_text("hello")
+    (existing_workspace.path / "inside_link").symlink_to(real_file)
+
+    assert existing_workspace.resolve_within("inside_link") == real_file.resolve(), (
+        "an in-workspace symlink must resolve to its target, not be rejected"
+    )
+
+
+def test_resolve_within_rejects_dangling_symlink_pointing_outside(existing_workspace):
+    """A link whose target does not exist but sits outside is still an escape attempt."""
+    outside_dir = existing_workspace.path.parent / "secrets"
+    outside_dir.mkdir()
+    missing = outside_dir / "never_created.txt"
+    (existing_workspace.path / "dangling_escape").symlink_to(missing)
+    assert not missing.exists(), "precondition: the link target must not exist on disk"
+
+    with pytest.raises(MitoCodeWorkspacePathError, match="Path traversal detected"):
+        existing_workspace.resolve_within("dangling_escape")
+
+
+def test_resolve_within_accepts_absolute_target_under_symlinked_root_alias(
+    tmp_path, existing_workspace
+):
+    """A workspace rooted at a symlink still accepts the real path, because both sides resolve."""
+    alias = tmp_path / "ws_alias"
+    alias.symlink_to(existing_workspace.path)
+    assert alias.is_symlink(), "precondition: the alias must be a symlink"
+    assert str(alias) != str(alias.resolve()), (
+        "precondition: the unresolved alias string must differ from the resolved root, "
+        "otherwise this does not exercise resolve-both-sides"
+    )
+    aliased_workspace = Workspace(alias, "alias-rooted", 1)
+    target = existing_workspace.path.resolve() / "agent/inside.txt"
+
+    assert aliased_workspace.resolve_within(target) == target, (
+        "the real absolute path must be recognised as inside a symlink-rooted workspace"
+    )
+    assert aliased_workspace.resolve_within(alias / "agent/inside.txt") == target, (
+        "the alias-rooted spelling must resolve to the same file"
+    )
+    assert aliased_workspace.is_within(target) is True
+
+
+@pytest.mark.parametrize("target", [None, 123, b"agent/inside.txt"])
+def test_is_within_returns_false_for_non_path_argument(existing_workspace, target):
+    """A non-path argument counts as not-within instead of escaping as a TypeError."""
+    assert existing_workspace.is_within(target) is False, (
+        f"is_within({target!r}) must answer False, never raise"
+    )
+
+
+@pytest.mark.parametrize("kind", ["relative", "absolute"])
+def test_is_within_returns_false_for_embedded_nul_byte(existing_workspace, kind):
+    """An embedded NUL makes the path unresolvable; both spellings must answer False."""
+    target = (
+        "agent/in\0side.txt"
+        if kind == "relative"
+        else str(existing_workspace.path / "agent/in\0side.txt")
+    )
+
+    assert existing_workspace.is_within(target) is False, (
+        f"a NUL byte in a {kind} path must not escape as a ValueError"
+    )
+
+
+def test_is_within_returns_false_when_fspath_raises_oserror(existing_workspace):
+    """The OSError arm of is_within's handler is reachable and returns False."""
+    assert existing_workspace.is_within(_FspathRaisingOSError()) is False, (
+        "an OSError while building the path must count as not-within"
+    )
+
+
+def test_is_within_treats_empty_target_as_the_workspace_root(existing_workspace):
+    """Path('') collapses to Path('.'), so an empty target names the root and is within."""
+    assert existing_workspace.resolve_within("") == existing_workspace.path.resolve(), (
+        "an empty target must resolve to the root, matching Path('') == Path('.')"
+    )
+    assert existing_workspace.is_within("") is True, (
+        "consistent with resolve_within: an empty target names the root, which is in"
+    )
+
+
+def test_is_within_returns_false_for_symlink_loop(existing_workspace):
+    """DEFECT (d2a8815): a symlink loop breaks both clauses is_within documents.
+
+    is_within promises it "never" raises and that anything which "cannot be
+    resolved into a usable path" counts as not-within.  On Python <= 3.12 the
+    first clause breaks: Path.resolve() raises RuntimeError, which is not in the
+    (ValueError, TypeError, OSError) tuple, so RuntimeError escapes to the
+    caller.  On Python >= 3.13 the second clause breaks instead: resolve() no
+    longer raises on a loop and leaves the component unresolved, so the result
+    still sits under the root and the predicate answers True.
+    """
+    first = existing_workspace.path / "loop_a"
+    second = existing_workspace.path / "loop_b"
+    first.symlink_to(second)
+    second.symlink_to(first)
+
+    try:
+        verdict = existing_workspace.is_within("loop_a")
+    except Exception as exc:  # any escape at all is the defect, not just this type
+        pytest.fail(
+            "is_within documents 'never raising', but it propagated "
+            f"{type(exc).__name__}: {exc}"
+        )
+    assert verdict is False, (
+        "a symlink loop cannot be resolved into a usable path, so it must not count "
+        f"as within; got {verdict!r}"
+    )
+
+
+def test_validate_within_workspace_accepts_str_argument(existing_workspace):
+    """The private alias takes a str despite its Path annotation, and resolves it."""
+    resolved = existing_workspace._validate_within_workspace("agent/inside.txt")
+
+    assert isinstance(resolved, Path), "the alias must return a Path, not a str"
+    assert resolved == existing_workspace.path.resolve() / "agent/inside.txt", (
+        "a str target must be resolved exactly as resolve_within resolves it"
+    )
