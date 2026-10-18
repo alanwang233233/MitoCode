@@ -51,6 +51,7 @@ MCP_TOOL_PREFIX = "mcp__"
 MCP_TOOL_SEPARATOR = "__"
 
 
+
 def _normalize_input_schema(raw: Any) -> Dict[str, Any]:
     """Coerce an MCP tool's advertised input schema into a usable JSON Schema.
 
@@ -362,14 +363,24 @@ class ToolManager:
 
         ``parameters_schema`` is needed for arguments that cannot be read off
         a signature — an MCP server advertises its own JSON Schema — so when it
-        is supplied it is used verbatim instead of being derived, with a
-        ``parameters_schema`` entry in the ``declare_tool`` metadata as the
-        fallback and annotation inference last.
+        is supplied it is used verbatim instead of being derived.  Annotation
+        inference is the last resort.  Between the two sits a third source, a
+        ``parameters_schema`` key in the ``declare_tool`` metadata, which
+        :func:`declare_tool` publishes no argument for: only a caller writing
+        ``func.__mitocode_tool_meta__["parameters_schema"]`` directly can set
+        it.  It is honoured when present and non-``None``, like the explicit
+        argument — an empty dict is a schema that declares no arguments, not an
+        absent one — but it is not part of the public surface.
 
         Returns:
             The registered :class:`ToolSpec`.
         """
         meta = getattr(func, "__mitocode_tool_meta__", {})
+        if parameters_schema is None:
+            # An empty dict is a schema, not an absence of one, in this tier too.
+            parameters_schema = meta.get("parameters_schema")
+            if parameters_schema is None:
+                parameters_schema = _build_parameters_schema(func)
 
         tool_name = name or meta.get("name") or func.__name__
         human_description = (
@@ -384,11 +395,7 @@ class ToolManager:
             func=func,
             human_doc=human_description,
             agent_doc=agent_description,
-            parameters_schema=(
-                parameters_schema
-                if parameters_schema is not None
-                else (meta.get("parameters_schema") or _build_parameters_schema(func))
-            ),
+            parameters_schema=parameters_schema,
             display_action=display,
             display_param=param,
         )
@@ -460,6 +467,7 @@ class ToolManager:
             # the same name resolve exactly as they did when each was published
             # as it was read: the first wins and the second is skipped.
             claimed.add(tool_name)
+
 
             description = (tool.description or "").strip()
             if not description:

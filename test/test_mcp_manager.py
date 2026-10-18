@@ -2140,6 +2140,56 @@ async def test_a_connect_failure_does_not_publish_a_credential_from_the_endpoint
 
 
 @pytest.mark.asyncio
+async def test_the_log_says_why_an_unavailable_server_was_skipped():
+    """A client that reports failure rather than raising it still explains itself.
+
+    ``McpClient.connect`` returns ``False`` for a server that is merely down,
+    which is the common case, so this branch is what an operator reads for
+    almost every misconfigured entry.  Naming the server and nothing else
+    leaves the one question the log was opened to answer unanswered.
+    """
+    factory = _hostile_factory({"weather": {"succeed": False}})
+    manager = McpManager(
+        _config(("weather", {"url": "https://w.invalid/mcp"})),
+        tool_manager=ToolManager(),
+        client_factory=factory,
+    )
+
+    with _captured_logs() as lines:
+        await manager.start()
+
+    reported = [line for line in lines if "is unavailable" in line]
+    assert len(reported) == 1, f"expected one unavailable server, got {reported}"
+    assert "weather" in reported[0], "the server is named"
+    assert "connection refused" in reported[0], "and so is why it was unavailable"
+    assert manager.status()["weather"].state == "failed"
+
+
+@pytest.mark.asyncio
+async def test_the_unavailable_warning_survives_a_client_that_reports_no_reason():
+    """A client with nothing to say must not produce a dangling colon.
+
+    The manager accepts any duck-typed client, so an empty ``last_error`` is
+    reachable even though the real one always explains itself.
+    """
+    factory = _hostile_factory({"weather": {"succeed": False}})
+    manager = McpManager(
+        _config(("weather", {"url": "https://w.invalid/mcp"})),
+        tool_manager=ToolManager(),
+        client_factory=factory,
+    )
+    factory.made["weather"].last_error = ""
+
+    with _captured_logs() as lines:
+        await manager.start()
+
+    reported = [line for line in lines if "is unavailable" in line]
+    assert len(reported) == 1, f"expected one unavailable server, got {reported}"
+    assert not reported[0].rstrip().endswith(":"), "no dangling separator is left"
+    assert "not registered" in reported[0], "and the warning still says what it means"
+
+
+@pytest.mark.asyncio
 async def test_a_shutdown_signal_from_a_server_is_recorded_and_re_raised():
     """A ``BaseException`` that is neither an ``Exception`` nor a cancel is neither
     swallowed nor silently dropped.
@@ -2200,6 +2250,35 @@ async def test_a_shutdown_signal_from_a_teardown_is_recorded_and_re_raised():
     assert (
         "shutting down" in manager.status()["weather"].error
     ), "the teardown's shutdown signal was recorded, not dropped"
+
+
+@pytest.mark.asyncio
+async def test_the_log_says_a_tool_the_registry_no_longer_holds_was_dropped(
+    monkeypatch,
+):
+    """An unregistration the registry reports as a no-op is logged, not silent.
+
+    The registry claims the tool is gone while the manager stops owning it.  The
+    two agree in every real case, so a quiet line here is exactly how a
+    registry and a manager that disagree about who owns what would go unnoticed
+    — and the tool would be left in the registry with nobody to remove it.
+    """
+    tool_manager = ToolManager()
+    manager = McpManager(
+        _config(("weather", {"url": "https://w.invalid/mcp"})),
+        tool_manager=tool_manager,
+        client_factory=_hostile_factory({"weather": {"tools": ("a",)}}),
+    )
+    await manager.start()
+    monkeypatch.setattr(tool_manager, "unregister", lambda name: False)
+
+    with _captured_logs() as lines:
+        await manager.stop()
+
+    reported = [line for line in lines if "no longer owns it" in line]
+    assert len(reported) == 1, f"expected one dropped tool, got {reported}"
+    assert "mcp__weather__a" in reported[0], "the tool that was dropped is named"
+    assert "weather" in reported[0], "and the server it belonged to"
 
 
 def test_a_duplicate_name_error_does_not_echo_any_configuration_value():

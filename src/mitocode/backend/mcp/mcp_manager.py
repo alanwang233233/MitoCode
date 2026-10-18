@@ -393,8 +393,14 @@ class McpManager:
 
         if not connected:
             self._errors.pop(name, None)
+            # The client records rather than raises, so this -- not an
+            # exception -- is what an unreachable server looks like to the
+            # manager.  Without the client's own text the log line says only
+            # that the server was unavailable, which is the very question the
+            # operator opened it to answer.
             logger.warning(
                 f"MCP server '{name}' is unavailable; its tools are not registered"
+                f"{': ' + client.last_error if client.last_error else ''}"
             )
             return
 

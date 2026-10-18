@@ -1,3 +1,4 @@
+import contextlib
 import inspect
 import os
 import subprocess
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
 import pytest
+from loguru import logger as loguru_logger
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -278,6 +280,40 @@ def _fake_tool(name, description="", input_schema=None):
     return SimpleNamespace(
         name=name, description=description, input_schema=input_schema
     )
+
+
+def _malformed_tool(name, description=123):
+    """An advertised tool whose description is not a string.
+
+    The type a server sends when it puts a number in a field the MCP schema
+    says is a string.  It is what makes a catalogue unreadable part-way: the
+    registry has to strip the description, and that step can only fail on a
+    value that is not a string.
+
+    Args:
+        name: The tool's name as advertised.
+        description: The undescribable value to carry.
+    """
+    return _fake_tool(name, description=description)
+
+
+@contextlib.contextmanager
+def _captured_logs():
+    """Collect every loguru line emitted inside the block.
+
+    Asserting against a patched ``logger`` proves the call was made; asserting
+    against a real sink proves it reaches an operator's log file, which is the
+    half that matters for a warning nobody is watching the console for.
+
+    Yields:
+        The list every emitted line is appended to.
+    """
+    lines = []
+    sink_id = loguru_logger.add(lines.append, level="DEBUG")
+    try:
+        yield lines
+    finally:
+        loguru_logger.remove(sink_id)
 
 
 def test_build_mcp_tool_name_uses_double_underscore_namespace():
@@ -780,8 +816,9 @@ def test_register_reads_parameters_schema_from_declare_tool_metadata():
 
     ``declare_tool`` writes only ``name``, ``human_doc`` and ``agent_doc``, so
     there is no public way to place ``parameters_schema`` into the metadata this
-    tier reads; the private attribute has to be written by hand.  That makes
-    the tier advertised but unreachable through the public API.
+    tier reads; the private attribute has to be written by hand.  The tier is
+    therefore honoured but not advertised as public API — see ``register``'s
+    docstring.
     """
     manager = ToolManager()
     from_meta = {"type": "object", "properties": {"remote": {"type": "string"}}}
@@ -799,6 +836,27 @@ def test_register_reads_parameters_schema_from_declare_tool_metadata():
     assert (
         "remote" in spec.parameters_schema["properties"]
     ), "the server's shape survives"
+
+
+def test_register_keeps_an_empty_parameters_schema_from_the_metadata_tier():
+    """Tier two reads an empty schema like tier one does, not by truthiness.
+
+    An explicit ``parameters_schema={}`` says "this tool takes no arguments",
+    and that is a schema, not the absence of one.  Deriving one instead would
+    advertise arguments the caller never agreed to, from a source that only
+    looked like a default.
+    """
+    manager = ToolManager()
+
+    @declare_tool(name="no_args")
+    def no_args(**kwargs):
+        return kwargs
+
+    no_args.__mitocode_tool_meta__["parameters_schema"] = {}
+
+    spec = manager.register(no_args)
+
+    assert spec.parameters_schema == {}, "an empty schema from the metadata is kept"
 
 
 def test_register_prefers_the_explicit_parameters_schema_over_declare_tool_metadata():
@@ -1041,6 +1099,71 @@ def test_register_mcp_client_does_not_warn_when_every_name_is_free():
     assert not fake_logger.warning.called, "a free name is not a warning"
 
 
+def test_register_mcp_client_reaches_a_real_log_sink_when_it_skips_a_collision():
+    """The skip is a log line an operator can find, not just a mock call.
+
+    The ``logger.warning`` a skipped collision emits is the only trace that a
+    server advertises a tool this harness could not register; asserting against
+    a patched logger would pin the call site without proving anything reaches a
+    sink.
+    """
+    manager = ToolManager()
+
+    @manager.tool(agent_doc="built-in")
+    def mcp__files__read():
+        return "builtin"
+
+    client = _fake_mcp_client("files", [_fake_tool("read", description="remote")])
+
+    with _captured_logs() as lines:
+        specs = manager.register_mcp_client(client)
+
+    assert specs == [], "a colliding tool is not registered"
+    warnings = [line for line in lines if "Skipping MCP tool" in line]
+    assert len(warnings) == 1, f"expected one skipped collision, got {warnings}"
+    assert "mcp__files__read" in warnings[0], "the skipped name is in the line"
+
+
+def test_register_mcp_client_logs_nothing_when_no_name_collides():
+    """A clean registration emits no log line at all."""
+    manager = ToolManager()
+    client = _fake_mcp_client("files", [_fake_tool("read", description="remote")])
+
+    with _captured_logs() as lines:
+        specs = manager.register_mcp_client(client)
+
+    assert len(specs) == 1, "the tool was registered"
+    assert lines == [], f"a registration with no collision is silent, got {lines}"
+
+
+def test_register_mcp_client_publishes_nothing_when_the_catalogue_is_unreadable():
+    """Registration is all-or-nothing, owned here rather than downstream.
+
+    The catalogue's second tool carries a description that is not a string, so
+    the read fails after the first tool would otherwise already be published.  A
+    caller told only that "the registration failed" cannot name what to reclaim,
+    so anything left behind would be a dispatchable tool nobody owns.  Driven
+    here, in the registry's own suite: this property belongs to
+    ``register_mcp_client`` and has to stay green even if the manager is never
+    exercised against it.
+    """
+    manager = ToolManager()
+    client = _fake_mcp_client(
+        "weather",
+        [
+            _fake_tool("healthy", description="healthy on weather"),
+            _malformed_tool("malformed"),
+        ],
+    )
+
+    with pytest.raises(AttributeError):
+        manager.register_mcp_client(client)
+
+    assert manager.tools_map() == {}, "not even the healthy predecessor survives"
+    assert manager.tool_schemas() == [], "so there is nothing to dispatch either"
+    assert manager.get_spec("mcp__weather__healthy") is None
+
+
 @pytest.mark.asyncio
 async def test_register_mcp_client_keeps_the_first_of_two_clients_with_one_server_name():
     """A second client on the same server name never receives the dispatch."""
@@ -1156,7 +1279,7 @@ async def test_registered_mcp_tool_returns_the_server_result_unchanged():
 
 
 def test_registered_mcp_tool_schema_hides_the_private_dispatch_bindings():
-    """``_client``/``_tool_name`` exist on the callable but not on the wire."""
+    """``_client``/``_tool_name`` exist on neither the callable nor the wire."""
     manager = ToolManager()
     client = _fake_mcp_client(
         "files",

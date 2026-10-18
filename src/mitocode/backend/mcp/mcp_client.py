@@ -58,6 +58,13 @@ _ENDPOINT_RUN = re.compile(
     r"|(?:/[^\s'\"<>)\]}`]*|[A-Za-z0-9_.~-]+)\?[A-Za-z0-9_.~-]+=[^\s'\"<>)\]}`]*"
 )
 
+#: The three parts of a URL that can carry a credential.  Each matches only the
+#: first occurrence, and each is applied to a run :data:`_ENDPOINT_RUN` already
+#: bounded, so none of them can reach past the endpoint into the sentence.
+_ENDPOINT_USERINFO = re.compile(r"://[^/?#@]*@")
+_ENDPOINT_QUERY = re.compile(r"\?[^#\s]*")
+_ENDPOINT_FRAGMENT = re.compile(r"#[^\s]*")
+
 
 def _redact_arguments(text: str) -> str:
     """Cut argument payloads out of error text while keeping it diagnosable.
@@ -94,23 +101,11 @@ def _scrub_endpoint_run(match: "re.Match[str]") -> str:
         # userinfo needs an authority to live in and there is none.
         return f"{run.split('?', 1)[0]}?{_REDACTED}"
 
-    scheme, marker, rest = run.partition("://")
-    # Fragment before query: a query string may legally contain a '#', so the
-    # fragment has to be split off first for the query's end to be the real one.
-    rest, fragment_sep, _fragment = rest.partition("#")
-    rest, query_sep, _query = rest.partition("?")
-    authority, slash, path = rest.partition("/")
-    _userinfo, at_sign, host = authority.rpartition("@")
-
-    scrubbed = f"{scheme}{marker}"
-    if at_sign:
-        scrubbed += f"{_REDACTED}@"
-    scrubbed += f"{host}{slash}{path}"
-    if query_sep:
-        scrubbed += f"?{_REDACTED}"
-    if fragment_sep:
-        scrubbed += f"#{_REDACTED}"
-    return scrubbed
+    scrubbed = _ENDPOINT_USERINFO.sub(f"://{_REDACTED}@", run, count=1)
+    # The query stops at a '#' so that a fragment stays a fragment rather than
+    # being swallowed into the query's redaction.
+    scrubbed = _ENDPOINT_QUERY.sub(f"?{_REDACTED}", scrubbed, count=1)
+    return _ENDPOINT_FRAGMENT.sub(f"#{_REDACTED}", scrubbed, count=1)
 
 
 def _scrub_endpoint(text: str) -> str:
@@ -171,11 +166,19 @@ class McpClient:
         """Construct the FastMCP client for this server.
 
         Exists as a seam so tests can substitute an in-memory client.
+
+        No deadline is set on the client itself.  ``Client(timeout=...)`` becomes
+        the session's default for *every* request, and the one request that
+        carries no deadline of its own is the ``list_tools`` discovery inside
+        :meth:`connect` — so with ``timeout`` below ``connect_timeout`` the
+        discovery would be bounded by the wrong deadline and report the wrong
+        one.  Both callers apply their own instead: :meth:`connect` wraps the
+        handshake and the discovery in ``asyncio.wait_for``, and
+        :meth:`call_tool` passes ``timeout`` to the request itself.
         """
         return Client(
             self._config.build_transport(),
             name=self._config.name,
-            timeout=self._config.timeout,
         )
 
     @property
@@ -316,7 +319,13 @@ class McpClient:
 
         Errors raised while closing are swallowed and recorded in
         :attr:`last_error` rather than propagated, because a failing teardown
-        must not prevent the remaining servers from being shut down.
+        must not prevent the remaining servers from being shut down — *unless*
+        they are not an :class:`Exception`.  A :class:`BaseException` that is
+        neither one nor a cancellation — a framework's shutdown signal — keeps
+        travelling, because recording it away would silently downgrade the
+        second Ctrl-C or the enclosing cancellation that caused it, and
+        :attr:`last_error` stays untouched rather than blaming a cleanup
+        problem that never happened.
         """
         if self._stack is None and self._client is None:
             return

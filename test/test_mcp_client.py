@@ -806,6 +806,47 @@ async def test_force_close_does_not_swallow_a_shutdown_signal_raised_while_closi
 
 
 @pytest.mark.asyncio
+async def test_force_close_does_not_swallow_a_shutdown_signal_from_the_stack():
+    """The stack handle gets the same narrow catch as the client handle.
+
+    ``stack.aclose()`` is the second of the two teardown handles and runs the
+    exit stack's own callbacks.  Its handler is keyed on ``Exception`` for the
+    same reason the client's is: a shutdown signal or a cancellation delivered
+    *while* the stack unwinds has to keep travelling, or ``disconnect()``
+    swallows whatever an enclosing ``wait_for`` was already trying to do.
+    Widening this one handler to ``BaseException`` is therefore a regression,
+    and the ``client``-side twin of this test is
+    ``test_force_close_does_not_swallow_a_shutdown_signal_raised_while_closing``.
+    """
+    client = McpClient(_in_memory_config())
+    recorder = _CloseRecorder()
+    client._client = recorder
+
+    class _ShutdownOnStackClose:
+        """Stack that signals a shutdown part-way through unwinding."""
+
+        def __init__(self) -> None:
+            """Start with the stack still open."""
+            self.closed = False
+
+        async def aclose(self) -> None:
+            """Attempt the unwind, then announce a shutdown."""
+            self.closed = True
+            raise _ShutdownSignal("stopping during teardown")
+
+    built = _ShutdownOnStackClose()
+    client._stack = built
+
+    with pytest.raises(_ShutdownSignal):
+        await client.disconnect()
+
+    assert built.closed is True
+    assert client.last_error == "", "a signal is not a cleanup failure to record"
+    assert client._client is None, "the client was still released first"
+    assert client._stack is None, "and the stack handle is dropped too"
+
+
+@pytest.mark.asyncio
 async def test_force_close_records_a_failing_stack_close():
     """A stack that cannot unwind is recorded instead of aborting the teardown."""
     client = McpClient(_in_memory_config())
@@ -1086,10 +1127,13 @@ def test_redaction_cuts_the_payload_up_to_the_last_injected_type_marker():
     redacted = _redact_arguments("input_value='sk-PART1\", input_type=sk-PART2LEAK'")
 
     assert "sk-PART1" not in redacted
-    # KNOWN LIMITATION (mcp_client.py:39-41): text after a payload-supplied
-    # decoy marker is currently NOT redacted -- `sk-PART2LEAK` survives here,
-    # and this assertion is what lets it.  Fixing the leak requires DELETING
-    # this assertion, not editing it to expect the fix.
+    # KNOWN LIMITATION (mcp_client.py:47-49): text after a payload-supplied
+    # decoy marker is currently NOT redacted -- `sk-PART2LEAK` survives here.
+    # This assertion deliberately does NOT enforce that, because it cannot:
+    # `startswith` passes just as happily against an implementation that closes
+    # the leak.  The assertion that actually breaks when the leak is closed is
+    # the exact-output comparison in
+    # test_redaction_keeps_the_report_after_an_injected_marker() below.
     assert redacted.startswith("input_value=<redacted>")
 
 
