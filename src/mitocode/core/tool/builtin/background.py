@@ -10,17 +10,28 @@ or the agent is told the answer arrived on its own.
 Four decisions in here are load-bearing, and none of them is obvious from the
 method bodies.
 
-**The ceiling is enforced inside the wrapper, not around the task.**  The
-obvious spelling — ``asyncio.wait_for(coro, timeout)`` inside ``collect`` —
-looks equivalent and is not.  Wrapping a *task* in ``wait_for`` cancels the
-wrapper and leaves the task orphaned: still running, still holding its
-subprocess, still able to write files, with nothing left to collect it.  So
-:meth:`BackgroundRegistry.launch` creates the task exactly once and that task
-runs :meth:`BackgroundRegistry._run`, which applies the ceiling to the inner
-coroutine with ``wait_for`` *before* anything observes it.  One task, one
-timeout, one place that can cancel it.  Because the deadline has already
-passed by the time the record is settled, :meth:`~BackgroundRegistry.collect`
-never has a task it must re-timeout — it reads a state, it does not wait.
+**The ceiling is a sibling task, not a wrapper around the work.**  The obvious
+spelling — ``asyncio.wait_for(coro, timeout)`` around the detached call —
+cannot be the discriminator here for two independent reasons.  On Python 3.11+
+``asyncio.TimeoutError`` *is* the builtin ``TimeoutError``, so a socket or
+subprocess timeout raised by the tool itself is indistinguishable from this
+registry's deadline and would be recorded as a timeout it never hit.  And
+``wait_for`` hands back whatever the inner coroutine produced when that
+coroutine suppresses its own ``CancelledError`` — 3.10's implementation returns
+``fut.result()`` after ``_cancel_and_wait``, and 3.11+'s ``Timeout.__aexit__``
+only raises when the exception is ``CancelledError`` — so a task that blew its
+ceiling could be reported as a success.
+
+So :meth:`BackgroundRegistry._run` creates one task for the work and one for the
+deadline and races them.  ``TIMEOUT`` is decided by *which future completed*,
+never by the type of an exception, and it wins over anything the inner produced:
+the ceiling is the registry's promise, not the callee's to extend.  One task for
+the work, created once and never re-wrapped, so ``collect`` never sees a task it
+has to re-timeout — it reads a state, it does not wait.  What this does **not**
+promise is that the work has *stopped*: a coroutine that suppresses its own
+cancellation, or that awaits inside ``asyncio.shield``, outlives the deadline,
+and the registry records ``TIMEOUT`` rather than waiting on a cancellation it
+cannot force.
 
 **Cancellation is recorded and then re-raised, never converted into success.**
 A task cancelled from outside — by :meth:`~BackgroundRegistry.cancel_all`, by
@@ -120,7 +131,32 @@ UNKNOWN_HANDLE = "unknown handle"
 
 #: Value of ``AgentState.RUNNING``, compared as a string so this module never
 #: imports the agent package.  See the module docstring.
+#:
+#: **This constant must stay equal to
+#: :attr:`mitocode.core.agent.agent_state.AgentState.RUNNING.value`, and nothing
+#: in this repository enforces that.**  It is duplicated rather than imported
+#: only because the import direction is one-way: ``agent_session`` imports
+#: ``tool_manager``, so the tool package may not import the agent package at
+#: runtime, and ``TYPE_CHECKING`` cannot help because the value is needed at
+#: runtime for the comparison.  The consequence of drift is asymmetric and bad:
+#: this guard **fails open**.  Rename the member, change its value, or move the
+#: enum, and :meth:`BackgroundRegistry.dispatch_pending` stops recognising a
+#: running caller, delivers straight into it, and ``send_message`` cancels and
+#: awaits the turn that launched the background call — destroying the caller's
+#: own work on every completion.  That is precisely the failure this deferral
+#: exists to prevent, arriving through a one-word edit in another package.
+#: Anything that changes ``AgentState`` must re-check this line; a test is the
+#: right home for that check and none exists yet.
 RUNNING_STATE_VALUE = "running"
+
+#: How many times a single handle's notification may fail to send before it is
+#: retired from notification entirely.  Bounded because an orchestrator that
+#: answers ``get_session`` but always raises from ``send_message`` would
+#: otherwise produce an unbounded retry loop and an unbounded stream of log
+#: lines.  Five is deliberately generous: transient causes (a session mid
+#: teardown, a loop briefly busy) clear within a couple of dispatches, so the
+#: cap only fires against a sink that is genuinely broken.
+MAX_DELIVERY_ATTEMPTS = 5
 
 #: Prefix of a generated handle; the counter starts at 1 so the first handle a
 #: registry issues is ``bg_1`` rather than a zero that reads like a
@@ -164,8 +200,15 @@ class TaskState(Enum):
     #: rendered ``"<Type>: <message>"`` pair, never the exception object.
     FAILED = "failed"
 
-    #: The ceiling passed and the inner coroutine was cancelled by
-    #: ``asyncio.wait_for``.  The cancellation is real, not an abandonment.
+    #: The ceiling fired and the inner work was asked to stop.  Guaranteed:
+    #: the deadline future completed, and any value the inner produced anyway
+    #: was discarded.  **Not** guaranteed: that the inner work actually
+    #: stopped.  A coroutine that suppresses ``CancelledError`` or that awaits
+    #: inside ``asyncio.shield`` keeps running past this point, and this state
+    #: is recorded anyway — a late failure is logged, never promoted to a
+    #: result.  Recorded instead of a fabricated ``DONE``, which is the whole
+    #: point: exceeding the ceiling is a fact about the call, whatever the
+    #: callee does with its cancellation.
     TIMEOUT = "timeout"
 
     #: The task was cancelled from outside — ``cancel_all``, shutdown, a
@@ -245,6 +288,14 @@ class BackgroundRegistry:
         # record's state: a delivered task is still DONE and still collectable,
         # it just has nothing left to announce.
         self._delivered: Set[str] = set()
+        # Handles given up on after MAX_DELIVERY_ATTEMPTS failed sends.  Kept
+        # apart from `_delivered` so `mark_delivered` can be told "this was
+        # announced" from "this was retired" -- the difference decides whether
+        # the stored result is cleared or preserved for a later `collect`.
+        self._abandoned: Set[str] = set()
+        # handle -> how many delivery attempts have failed.  Survives a
+        # successful delivery so a handle that flaps does not reset its budget.
+        self._attempts: Dict[str, int] = {}
         self._counter = 0
 
     def launch(
@@ -367,16 +418,16 @@ class BackgroundRegistry:
 
         Returns:
             Copies of every record in a terminal state that has not been
-            claimed by :meth:`mark_delivered` and whose result has not been
-            spent through :meth:`collect` — a collected task has already told
-            the model, so announcing it again would be noise.  Ordered by
-            launch.
+            claimed by :meth:`mark_delivered` or retired by
+            :meth:`_abandon`, and whose result has not been spent through
+            :meth:`collect` — a collected task has already told the model, so
+            announcing it again would be noise.  Ordered by launch.
         """
         pending: List[BackgroundTask] = []
         for record in self._records.values():
             if record.state not in TERMINAL_STATES:
                 continue
-            if record.handle in self._delivered:
+            if record.handle in self._delivered or record.handle in self._abandoned:
                 continue
             pending.append(replace(record))
         return pending
@@ -431,9 +482,26 @@ class BackgroundRegistry:
           into one would destroy the turn that launched the background call in
           the first place.  Parking is cheap and the next dispatch retries.
 
-        A handle is claimed *before* the await and un-claimed if the send
-        raises, so two dispatches overlapping on one handle cannot both
-        deliver it, and a failed send is retried rather than lost.
+        A handle is claimed *before* the await and un-claimed on **every** way
+        the await can end badly — a raising ``send_message`` and a cancelled
+        ``dispatch_pending`` alike — so two dispatches overlapping on one
+        handle cannot both deliver it, and a failed or interrupted send is
+        retried rather than lost.  The ``CancelledError`` clause is not optional
+        bookkeeping: without it, a dispatch cancelled mid-``await`` by session
+        teardown or a user interrupt would leave the handle sitting in
+        :attr:`_delivered`, which :meth:`pending_notifications` filters on, and
+        the notification would be unreachable forever while the record still
+        reads as undelivered.
+
+        Retries are bounded by :data:`MAX_DELIVERY_ATTEMPTS`.  A
+        ``send_message`` that always raises — an orchestrator torn down but
+        still answering ``get_session`` — would otherwise be retried on every
+        dispatch forever, one log line each time, for a handle that is never
+        going to succeed.  After the cap the handle is retired from
+        *notification* only: its record and result stay in :attr:`_records`, so
+        ``collect`` still answers it and nothing the agent asked for is
+        destroyed.  The cap is set high enough that it only ever fires against
+        a genuinely broken sink, not against a transient one.
 
         Args:
             ctx: The context supplying the orchestrator to message through.
@@ -467,11 +535,24 @@ class BackgroundRegistry:
             self._delivered.add(record.handle)
             try:
                 await ctx.orchestrator.send_message(caller_id, text)
+            except asyncio.CancelledError:
+                # `dispatch_pending` itself was cancelled while awaiting the
+                # send — teardown, a user interrupt.  CancelledError is a
+                # BaseException, so the `except Exception` below never sees it;
+                # without this clause the claim taken above would survive it and
+                # the handle would never be pending again.  Re-raised, never
+                # absorbed: the cancellation is the caller's to act on, and
+                # swallowing it would make an interrupted turn look completed.
+                self._delivered.discard(record.handle)
+                raise
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 # A failed delivery must not become a failed dispatch call:
                 # this runs on an agent's turn, and an exception here would
                 # take that turn down over a notification.
                 self._delivered.discard(record.handle)
+                if self._count_attempt(record.handle) >= MAX_DELIVERY_ATTEMPTS:
+                    self._abandon(record.handle)
+                    continue
                 logger.opt(exception=exc).error(
                     "Delivery of background notification for handle '{}' "
                     "failed; it stays pending and will be retried.",
@@ -481,6 +562,42 @@ class BackgroundRegistry:
             self.mark_delivered(record.handle)
             delivered.append(record.handle)
         return delivered
+
+    def _count_attempt(self, handle: str) -> int:
+        """Record one delivery failure against *handle* and return the total.
+
+        Args:
+            handle: The handle whose delivery just failed.
+
+        Returns:
+            How many times delivery has now failed for this handle, counting
+            the failure that just happened.
+        """
+        attempts = self._attempts.get(handle, 0) + 1
+        self._attempts[handle] = attempts
+        return attempts
+
+    def _abandon(self, handle: str) -> None:
+        """Stop notifying about *handle* after too many failed sends.
+
+        Retires the handle from notification only.  The record itself stays
+        in :attr:`_records` with its state and result intact, so an agent that
+        still holds the handle can ``collect`` the outcome; what is given up is
+        the automatic announcement, which is the part that cannot succeed.
+
+        Args:
+            handle: The handle to retire.
+        """
+        self._abandoned.add(handle)
+        self._delivered.add(handle)
+        logger.error(
+            "Giving up on delivering the background notification for handle "
+            "'{}' after {} failed attempts. The result is not discarded: "
+            "collect('{}') still returns it.",
+            handle,
+            MAX_DELIVERY_ATTEMPTS,
+            handle,
+        )
 
     def cancel_all(self) -> None:
         """Cancel every task still running and record them as cancelled.
@@ -508,6 +625,41 @@ class BackgroundRegistry:
     async def _run(self, record: BackgroundTask, coro_factory: CoroFactory) -> None:
         """Run *coro_factory* under its ceiling and settle *record*.
 
+        **The ceiling is a sibling task, not a wrapper around the work.**
+        ``asyncio.wait_for`` cannot be the discriminator here, on two counts.
+        First, on Python 3.11+ ``asyncio.TimeoutError`` *is* the builtin
+        ``TimeoutError``, so a socket or subprocess timeout raised by the tool
+        itself — common in exactly the work this registry exists to run — is
+        indistinguishable from this registry's own deadline and would be
+        recorded as :attr:`TaskState.TIMEOUT` carrying a fabricated "timed out
+        after N ms".  The two environments then disagree about the same code,
+        because on 3.10 the same exception arrives as a plain ``TimeoutError``
+        and lands in the ordinary failure branch.
+
+        Second, and worse, ``wait_for`` returns whatever the inner coroutine
+        produced when that coroutine suppresses its own ``CancelledError``:
+        3.10's implementation calls ``fut.result()`` after
+        ``_cancel_and_wait``, and 3.11+'s ``Timeout.__aexit__`` only raises when
+        the exception is ``CancelledError``.  A callee that catches its
+        cancellation and returns normally therefore makes a task that blew its
+        ceiling look like a success — the one outcome this module must never
+        produce.
+
+        So the deadline is expressed as its own future racing the work.
+        :attr:`TaskState.TIMEOUT` is chosen when *that* future completed, and
+        it wins over anything the inner produced, because the ceiling is the
+        registry's promise and not the callee's to extend.  A tool's own
+        ``TimeoutError`` is just an exception on the inner future and is
+        reported as :attr:`TaskState.FAILED` on every supported interpreter.
+
+        What this does **not** guarantee: that the inner work has stopped.  A
+        coroutine that suppresses ``CancelledError``, or that awaits inside
+        ``asyncio.shield``, keeps running after the deadline fires, and the
+        registry records ``TIMEOUT`` anyway rather than waiting for a
+        cancellation it cannot force.  :meth:`_drain` consumes a late exception
+        from such a survivor so asyncio does not print an orphan warning about
+        it.
+
         Settling happens here, inside the coroutine, and not only in the
         done-callback: a callback cannot observe a cancelled task's outcome
         without re-raising the cancellation itself, and re-raising it from a
@@ -519,41 +671,104 @@ class BackgroundRegistry:
                 read the outcome without going through the task.
             coro_factory: The factory handed to :meth:`launch`.
         """
-        try:
-            value = await asyncio.wait_for(
-                coro_factory(), _seconds(record.timeout)
+        inner = asyncio.ensure_future(coro_factory())
+        expired = False
+
+        async def _expire() -> None:
+            """Arm the ceiling: record that it fired, then stop the work."""
+            nonlocal expired
+            await asyncio.sleep(_seconds(record.timeout))
+            expired = True
+            # Requested, not guaranteed.  A callee that suppresses its own
+            # cancellation keeps going; TIMEOUT is recorded regardless.
+            inner.cancel()
+
+        deadline = asyncio.ensure_future(_expire())
+
+        def _drain(survived: "asyncio.Future[Any]") -> None:
+            """Consume a late outcome from work that outlived its ceiling.
+
+            ``shield``, or a bare ``except asyncio.CancelledError`` in the tool,
+            lets the inner future outlive this coroutine.  If it then raises,
+            nobody is left to retrieve the exception and asyncio answers that
+            with a "Task exception was never retrieved" line on stderr that
+            nothing here asked for.  Retrieving it here also gets it into the
+            log, where an operator can actually see it.
+
+            Args:
+                survived: The finished inner future.
+            """
+            if survived.cancelled():
+                return
+            error = survived.exception()
+            if error is None:
+                return
+            if record.state is TaskState.RUNNING:
+                # `_run` has not settled yet; it reads the same exception.
+                return
+            logger.opt(exception=error).error(
+                "Background task '{}' exceeded its {} ms ceiling and the work "
+                "it could not stop then raised anyway: {}: {}",
+                record.handle,
+                record.timeout,
+                type(error).__name__,
+                safe_exception_message(error),
             )
-        except asyncio.TimeoutError:
-            # wait_for has already cancelled the inner coroutine and awaited
-            # its cancellation, so "abandoned" is not a state this reaches.
-            record.state = TaskState.TIMEOUT
-            record.result = TIMEOUT_TEXT.format(timeout=record.timeout)
+
+        inner.add_done_callback(_drain)
+        try:
+            await asyncio.wait({inner, deadline}, return_when=asyncio.FIRST_COMPLETED)
         except asyncio.CancelledError:
-            # Recorded, then re-raised on purpose.  Returning normally here
-            # would leave the task looking like it completed successfully with
-            # a None result — the exact bug class `errors.py` documents for
-            # the tool boundary, and the reason that module keeps
-            # CancelledError out of its `except Exception`.
+            # The wrapper itself was cancelled — `cancel_all`, shutdown, the
+            # interpreter going away.  Recorded, the inner work asked to stop,
+            # then re-raised on purpose.  Returning normally here would leave
+            # the task looking like it completed successfully with a None
+            # result — the exact bug class `errors.py` documents for the tool
+            # boundary, and the reason that module keeps CancelledError out of
+            # its `except Exception`.
             record.state = TaskState.CANCELLED
             record.result = CANCELLED_TEXT
+            inner.cancel()
             raise
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            # Computed once and reused for both sinks, as `errors.py` does:
-            # interpolating `exc` into either string is the thing that makes
-            # the error path able to raise.
-            message = safe_exception_message(exc)
+        finally:
+            if not deadline.done():
+                # The work won the race; disarm the ceiling so it cannot fire
+                # afterwards and cancel an already-finished task.
+                deadline.cancel()
+
+        if expired:
+            # The ceiling fired, so TIMEOUT wins over anything the inner
+            # produced — including a value it returned after suppressing the
+            # cancellation it was just handed.
+            record.state = TaskState.TIMEOUT
+            record.result = TIMEOUT_TEXT.format(timeout=record.timeout)
+            inner.cancel()
+            return
+
+        if inner.cancelled():
+            record.state = TaskState.CANCELLED
+            record.result = CANCELLED_TEXT
+            return
+
+        error = inner.exception()
+        if error is not None:
+            # Read off the inner future rather than caught from an `except`,
+            # which is what keeps a tool's own TimeoutError on the FAILED
+            # side of the ledger on every supported interpreter.
+            message = safe_exception_message(error)
             record.state = TaskState.FAILED
-            record.result = f"Error: {type(exc).__name__}: {message}"
-            logger.opt(exception=exc).error(
+            record.result = f"Error: {type(error).__name__}: {message}"
+            logger.opt(exception=error).error(
                 "Background task '{}' raised; it is recorded as failed and "
                 "never re-raised into the agent: {}: {}",
                 record.handle,
-                type(exc).__name__,
+                type(error).__name__,
                 message,
             )
-        else:
-            record.state = TaskState.DONE
-            record.result = _render(value)
+            return
+
+        record.state = TaskState.DONE
+        record.result = _render(inner.result())
 
     def _on_done(self, handle: str, task: "asyncio.Task[None]") -> None:
         """Settle *handle* if its task ended without recording an outcome.
