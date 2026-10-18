@@ -22,7 +22,7 @@ TUI's event loop and wait for a keystroke.  Making the protocol synchronous
 now would mean changing the call sites later, at the exact moment someone is
 adding a dialog.
 
-A denial is reported to the caller as a refusal string rather than as an
+A denial becomes a refusal string at the call site rather than an
 exception, because the model can react to a refusal and a traceback is only
 noise in a transcript.  Note that no timeout is built into the protocol: how
 long to wait for a verdict is a property of the call site (``paths.resolve``
@@ -43,6 +43,13 @@ class ApprovalDecision(Enum):
     decision (``ApprovalDecision.ALLOW``) reads as a decision rather than as a
     bare flag.  The string values are the wire/log form: they are what a
     refusal string quotes back to the model.
+
+    This is a plain :class:`enum.Enum`, deliberately *not* a ``str`` mixin the
+    way ``McpServerKind`` in :mod:`mitocode.core.mcp` is, so that the two
+    vocabularies cannot be confused by analogy.  ``str(ApprovalDecision.DENY)``
+    is ``"ApprovalDecision.DENY"``, not ``"deny"``: a caller interpolating a
+    decision into a message the model reads must interpolate ``.value``
+    explicitly or hand the model Python's repr.
     """
 
     ALLOW = "allow"
@@ -77,11 +84,20 @@ class ApprovalRequest:
 class Approver(Protocol):  # pylint: disable=too-few-public-methods
     """Decides whether an out-of-root operation may proceed.
 
-    Structural, not nominal: an approver is any object with a matching
-    ``request``, so a test can pass a one-line stub, a lambda-backed object, or
-    a future TUI dialog, without inheriting from anything here.  Marked
-    ``runtime_checkable`` so ``isinstance(obj, Approver)`` is available as a
-    cheap sanity check at wiring time.
+    Structural, not nominal: an approver is any object that exposes a
+    ``request`` attribute, so a test can pass a hand-written stub or a future
+    TUI dialog without inheriting from anything here.
+
+    What ``runtime_checkable`` checks is *attribute presence, and nothing
+    else*.  ``isinstance(obj, Approver)`` does not inspect ``request``'s
+    signature and does not care whether it is a coroutine function: a
+    synchronous ``request``, a plain lambda assigned to ``request``, or a
+    ``request(self, prompt, timeout)`` all pass.  A wrongly shaped approver is
+    therefore caught by the ``await`` at the call site — ``TypeError: object
+    'function' can't be used in 'await' expression`` — and never by
+    ``isinstance``.  Read the check as a cheap sanity test for the *absence* of
+    ``request``, the one disqualifier it does apply, and never as proof that an
+    implementation conforms.
 
     Only one method exists on purpose.  The protocol must stay the smallest
     surface that every future implementation — including an interactive one
@@ -98,9 +114,11 @@ class Approver(Protocol):  # pylint: disable=too-few-public-methods
 
         Returns:
             ``ApprovalDecision.ALLOW`` to let the operation proceed, or
-            ``ApprovalDecision.DENY`` to refuse it.  Implementations return a
-            refusal to the caller as a value; they do not raise.
+            ``ApprovalDecision.DENY`` to refuse it.  Implementations return the
+            decision itself and do not raise; turning a ``DENY`` into the refusal
+            string the model reads is the call site's job.
         """
+        # `...` is required by pyright and flagged by pylint above; keep both.
         ...
 
 
