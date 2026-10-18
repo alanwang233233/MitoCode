@@ -27,10 +27,32 @@ cancellation.
 **Nothing is swallowed silently.**  Every caught exception is logged through
 loguru with its traceback *before* it is rendered, so an operator reading the
 log can reconstruct what happened even though the model only ever saw one
-line.  The rendered form is ``"Error: <Type>: <message>"`` — the exception
-*type* is kept because "Error: something went wrong" tells the model nothing
-it can branch on, while ``"Error: FileNotFoundError: ..."`` tells it whether
-retrying could plausibly help.
+line.  The traceback is attached with ``opt(exception=exc)`` rather than
+formatted into the message, and that choice is load-bearing: loguru formats a
+message's ``{}`` arguments **eagerly, inside the ``.error()`` call**, so
+``logger.exception("...: {}", exc)`` calls ``str(exc)`` at precisely the point
+where a raising ``__str__`` would defeat the boundary — and takes the log line
+down with it.  Handing loguru the exception object instead leaves rendering to
+loguru's own formatter, which is defensive about a failing ``__str__``: it
+prints ``<exception str() failed>`` and still emits every frame.
+
+**The boundary is total with respect to ``Exception``.**  Not just the tool's
+body is protected but the error path itself.  Some exceptions raise from
+``__str__`` — a proxy object, or one whose ``__str__`` reads an attribute that
+is already ``None`` — and an f-string over such an exception raises *while the
+decorator is already unwinding*, turning a caught error into an escaping one:
+the exact failure this module exists to prevent, plus a lost log line.  So the
+message is obtained through a guarded helper, and when it cannot be rendered
+the type prefix — the part a reader, human or model, can actually branch on —
+still reaches the model intact.  The guarantee stops precisely at
+``BaseException``: if a broken ``__str__`` raises ``KeyboardInterrupt``,
+``SystemExit`` or ``CancelledError``, that halt signal still propagates, because
+swallowing one is the failure mode the paragraph above exists to prevent.
+
+The rendered form is ``"Error: <Type>: <message>"`` — the exception *type* is
+kept because "Error: something went wrong" tells the model nothing it can
+branch on, while ``"Error: FileNotFoundError: ..."`` tells it whether retrying
+could plausibly help.
 
 :class:`MitoCodeBuiltinToolError` is the one exception in this package that
 signals a *programming* fault rather than a bad argument — "no orchestrator
@@ -72,12 +94,68 @@ class MitoCodeBuiltinToolError(MitoCodeBaseError):
     """
 
 
+#: Rendered in place of an exception message that cannot be produced.  Names the
+#: type ``__str__`` raised rather than saying only "unavailable", because the
+#: inner failure is usually the more diagnostic half of the story: an
+#: ``AttributeError: 'NoneType' object has no attribute 'command'`` explains a
+#: broken proxy exception far better than the proxy's own type does.
+UNPRINTABLE_MESSAGE = "<message unavailable: __str__ raised {}>"
+
+
+def safe_exception_message(exc: BaseException) -> str:
+    """Return ``str(exc)``, or a placeholder when rendering the exception fails.
+
+    Some exception types raise from ``__str__`` itself.  Calling it would then
+    raise *inside the boundary's own error path* — while the decorator is
+    already unwinding — which defeats the one guarantee this module makes and
+    takes the log line with it, because loguru formats message arguments
+    eagerly at the call site.  Every place that needs the message goes through
+    here instead of interpolating ``exc`` directly.
+
+    A legitimate empty message is not treated as a failure: ``str(KeyError())``
+    is ``""``, and the caller still renders the trailing ``": "``, because
+    dropping it would make an empty message indistinguishable from a malformed
+    line.
+
+    Args:
+        exc: The exception whose message is wanted.
+
+    Returns:
+        ``str(exc)`` when it can be rendered, otherwise
+        :data:`UNPRINTABLE_MESSAGE` naming the type ``__str__`` raised.
+
+    Raises:
+        BaseException: Propagated on purpose, and only this one.  If ``__str__``
+            raises ``KeyboardInterrupt``, ``SystemExit`` or
+            ``asyncio.CancelledError`` then a halt signal was raised while this
+            helper was running, and masking it because a broken ``__str__``
+            fired mid-log is the same class of bug as swallowing a cancellation.
+            Every ordinary ``Exception`` — the realistic case, a broken proxy's
+            ``AttributeError`` — is contained.
+    """
+    try:
+        return str(exc)
+    except Exception as inner:  # pylint: disable=broad-exception-caught
+        # Broad on purpose and scoped to one str() call: the failure being
+        # defended against is precisely that this raises something
+        # unpredictable, so naming the type is the only way to keep going.
+        return UNPRINTABLE_MESSAGE.format(type(inner).__name__)
+
+
 def tool_boundary(func: ToolFunction) -> ToolFunction:
     """Wrap a tool coroutine so no exception escapes as a traceback.
 
     Expected failures already return ``"Error: ..."`` strings from the tool
     body; this catches everything else and renders ``"Error: <Type>: <message>"``,
     logging the trace to loguru first so nothing is silently lost.
+
+    The guarantee covers the error path as well as the tool body.  Rendering
+    goes through :func:`safe_exception_message` and the log line is attached
+    with ``opt(exception=exc)`` rather than by interpolating the exception into
+    the message, so an exception whose ``__str__`` raises still reaches the
+    model as prose *and* still reaches loguru with its traceback.  The one thing
+    deliberately still escaping is a ``BaseException`` raised by ``__str__``
+    itself; see :func:`safe_exception_message`.
 
     Only ``Exception`` is caught.  ``asyncio.CancelledError`` derives from
     ``BaseException`` on Python 3.8 and later — verified on this repository's
@@ -113,7 +191,9 @@ def tool_boundary(func: ToolFunction) -> ToolFunction:
 
         Returns:
             Whatever *func* returns, or ``"Error: <Type>: <message>"`` if it
-            raised.
+            raised.  The message is whatever
+            :func:`safe_exception_message` could obtain; the type prefix is
+            present either way.
         """
         try:
             return await func(*args, **kwargs)
@@ -127,12 +207,18 @@ def tool_boundary(func: ToolFunction) -> ToolFunction:
             # Not caught, because they are BaseException subclasses and this
             # clause names Exception: asyncio.CancelledError, KeyboardInterrupt
             # and SystemExit.  The first is how a turn is stopped.
-            logger.exception(
+            exc_name = type(exc).__name__
+            # Computed once and reused for both sinks.  Interpolating `exc`
+            # into either string is what made this path unsafe: an exception
+            # whose __str__ raises would then raise here, mid-unwind, and the
+            # new exception would escape the decorator.
+            message = safe_exception_message(exc)
+            logger.opt(exception=exc).error(
                 "Built-in tool '{}' raised; the model will see one line: {}: {}",
                 func.__name__,
-                type(exc).__name__,
-                exc,
+                exc_name,
+                message,
             )
-            return f"Error: {type(exc).__name__}: {exc}"
+            return f"Error: {exc_name}: {message}"
 
     return _wrapper

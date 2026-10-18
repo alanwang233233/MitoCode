@@ -434,15 +434,6 @@ class _ExplosiveStr(Exception):
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT: the boundary renders via an f-string over the exception and "
-        "loguru formats the same exception for the log line, so an exception "
-        "whose __str__ raises escapes as RuntimeError and is lost from the log "
-        "as well. The module promises no exception escapes as a traceback."
-    ),
-)
 async def test_tool_boundary_renders_even_when_the_exception_str_raises():
     """A hostile ``__str__`` must not defeat the one guarantee this file exists for.
 
