@@ -1,6 +1,6 @@
 """AgentSession 模块单元测试套件。
 
-覆盖 src/mitocode/backend/agent/agent_session.py 的全部行为分支：
+覆盖 src/mitocode/core/agent/agent_session.py 的全部行为分支：
 消息块三兄弟（文本/工具调用/工具结果）的构造与转换、AgentSession 构造校验、
 托管/用户工具合并规则、文档查询委托、协作式取消、流式增量聚合、
 标准上下文编译以及 TUI 节点快照映射。
@@ -14,16 +14,16 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mitocode.backend.agent.agent_session import (
+from mitocode.core.agent.agent_session import (
     AgentSession,
     _MessageBlock,
     _PlainTextMessageBlock,
     _ToolCallMessageBlock,
     _ToolResultMessageBlock,
 )
-from mitocode.backend.agent.agent_state import AgentState
-from mitocode.backend.chat_provider.sample_chat_provider import _SampleChatProvider
-from mitocode.backend.tool.tool_manager import ToolManager
+from mitocode.core.agent.agent_state import AgentState
+from mitocode.core.chat_provider.sample_chat_provider import _SampleChatProvider
+from mitocode.core.tool.tool_manager import ToolManager
 
 TOOL_NAME_WEATHER = "get_weather"
 CALL_ID_PRIMARY = "call_001"
@@ -31,7 +31,7 @@ CALL_ID_SECONDARY = "call_002"
 VALID_JSON_ARGS = '{"city": "Beijing"}'
 INVALID_JSON_ARGS = "{这不是JSON"
 LIST_JSON_ARGS = "[1, 2]"
-LOGGER_PATCH_TARGET = "mitocode.backend.agent.agent_session.logger"
+LOGGER_PATCH_TARGET = "mitocode.core.agent.agent_session.logger"
 
 
 # ──────────────────────────────────────────────

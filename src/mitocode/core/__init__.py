@@ -1,6 +1,6 @@
 """Backend layer for MitoCode"""
 
-from mitocode.backend.agent import (
+from mitocode.core.agent import (
     AgentNode,
     AgentOrchestrator,
     AgentRuntime,
@@ -11,7 +11,7 @@ from mitocode.backend.agent import (
     ToolSpec,
     declare_tool,
 )
-from mitocode.backend.bridge import EventBridge
+from mitocode.core.bridge import EventBridge
 
 __all__ = [
     "AgentNode",

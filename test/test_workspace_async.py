@@ -5,8 +5,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mitocode.backend.workspace.workspace import Workspace
-from mitocode.backend.workspace.migration import BasicMigration
+from mitocode.core.workspace.workspace import Workspace
+from mitocode.core.workspace.migration import BasicMigration
 
 
 @pytest.mark.asyncio

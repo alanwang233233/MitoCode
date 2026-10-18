@@ -1,6 +1,6 @@
 """Lifecycle management for the set of configured MCP servers.
 
-:class:`McpManager` owns one :class:`~mitocode.backend.mcp.mcp_client.McpClient`
+:class:`McpManager` owns one :class:`~mitocode.core.mcp.mcp_client.McpClient`
 per configured server and decides when each of them starts, refreshes and
 stops.  It takes no interest in what those tools look like: registration is
 delegated to :meth:`ToolManager.register_mcp_client`, which namespaces each
@@ -33,18 +33,18 @@ from typing import (
 
 from loguru import logger as loguru_logger
 
-from mitocode.backend.exception.mitocode_exception import MitoCodeMcpConfigError
-from mitocode.backend.mcp.mcp_client import McpClient, _scrub_endpoint
-from mitocode.backend.mcp.mcp_config import McpServerConfig
+from mitocode.core.exception.mitocode_exception import MitoCodeMcpConfigError
+from mitocode.core.mcp.mcp_client import McpClient, _scrub_endpoint
+from mitocode.core.mcp.mcp_config import McpServerConfig
 
 if TYPE_CHECKING:
     # The tool layer is reached only through the object handed in, never by
     # importing it: the dependency runs one way, tool_manager -> mcp.  A runtime
-    # import here would make mitocode.backend.mcp unimportable on its own and
+    # import here would make mitocode.core.mcp unimportable on its own and
     # would break the symmetry with tool_manager's own TYPE_CHECKING guard for
     # McpClient.  The annotation is quoted because this module has no
     # `from __future__ import annotations`, so annotations are evaluated.
-    from mitocode.backend.tool.tool_manager import ToolManager
+    from mitocode.core.tool.tool_manager import ToolManager
 
 logger = loguru_logger.bind(name=__name__)
 
@@ -185,8 +185,8 @@ class McpManager:
 
         The tool registry is held as a duck-typed object: the module never
         imports the tool layer, so any object exposing
-        :meth:`~mitocode.backend.tool.tool_manager.ToolManager.register_mcp_client`
-        and :meth:`~mitocode.backend.tool.tool_manager.ToolManager.unregister`
+        :meth:`~mitocode.core.tool.tool_manager.ToolManager.register_mcp_client`
+        and :meth:`~mitocode.core.tool.tool_manager.ToolManager.unregister`
         will do.
 
         Args:

@@ -25,8 +25,8 @@ from typing import Any, Dict, List, Optional
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-from mitocode.backend.exception.mitocode_exception import MitoCodeMcpToolCallError
-from mitocode.backend.mcp.mcp_config import McpServerConfig
+from mitocode.core.exception.mitocode_exception import MitoCodeMcpToolCallError
+from mitocode.core.mcp.mcp_config import McpServerConfig
 
 #: Stands in for an argument payload that has been cut out of error text.
 _REDACTED = "<redacted>"
@@ -113,7 +113,7 @@ def _scrub_endpoint(text: str) -> str:
 
     A remote MCP endpoint may legitimately carry a secret in its userinfo, its
     query string or its fragment — ``?access_token=…`` is common enough that
-    :class:`~mitocode.backend.mcp.mcp_config.McpServerConfig` has to accept it
+    :class:`~mitocode.core.mcp.mcp_config.McpServerConfig` has to accept it
     — and a handshake failure routinely quotes the endpoint it was made
     against, in text that reaches the TUI error pane and the log.  The MCP SDK
     strips the same parts from the URLs *it* builds, but nothing strips them

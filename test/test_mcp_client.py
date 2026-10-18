@@ -13,14 +13,14 @@ from fastmcp.exceptions import ToolError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mitocode.backend.exception.mitocode_exception import MitoCodeMcpToolCallError
-from mitocode.backend.mcp.mcp_client import (
+from mitocode.core.exception.mitocode_exception import MitoCodeMcpToolCallError
+from mitocode.core.mcp.mcp_client import (
     McpClient,
     McpConnectionState,
     _redact_arguments,
     _scrub_endpoint,
 )
-from mitocode.backend.mcp.mcp_config import McpServerConfig
+from mitocode.core.mcp.mcp_config import McpServerConfig
 
 
 def _server() -> FastMCP:
@@ -323,7 +323,7 @@ async def test_connect_failure_never_echoes_a_credential_in_the_endpoint():
     ``McpServerConfig`` deliberately permits ``?access_token=…``, and a server
     or proxy that fails the handshake routinely quotes the endpoint it was
     called on — including its query string.  That text ends up in ``last_error``,
-    which :meth:`~mitocode.backend.mcp.mcp_manager.McpManager.status` publishes
+    which :meth:`~mitocode.core.mcp.mcp_manager.McpManager.status` publishes
     verbatim and the TUI pane an operator reads.  The scrubbing is therefore
     pinned against a *real* transport, not a hand-written exception: the
     assertion has to survive whatever the MCP SDK chooses to put in the message.

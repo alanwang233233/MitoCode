@@ -1,6 +1,6 @@
 """AgentRuntime 模块单元测试套件。
 
-覆盖 src/mitocode/backend/agent/agent_runtime.py 的全部行为分支：
+覆盖 src/mitocode/core/agent/agent_runtime.py 的全部行为分支：
 _invoke_tool / _invoke_on_end 的协程与线程分发规则、run() 主循环的
 文本流式事件、按 index 聚合并行工具调用、分片 id/name 同步、
 工具执行五分支（解析失败/未注册/TypeError/异常/成功）、on_end 回调时序、
@@ -18,9 +18,9 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mitocode.backend.agent.agent_runtime import AgentRuntime
-from mitocode.backend.agent.agent_session import AgentSession
-from mitocode.backend.chat_provider.sample_chat_provider import _SampleChatProvider
+from mitocode.core.agent.agent_runtime import AgentRuntime
+from mitocode.core.agent.agent_session import AgentSession
+from mitocode.core.chat_provider.sample_chat_provider import _SampleChatProvider
 
 # ──────────────────────────────────────────────
 # 常量

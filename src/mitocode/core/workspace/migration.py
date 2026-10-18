@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Union, Callable, Awaitable
 from mitocode import APP_VERSION, MITOCODE_CONFIG_PATH
-from mitocode.backend.exception.mitocode_exception import (
+from mitocode.core.exception.mitocode_exception import (
     MitoCodeWorkspaceInitError,
     MitoCodePathConvertError,
     MitoCodeMigrateError,

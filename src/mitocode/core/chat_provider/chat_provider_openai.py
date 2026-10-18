@@ -6,7 +6,7 @@ from openai import AsyncOpenAI
 from openai.pagination import AsyncPage
 from openai.types import Model
 
-from mitocode.backend.exception.mitocode_exception import (
+from mitocode.core.exception.mitocode_exception import (
     MitoCodeChatProviderModelError,
 )
 from .sample_chat_provider import _SampleChatProvider

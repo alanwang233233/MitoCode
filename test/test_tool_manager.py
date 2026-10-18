@@ -12,11 +12,11 @@ from loguru import logger as loguru_logger
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mitocode.backend.agent.agent_session import AgentSession
-from mitocode.backend.agent.session_factory import SessionFactory
-from mitocode.backend.chat_provider.sample_chat_provider import _SampleChatProvider
-from mitocode.backend.exception.mitocode_exception import MitoCodeToolDefinitionError
-from mitocode.backend.tool.tool_manager import (
+from mitocode.core.agent.agent_session import AgentSession
+from mitocode.core.agent.session_factory import SessionFactory
+from mitocode.core.chat_provider.sample_chat_provider import _SampleChatProvider
+from mitocode.core.exception.mitocode_exception import MitoCodeToolDefinitionError
+from mitocode.core.tool.tool_manager import (
     MAX_TOOL_NAME_LENGTH,
     MCP_TOOL_PREFIX,
     MCP_TOOL_SEPARATOR,
@@ -62,12 +62,12 @@ def leaked():
     return sorted(
         m
         for m in sys.modules
-        if m.split(".")[0] in ("fastmcp", "mcp") or m.startswith("mitocode.backend.mcp")
+        if m.split(".")[0] in ("fastmcp", "mcp") or m.startswith("mitocode.core.mcp")
     )
 
 
 sys.meta_path.insert(0, _BlockMcpSdk())
-import mitocode.backend.tool.tool_manager as tool_manager
+import mitocode.core.tool.tool_manager as tool_manager
 
 assert not leaked(), f"mcp package imported at import time: {leaked()}"
 
@@ -1020,7 +1020,7 @@ def test_register_mcp_client_registers_nothing_from_an_empty_catalogue():
     manager = ToolManager()
     client = _fake_mcp_client("files", [])
 
-    with mock.patch("mitocode.backend.tool.tool_manager.logger") as fake_logger:
+    with mock.patch("mitocode.core.tool.tool_manager.logger") as fake_logger:
         specs = manager.register_mcp_client(client)
 
     assert specs == [], "an empty catalogue yields no specs"
@@ -1078,7 +1078,7 @@ def test_register_mcp_client_warns_and_keeps_the_existing_tool_on_collision():
         return "builtin"
 
     client = _fake_mcp_client("files", [_fake_tool("read", description="remote")])
-    with mock.patch("mitocode.backend.tool.tool_manager.logger") as fake_logger:
+    with mock.patch("mitocode.core.tool.tool_manager.logger") as fake_logger:
         specs = manager.register_mcp_client(client)
 
     assert specs == [], "a colliding tool is not registered"
@@ -1093,7 +1093,7 @@ def test_register_mcp_client_does_not_warn_when_every_name_is_free():
     manager = ToolManager()
     client = _fake_mcp_client("files", [_fake_tool("read", description="remote")])
 
-    with mock.patch("mitocode.backend.tool.tool_manager.logger") as fake_logger:
+    with mock.patch("mitocode.core.tool.tool_manager.logger") as fake_logger:
         specs = manager.register_mcp_client(client)
 
     assert len(specs) == 1, "the tool was registered"

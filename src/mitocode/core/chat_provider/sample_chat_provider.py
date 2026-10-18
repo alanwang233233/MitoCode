@@ -7,7 +7,7 @@ Subclasses implement provider-specific logic for connecting to LLM APIs.
 from abc import abstractmethod, ABC
 from typing import List, Dict, Optional, Any, AsyncGenerator
 
-from mitocode.backend.exception.mitocode_exception import (
+from mitocode.core.exception.mitocode_exception import (
     MitoCodeChatProviderConfigError,
 )
 

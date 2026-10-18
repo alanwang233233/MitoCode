@@ -11,21 +11,21 @@ from loguru import logger as loguru_logger
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mitocode.backend.exception.mitocode_exception import MitoCodeMcpConfigError
-from mitocode.backend.mcp.mcp_client import McpClient, McpConnectionState
-from mitocode.backend.mcp.mcp_config import McpServerConfig, McpServerKind
-from mitocode.backend.mcp.mcp_manager import McpManager, McpServerStatus
-from mitocode.backend.tool.tool_manager import ToolManager
+from mitocode.core.exception.mitocode_exception import MitoCodeMcpConfigError
+from mitocode.core.mcp.mcp_client import McpClient, McpConnectionState
+from mitocode.core.mcp.mcp_config import McpServerConfig, McpServerKind
+from mitocode.core.mcp.mcp_manager import McpManager, McpServerStatus
+from mitocode.core.tool.tool_manager import ToolManager
 
 #: Imports the ``mcp`` package in a process where the tool layer cannot be
 #: resolved at all, so the one-way ``mcp`` -> (never) ``tool_manager``
 #: dependency is checked for real rather than by reading the source.
 #:
-#: Both ``mitocode`` and ``mitocode.backend`` are stubbed as bare packages:
+#: Both ``mitocode`` and ``mitocode.core`` are stubbed as bare packages:
 #: their real ``__init__`` files re-export the agent layer, which imports
 #: ``tool_manager`` itself, so a real import of either parent would prove
 #: nothing about the module under test.  The stubs carry only ``__path__``,
-#: which is what lets ``mitocode.backend.mcp`` load from disk as usual.
+#: which is what lets ``mitocode.core.mcp`` load from disk as usual.
 _IMPORT_WITHOUT_TOOL_LAYER = """
 import importlib.abc
 import os
@@ -39,7 +39,7 @@ class _BlockToolLayer(importlib.abc.MetaPathFinder):
     \"\"\"Make the whole tool layer unimportable, however it is reached.\"\"\"
 
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.startswith("mitocode.backend.tool"):
+        if fullname.startswith("mitocode.core.tool"):
             raise ImportError(f"{fullname} is not importable here")
         return None
 
@@ -57,15 +57,15 @@ def _stub_package(name, path):
 
 
 _stub_package("mitocode", SRC_DIR)
-_stub_package("mitocode.backend", os.path.join(SRC_DIR, "mitocode", "backend"))
+_stub_package("mitocode.core", os.path.join(SRC_DIR, "mitocode", "core"))
 sys.meta_path.insert(0, _BlockToolLayer())
 
-import mitocode.backend.mcp as mcp
+import mitocode.core.mcp as mcp
 
 
 def leaked():
     \"\"\"List the tool-layer modules this import dragged in.\"\"\"
-    return sorted(m for m in sys.modules if m.startswith("mitocode.backend.tool"))
+    return sorted(m for m in sys.modules if m.startswith("mitocode.core.tool"))
 
 
 assert not leaked(), f"importing the mcp package pulled in the tool layer: {leaked()}"
@@ -1561,7 +1561,7 @@ async def test_status_before_start_reports_a_disconnected_server():
 
 def test_mcp_package_exports_the_manager_and_its_neighbours():
     """Every name in ``__all__`` resolves; a stale entry is a failed import."""
-    from mitocode.backend import mcp
+    from mitocode.core import mcp
 
     assert mcp.McpManager is McpManager
     assert mcp.McpServerStatus is McpServerStatus
@@ -1584,7 +1584,7 @@ def test_mcp_package_imports_without_the_tool_layer():
 
     The plan fixes the dependency direction: ``mcp`` never imports
     ``tool_manager``.  A reference kept under ``TYPE_CHECKING`` is invisible to
-    this probe, which is why the block covers the whole ``mitocode.backend.tool``
+    this probe, which is why the block covers the whole ``mitocode.core.tool``
     package rather than one name.
     """
     result = _run_import_probe(_IMPORT_WITHOUT_TOOL_LAYER)

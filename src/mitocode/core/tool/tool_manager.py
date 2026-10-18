@@ -34,12 +34,12 @@ except ImportError:
     types = None
     UnionType = Union
 
-from mitocode.backend.exception.mitocode_exception import MitoCodeToolDefinitionError
+from mitocode.core.exception.mitocode_exception import MitoCodeToolDefinitionError
 
 if TYPE_CHECKING:
     # Imported for type checking only.  The runtime stays on duck typing so
     # this module keeps importing in an environment without fastmcp installed.
-    from mitocode.backend.mcp.mcp_client import McpClient
+    from mitocode.core.mcp.mcp_client import McpClient
 
 logger = loguru_logger.bind(name=__name__)
 
