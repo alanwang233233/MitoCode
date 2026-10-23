@@ -5,7 +5,10 @@ Every tool here begins the same way: resolve the path through
 then do all of the blocking I/O inside :func:`asyncio.to_thread`.  Failures
 come back as prose beginning ``"Error: "`` rather than as exceptions, because
 ``AgentRuntime`` feeds a tool's return value straight back to the model and a
-sentence can be routed around where a traceback cannot.
+sentence can be routed around where a traceback cannot.  The single-file
+tools -- Read, Write and Edit -- refuse a resolved target that is not a
+regular file before opening anything: ``read_text`` on a named pipe would
+block the worker thread forever, and no result is worth a leaked thread.
 
 The function names are ``read``, ``write``, ``edit``, ``glob_files`` and
 ``grep_files`` -- deliberately *not* ``glob`` and ``grep``, because
@@ -20,16 +23,24 @@ including the ``enum`` that ``Literal`` produces for ``output_mode``.
 
 **Containment is decided in exactly one place.**
 :func:`~mitocode.core.tool.builtin.paths.resolve` is the sole authority on
-whether a path may be operated on: an in-root path comes back without the
-approver being consulted, and an escape -- an explicit outside path, or an
-in-root symlink that resolves out of the workspace -- is submitted to the
-approver exactly once, and its verdict is final.  This module adds no second
-check: a symlink pointing out of the workspace is an escape like any other,
-decided by the approver, and an approver that allows an escape makes these
-tools operate on the resolved outside path.  Re-checking containment here
-would override that verdict, leaving the approver's decision inert for all
-five tools -- a future interactive approver could never grant an out-of-root
-file operation, because the tools would refuse it whatever the dialog said.
+whether a *requested* path may be operated on: an in-root path comes back
+without the approver being consulted, and an escape -- an explicit outside
+path, or an in-root symlink that resolves out of the workspace -- is
+submitted to the approver exactly once, and its verdict is final.  This
+module adds no second check on a requested path: a symlink pointing out of
+the workspace is an escape like any other, decided by the approver, and an
+approver that allows an escape makes these tools operate on the resolved
+outside path.  Re-checking containment here would override that verdict,
+leaving the approver's decision inert for all five tools -- a future
+interactive approver could never grant an out-of-root file operation,
+because the tools would refuse it whatever the dialog said.  That claim is
+scoped to requested paths, and the walker is the known asymmetry: the same
+out-of-workspace symlink that sends ``read("link.txt")`` to the approver is
+silently dropped by ``grep_files`` and ``glob_files`` with no approver call
+at all, because the walker's containment comparison
+(:func:`~mitocode.core.tool.builtin.file_walker._iter_files`)
+scopes what the walk *enumerates* -- it can only omit a candidate, never
+operate outside one.
 
 **Write refuses to overwrite, and Edit exists because of it.**  A model that
 rewrote a 400-line file to change one function cannot tell from a success
@@ -43,10 +54,13 @@ substring of ``new_string``, while ``str.replace`` never rescans what it has
 produced and terminates by construction.
 
 **The gitignore support is minimal and must never be described as more.**
-``Glob`` and ``Grep`` share one walker, :func:`_iter_files`, which always
+``Glob`` and ``Grep`` share one walker,
+:func:`~mitocode.core.tool.builtin.file_walker._iter_files`, which always
 prunes ``.git``, ``.hg``, ``.svn`` and ``__pycache__``, prunes dot-directories
 -- unless the caller's pattern itself starts with a dot, which unlocks them
-through :meth:`_Ignore.with_hidden_directories` -- never follows a directory
+through
+:meth:`~mitocode.core.tool.builtin.file_walker._Ignore.with_hidden_directories`
+-- never follows a directory
 symlink, and honours a single ``.gitignore`` at the walk root with per-line
 :func:`fnmatch.fnmatch` matching and ``!`` negation, last match winning so
 ``!keep.log`` after ``*.log`` negates correctly.  There is no ``pathspec``
@@ -56,8 +70,9 @@ anchoring.  ``fnmatch`` has no dotfile exception, so a bare ``*`` matches a
 dot-file's basename; dot *directories* are what get pruned.
 
 **Binary files are recognised by a NUL byte in the first 8 KiB**
-(:func:`_is_binary`) and are never fed to the regex: ``Grep`` skips them,
-noting ``[binary]`` in content mode where a silent skip would be invisible.
+(:func:`~mitocode.core.tool.builtin.file_walker._is_binary`) and are never
+fed to the regex: ``Grep`` skips them, noting ``[binary]`` in content mode
+where a silent skip would be invisible.
 An invalid regex falls back to a substring match, not a crash.
 
 **Every result is clamped** to ``ToolContext.max_output_chars`` via
@@ -71,259 +86,74 @@ them all.
 
 import asyncio
 import difflib
-import os
 import re
+import stat
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Iterator, List, Literal, Optional, Sequence, Tuple
+from typing import List, Literal, Optional, Tuple
 
 from mitocode.core.tool.builtin.context import clamp, current
 from mitocode.core.tool.builtin.errors import tool_boundary
+from mitocode.core.tool.builtin.file_walker import (
+    BINARY_SNIFF_BYTES,
+    _is_binary,
+    _iter_files,
+    _load_ignore,
+    _rel_posix,
+)
 from mitocode.core.tool.builtin.paths import resolve
 
-#: Directories never entered, whatever the pattern or the ``.gitignore`` says.
-#: These are version-control internals and bytecode caches: nothing an agent
-#: reads there is useful, and walking them is pure cost.
-ALWAYS_SKIP_DIRECTORIES = frozenset({".git", ".hg", ".svn", "__pycache__"})
-
-#: How many leading bytes :func:`_is_binary` inspects for a NUL byte.  Eight
-#: kilobytes is enough for the magic numbers of every common binary format
-#: while keeping the sniff cheap on a large tree.
-BINARY_SNIFF_BYTES = 8192
-
-#: One parsed line of a ``.gitignore``: the fnmatch pattern, and whether the
-#: line was negated with a leading ``!``.
-IgnoreRule = Tuple[str, bool]
+#: The byte cap on a whole-file Read.  ``read``'s ``limit`` caps *lines* and
+#: is applied only after the file is in memory, so on its own a read of a
+#: multi-gigabyte file would be loaded whole and then sliced down to a few
+#: thousand lines.  A regular file whose size exceeds this cap is refused
+#: from its ``st_size`` alone, before anything is read.  Ten mebibytes is
+#: comfortably above any legitimate window -- 2000 lines of even 5 KiB each
+#: is 10 MiB -- and bounds a single read's worst case to a fraction of the
+#: spike the cap exists to prevent.
+MAX_READ_BYTES = 10 * 1024 * 1024
 
 
-class _Ignore:  # pylint: disable=too-few-public-methods
-    """The minimal gitignore matcher shared by Glob and Grep.
+def _kind_noun(mode: int) -> str:
+    """Name the filesystem object a ``st_mode`` describes, for refusal prose.
 
-    Holds ``(pattern, negated)`` pairs loaded from a single ``.gitignore`` at
-    a walk root, matched with :func:`fnmatch.fnmatch` against the basename
-    for bare patterns and against the relative posix path for patterns
-    containing ``/``.  *Not* gitignore semantics: no nested files, no
-    ``**``, no directory-only rules, no anchoring.
-
-    Attributes:
-        prune_hidden_dirs: Whether dot-directories are pruned during the
-            walk.  True by default -- the minimal reading skips them -- and
-            cleared when the caller's own pattern starts with a dot, which is
-            the one signal that the model is deliberately asking about
-            hidden files.
-    """
-
-    def __init__(
-        self, patterns: Sequence[IgnoreRule] = (), prune_hidden_dirs: bool = True
-    ) -> None:
-        """Store the rules and the hidden-directory policy.
-
-        Args:
-            patterns: The ``(pattern, negated)`` pairs, in file order; later
-                pairs override earlier ones.
-            prune_hidden_dirs: Whether dot-directories are pruned.  See the
-                class docstring.
-        """
-        self._patterns: List[IgnoreRule] = list(patterns)
-        self.prune_hidden_dirs = prune_hidden_dirs
-
-    def with_hidden_directories(self) -> "_Ignore":
-        """Return a copy that walks dot-directories instead of pruning them.
-
-        Returns:
-            A new :class:`_Ignore` carrying the same rules with
-            ``prune_hidden_dirs`` cleared.  A copy, not a mutation, because
-            whether hidden directories are walked is a per-request decision
-            and must not leak into a matcher another request reuses.
-        """
-        return _Ignore(self._patterns, prune_hidden_dirs=False)
-
-    def excludes(self, rel_path: str, name: str) -> bool:
-        """Decide whether a path is excluded, the last matching rule winning.
-
-        Last-match-wins is what makes negation usable: for ``*.log`` followed
-        by ``!keep.log``, a candidate named ``keep.log`` is matched by both
-        rules in order and the negated one, being last, decides.  A pattern
-        containing ``/`` is matched against the relative path; bare patterns
-        match the basename, so ``*.log`` matches at any depth.
-
-        Args:
-            rel_path: The candidate's path relative to the walk root, in
-                posix form (``src/a.py``).  Only consulted for patterns that
-                contain a slash.
-            name: The candidate's basename (``a.py``).
-
-        Returns:
-            True when the last matching rule excludes the candidate, False
-            when no rule matches or the last match negates the exclusion.
-        """
-        excluded = False
-        for pattern, negated in self._patterns:
-            if "/" in pattern:
-                hit = fnmatch(rel_path, pattern)
-            else:
-                hit = fnmatch(name, pattern)
-            if hit:
-                excluded = not negated
-        return excluded
-
-
-def _load_ignore(root: Path) -> _Ignore:
-    """Parse the ``.gitignore`` at *root*, or return an empty matcher.
-
-    Only the file at the walk root is read; nested ``.gitignore`` files are
-    part of full gitignore semantics and are deliberately not supported.
-    Blank lines and ``#`` comments are skipped, a leading ``!`` marks the
-    rule as a negation, and any read failure yields the empty matcher: the
-    walk proceeds unfiltered rather than failing over an optional hint file.
+    The tools refuse non-regular files with a sentence that names the object
+    rather than the abstraction: "is a named pipe (fifo)" tells the model
+    what it hit and implies there is nothing to read, where a bare "not a
+    regular file" leaves it guessing between a directory (Glob lists that),
+    a fifo (nothing can) and a device.
 
     Args:
-        root: The walk root whose ``.gitignore`` should be loaded -- the
-            workspace root itself for the common ``path="."`` requests.
+        mode: A ``st_mode`` value from :meth:`pathlib.Path.stat` or
+            :meth:`pathlib.Path.lstat`.
 
     Returns:
-        An :class:`_Ignore` with one rule per meaningful line, in file order.
+        One of ``"a directory"``, ``"a named pipe (fifo)"``, ``"a socket"``,
+        ``"a character device"``, ``"a block device"``, ``"a symlink"`` or
+        ``"a non-regular file"``.
     """
-    rules: List[IgnoreRule] = []
-    try:
-        raw = (root / ".gitignore").read_text(encoding="utf-8", errors="replace")
-    except (OSError, ValueError):
-        # No file, unreadable file, or a path that cannot even be opened:
-        # the minimal matcher answers "nothing is excluded" rather than
-        # failing the whole walk over an optional hint file.
-        return _Ignore(rules)
-    for raw_line in raw.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        negated = line.startswith("!")
-        if negated:
-            line = line[1:].strip()
-        if not line:
-            continue
-        rules.append((line, negated))
-    return _Ignore(rules)
+    if stat.S_ISDIR(mode):
+        noun = "a directory"
+    elif stat.S_ISFIFO(mode):
+        noun = "a named pipe (fifo)"
+    elif stat.S_ISSOCK(mode):
+        noun = "a socket"
+    elif stat.S_ISCHR(mode):
+        noun = "a character device"
+    elif stat.S_ISBLK(mode):
+        noun = "a block device"
+    elif stat.S_ISLNK(mode):
+        # Reachable only from an lstat: a stat follows links, so a mode from
+        # stat() is never S_IFLNK.  Kept for completeness of the noun table.
+        noun = "a symlink"
+    else:
+        noun = "a non-regular file"
+    return noun
 
 
-def _is_binary(data: bytes) -> bool:
-    """Report whether *data* looks binary: a NUL byte in the first 8 KiB.
-
-    A NUL byte is the cheapest reliable signal: every text encoding a
-    workspace file is likely to use never produces one, while virtually
-    every binary format contains them early.  Encoding heuristics are
-    deliberately not attempted; they misfire, and treating compressed or
-    encrypted files as binary is correct anyway.
-
-    Args:
-        data: The bytes to sniff.  Callers normally pass the first
-            :data:`BINARY_SNIFF_BYTES` bytes of a file, but any prefix works.
-
-    Returns:
-        True when ``b"\\x00"`` appears within the sniffed prefix, False
-        otherwise.
-    """
-    return b"\x00" in data[:BINARY_SNIFF_BYTES]
-
-
-def _rel_posix(path: Path, root: Path) -> str:
-    """Return *path* relative to *root* as a posix-style string.
-
-    Used both for gitignore matching inside the walk and for rendering
-    paths in output and error messages, so a model always sees the same
-    shape it used to ask for the file.
-
-    Args:
-        path: The path to render, normally resolved and absolute.
-        root: The root to render against -- the walk root for matching, the
-            workspace root for display.
-
-    Returns:
-        ``src/a.py``-style text when *path* is inside *root*.  Falls back to
-        the absolute path when it is not -- possible only if the tree changed
-        mid-walk, or when *path* is an approved escape and genuinely lives
-        outside the root -- so no caller ever sees a wrong relative form.
-    """
-    try:
-        return path.relative_to(root).as_posix()
-    except ValueError:
-        return str(path)
-
-
-def _iter_files(root: Path, ignore: _Ignore) -> Iterator[Path]:
-    """Yield every regular file under *root* the minimal gitignore allows.
-
-    The shared walker behind Glob and Grep.  Sorted, so both tools present
-    deterministic output no matter how the filesystem orders its entries.
-    ``.git``, ``.hg``, ``.svn`` and ``__pycache__`` are never entered;
-    dot-directories are pruned unless *ignore* says otherwise; a directory
-    symlink is never descended into -- ``os.walk`` runs with
-    ``followlinks=False`` -- so the walk never leaves the tree it was
-    pointed at.
-
-    Every yielded candidate is re-checked for containment after
-    :meth:`pathlib.Path.resolve`: a file symlink that points outside the
-    walk root resolves outside and is skipped, because the walk enumerates
-    the tree rooted at *root* and nothing beyond it.  That scopes what the
-    walk reports; it is not a verdict on the requested path, which belongs
-    to :func:`~mitocode.core.tool.builtin.paths.resolve` alone.  Candidates
-    that are not regular files -- broken symlinks, fifos, devices -- are
-    skipped too, which keeps Grep from blocking forever on a named pipe.
-
-    Args:
-        root: The directory to walk, normally a resolved absolute path from
-            :func:`resolve`.
-        ignore: The matcher from :func:`_load_ignore`, possibly adjusted for
-            hidden directories by the caller.
-
-    Returns:
-        An iterator over the files, sorted by path.  The walk completes
-        before the iterator is returned; the tools call this inside
-        :func:`asyncio.to_thread`, so the eager walk runs off the loop.
-
-    Raises:
-        Nothing is expected: ``os.walk`` with the default error handler
-        ignores unreadable directories, and every per-candidate call is
-        guarded.
-    """
-    try:
-        boundary = root.resolve()
-    except (OSError, RuntimeError, ValueError):
-        boundary = root
-    found: List[Path] = []
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        here = Path(dirpath)
-        kept: List[str] = []
-        for name in dirnames:
-            if name in ALWAYS_SKIP_DIRECTORIES:
-                continue
-            if ignore.prune_hidden_dirs and name.startswith("."):
-                continue
-            child = here / name
-            if ignore.excludes(_rel_posix(child, root), name):
-                continue
-            kept.append(name)
-        # Pruning in place is what stops os.walk from descending; a plain
-        # `dirnames = kept` would leave the walk oblivious.
-        dirnames[:] = kept
-        for name in filenames:
-            candidate = here / name
-            if ignore.excludes(_rel_posix(candidate, root), name):
-                continue
-            if not candidate.is_file():
-                # Broken symlink, fifo, device: nothing a tool can read.
-                continue
-            try:
-                resolved = candidate.resolve()
-            except (OSError, RuntimeError, ValueError):
-                continue
-            if not resolved.is_relative_to(boundary):
-                continue
-            found.append(candidate)
-    found.sort()
-    return iter(found)
-
-
-def _read_sync(path: Path, display: str, offset: int, limit: int) -> str:
+def _read_sync(  # pylint: disable=too-many-return-statements
+    path: Path, display: str, offset: int, limit: int
+) -> str:
     """Read *path* and return its lines numbered from 1, or an error string.
 
     Runs inside :func:`asyncio.to_thread`.  Line numbers are absolute,
@@ -335,6 +165,15 @@ def _read_sync(path: Path, display: str, offset: int, limit: int) -> str:
     three different sentences, because collapsing them would hide which of
     the three happened.
 
+    Two guards run before anything is read, because :meth:`read_text` on the
+    wrong object either never comes back or comes back enormous.  A ``stat``
+    first refuses any target that is not a regular file -- a named pipe
+    would block this worker thread forever, the same fate the walker's
+    regular-file check saves Grep from -- and then refuses a regular file
+    larger than :data:`MAX_READ_BYTES` from its ``st_size`` alone, so a
+    multi-gigabyte file is never loaded whole into memory only to be sliced
+    down to a window afterwards.
+
     Args:
         path: The resolved file to read.
         display: The path as the model spelled it, for error messages.
@@ -344,13 +183,34 @@ def _read_sync(path: Path, display: str, offset: int, limit: int) -> str:
 
     Returns:
         The numbered lines joined with newlines and no trailing newline, or
-        a prose error beginning ``"Error: "``.  Never raises.
+        a prose error beginning ``"Error: "`` -- including the refusals for
+        a non-regular-file target and a file above the byte cap.  Never
+        raises.
     """
     if limit <= 0:
         return f"Error: read of {display}: limit must be at least 1, got {limit}."
     try:
+        info = path.stat()
+    except FileNotFoundError:
+        return f"Error: read failed: {display} does not exist."
+    except OSError as exc:
+        return f"Error: read failed on {display}: {exc}"
+    if not stat.S_ISREG(info.st_mode):
+        return (
+            f"Error: read refused: {display} is {_kind_noun(info.st_mode)}, "
+            f"not a regular file; only regular files can be read as text."
+        )
+    if info.st_size > MAX_READ_BYTES:
+        return (
+            f"Error: read refused: {display} is {info.st_size} bytes, above "
+            f"the {MAX_READ_BYTES}-byte read cap; a file this large is never "
+            f"loaded whole."
+        )
+    try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
+        # The stat above saw the file; a deletion in between is the same
+        # documented race every other check here shares.
         return f"Error: read failed: {display} does not exist."
     except OSError as exc:
         return f"Error: read failed on {display}: {exc}"
@@ -379,6 +239,10 @@ def _write_sync(path: Path, display: str, content: str) -> str:
     whole design: a success message for a destructive overwrite would look
     identical to one for a harmless create, and the model would learn
     nothing until the damage was unreadable.  Parents are created as needed.
+    A target that exists and is not a regular file is refused before any
+    open: the exists check below would refuse it anyway, but with advice
+    ("read the file and use Edit") that a fifo, socket or device cannot
+    follow, and writing through one would block or misbehave.
 
     Args:
         path: The resolved file to create.
@@ -393,6 +257,18 @@ def _write_sync(path: Path, display: str, content: str) -> str:
     """
     if path.is_dir():
         return f"Error: write refused: {display} is a directory."
+    if path.exists() and not path.is_file():
+        # The stat names the object for the message; if it vanishes between
+        # the exists() above and here -- the same race every check in this
+        # module shares -- the refusal still fires with a generic noun.
+        try:
+            kind = _kind_noun(path.stat().st_mode)
+        except OSError:
+            kind = "a non-regular file"
+        return (
+            f"Error: write refused: {display} is {kind}, not a regular "
+            f"file; Write only creates regular files."
+        )
     if path.exists() or path.is_symlink():
         # `is_symlink` too: a broken link reports exists() == False, but
         # writing through it would create the link's target elsewhere --
@@ -423,6 +299,11 @@ def _edit_sync(  # pylint: disable=too-many-return-statements
     (``a`` -> ``aa``), while ``str.replace`` terminates by construction
     because it never rescans what it has produced.
 
+    A ``stat`` refuses any target that is not a regular file before the
+    read, for the same reason Read refuses one: ``read_text`` on a named
+    pipe would block this worker thread forever, and Edit would then be
+    waiting to rewrite a file no replacement could describe.
+
     Every outcome is prose.  No match suggests the nearest lines via
     :func:`difflib.get_close_matches`; more than one match reports the count
     and points at ``replace_all``; success reports how many occurrences
@@ -440,7 +321,8 @@ def _edit_sync(  # pylint: disable=too-many-return-statements
 
     Returns:
         A sentence describing the replacement on success, or a prose error
-        beginning ``"Error: "``.  Never raises.
+        beginning ``"Error: "`` -- including the refusal for a
+        non-regular-file target.  Never raises.
     """
     if not old_string:
         return f"Error: edit on {display}: old_string must not be empty."
@@ -448,6 +330,18 @@ def _edit_sync(  # pylint: disable=too-many-return-statements
         return (
             f"Error: edit on {display}: new_string is identical to "
             f"old_string; nothing would change."
+        )
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return f"Error: edit failed: {display} does not exist."
+    except OSError as exc:
+        return f"Error: edit failed on {display}: {exc}"
+    if not stat.S_ISREG(info.st_mode):
+        return (
+            f"Error: edit on {display} refused: it is "
+            f"{_kind_noun(info.st_mode)}, not a regular file; Edit only "
+            f"rewrites regular files."
         )
     try:
         text = path.read_text(encoding="utf-8")
@@ -521,6 +415,11 @@ def _glob_sync(
         raises.
     """
     if not walk_root.is_dir():
+        if not walk_root.exists():
+            return (
+                f"Error: glob failed: {display_root} does not exist, so "
+                f"there is nothing to walk."
+            )
         return f"Error: glob on {display_root} failed: it is not a directory."
     ignore = _load_ignore(walk_root)
     if include_hidden:
@@ -563,6 +462,7 @@ def _line_matches(
     if case_insensitive:
         return needle in line.lower()
     return needle in line
+
 
 def _mode_entries(
     shown: str, matched: List[Tuple[int, str]], output_mode: str
@@ -658,8 +558,13 @@ def _grep_sync(  # pylint: disable=too-many-arguments,too-many-positional-argume
     Runs inside :func:`asyncio.to_thread`.  The pattern is compiled once;
     on :class:`re.error` the search falls back to a substring match, because
     an invalid regex is a model mistake the tools should absorb, not a
-    crash.  Files arrive from :func:`_iter_files` in sorted order, so
-    ``head_limit`` truncates a stable prefix.
+    crash.  Files arrive from
+    :func:`~mitocode.core.tool.builtin.file_walker._iter_files` in sorted
+    order, so
+    ``head_limit`` truncates a stable prefix; in ``files_with_matches``
+    mode the walk itself stops as soon as the budget is full, because one
+    output line per matching file means no later file can change the
+    result.
 
     Args:
         walk_root: The resolved directory to search.
@@ -681,6 +586,11 @@ def _grep_sync(  # pylint: disable=too-many-arguments,too-many-positional-argume
         ``"Error: "`` when nothing matched.  Never raises.
     """
     if not walk_root.is_dir():
+        if not walk_root.exists():
+            return (
+                f"Error: grep failed: {display_root} does not exist, so "
+                f"there is nothing to search."
+            )
         return f"Error: grep on {display_root} failed: it is not a directory."
     ignore = _load_ignore(walk_root)
     if include_hidden:
@@ -692,15 +602,27 @@ def _grep_sync(  # pylint: disable=too-many-arguments,too-many-positional-argume
     except re.error:
         compiled = None
     needle = pattern.lower() if case_insensitive else pattern
+    ceiling = max(head_limit, 0)
     entries: List[str] = []
     for candidate in _iter_files(walk_root, ignore):
         entries.extend(
             _grep_one_file(
-                candidate, base, glob_filter, compiled, needle,
-                case_insensitive, output_mode,
+                candidate,
+                base,
+                glob_filter,
+                compiled,
+                needle,
+                case_insensitive,
+                output_mode,
             )
         )
-    entries = entries[: max(head_limit, 0)]
+        if output_mode == "files_with_matches" and len(entries) >= ceiling:
+            # One output line per matching file, so once the budget is full
+            # no later file can change the output: stop walking instead of
+            # scanning the rest of the tree.  In content and count modes the
+            # per-file output is unbounded, so those still scan everything.
+            break
+    entries = entries[:ceiling]
     if not entries:
         return f"Error: no matches for '{pattern}' under {display_root}."
     return "\n".join(entries)
@@ -714,6 +636,15 @@ async def read(file_path: str, offset: int = 0, limit: int = 2000) -> str:
     1-indexed numbers, so paging through a large file shows each line with
     the same number every time; ``limit`` caps how many lines come back.
 
+    Two independent caps apply, and the model should know both exist.
+    ``limit`` is a *line* cap, applied to the file after it is read.  A
+    separate *byte* cap (:data:`MAX_READ_BYTES`, 10 MiB) refuses any regular
+    file larger than the cap outright, from its size alone and before
+    anything is read, so a multi-gigabyte file is never loaded whole only to
+    be sliced down to a window afterwards.  A target that is not a regular
+    file -- a named pipe, a directory -- is refused the same way, before any
+    open: reading a named pipe would never return at all.
+
     Args:
         file_path: The file to read, relative to the workspace root or
             absolute.  Resolved through the approval chokepoint; a path
@@ -724,12 +655,15 @@ async def read(file_path: str, offset: int = 0, limit: int = 2000) -> str:
             that says so, because an empty success would be
             indistinguishable from an empty file.
         limit: The maximum number of lines to return.  Must be at least 1.
+            Complementary to the byte cap: this bounds the window, the byte
+            cap bounds what is ever read into memory.
 
     Returns:
         The numbered lines joined with newlines, or a prose message
         beginning ``"Error: "`` for a missing file, an empty file, an
-        offset past the end, or a refused path -- missing and empty
-        produce different messages.  Never raises.
+        offset past the end, a non-regular-file target, a file above the
+        byte cap, or a refused path -- missing and empty produce different
+        messages.  Never raises.
     """
     ctx = current()
     path, error = await resolve(ctx, file_path, "read")
@@ -765,8 +699,9 @@ async def write(file_path: str, content: str) -> str:
     Returns:
         A sentence reporting the character count on success, or a prose
         error beginning ``"Error: "`` when the file already exists (naming
-        Edit as the tool to use), when the path is refused, or when the
-        write fails.  Never raises: anything unexpected is rendered by
+        Edit as the tool to use), when the target exists and is not a
+        regular file, when the path is refused, or when the write fails.
+        Never raises: anything unexpected is rendered by
         ``tool_boundary``.
     """
     ctx = current()
@@ -810,7 +745,8 @@ async def edit(
     Returns:
         A sentence describing the replacement -- how many occurrences and
         how the line count moved -- or a prose error beginning
-        ``"Error: "``.  Never raises.
+        ``"Error: "``, including the refusal for a target that is not a
+        regular file.  Never raises.
     """
     ctx = current()
     path, error = await resolve(ctx, file_path, "edit")
@@ -821,7 +757,11 @@ async def edit(
             else "Error: edit failed: the path could not be resolved."
         )
     text = await asyncio.to_thread(
-        _edit_sync, path, _rel_posix(path, ctx.root()), old_string, new_string,
+        _edit_sync,
+        path,
+        _rel_posix(path, ctx.root()),
+        old_string,
+        new_string,
         replace_all,
     )
     return clamp(text, ctx.max_output_chars)
@@ -889,10 +829,15 @@ async def grep_files(  # pylint: disable=too-many-arguments,too-many-positional-
 
     Walks the directory like Glob -- the same skips, the same minimal
     gitignore, the same binary and symlink guards -- and matches each line
-    of each file against *pattern*.  An invalid regex falls back to a
-    substring match rather than failing.  When nothing matches, the result
-    is an error string rather than empty output, so "no matches" is never
-    indistinguishable from a tool that did not run.
+    of each file against *pattern*.  The dot rule is *pattern's* own, not
+    the glob's: when *pattern* itself starts with a dot, dot-directories
+    are searched too, so ``grep_files(".env")`` widens the walk into hidden
+    directories while ``grep_files("foo")`` never searches ``.config/`` --
+    the same rule Glob states, applied to a regex, where it is far more
+    surprising.  An invalid regex falls back to a substring match rather
+    than failing.  When nothing matches, the result is an error string
+    rather than empty output, so "no matches" is never indistinguishable
+    from a tool that did not run.
 
     Args:
         pattern: The regular expression, or the literal text when the regex
@@ -907,7 +852,9 @@ async def grep_files(  # pylint: disable=too-many-arguments,too-many-positional-
             ``content`` emits ``path:lineno:line`` per matching line;
             ``count`` emits ``path:n`` per matching file.
         head_limit: The maximum number of output lines.  Non-positive
-            values truncate to none.
+            values truncate to none.  In ``files_with_matches`` mode the
+            walk stops early once this many paths are found; the other
+            modes scan every file.
         case_insensitive: Match without regard to case.
 
     Returns:
