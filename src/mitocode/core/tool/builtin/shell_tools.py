@@ -14,7 +14,8 @@ boundary.**  It tokenises the command and flags the tokens that *look like*
 they reach outside the workspace: a leading ``~``, an absolute path that
 resolves outside the root, a ``..`` climb.  It is bypassable by anyone who
 tries -- command substitution, variables, quoted whitespace, a flag with an
-attached path such as ``-I/usr/include``, a ``..`` buried mid-path -- and it
+attached path such as ``-I/usr/include``, a ``..`` buried mid-path, a
+redirection operator glued to its target such as ``2>/tmp/x`` -- and it
 is not a sandbox, and nothing in this module should ever be described as
 one.  Its purpose is to catch the model reaching outside the workspace *by
 mistake*, which is the overwhelmingly common case, and to route that case to
@@ -35,14 +36,16 @@ granting approver inert for this tool.  No workspace
 documented behaviour of
 :class:`~mitocode.core.tool.builtin.context.ToolContext`.
 
-**A timeout kills the process GROUP, not the shell.**  The subprocess is
-launched with ``start_new_session=True``, which makes it the leader of its
-own process group, and on expiry the whole group is signalled with
+**A timeout -- and a cancellation -- kill the process GROUP, not the
+shell.**  The subprocess is launched with ``start_new_session=True``, which
+makes it the leader of its own process group, and on expiry -- or when the
+tool's own task is cancelled, which is how ``AgentRuntime`` interrupts a
+running command -- the whole group is signalled with
 ``os.killpg(os.getpgid(...), SIGKILL)``.  A bare ``proc.kill()`` kills the
 shell and *only* the shell: a ``sleep 30`` it spawned survives the call,
 keeps running detached from the tool that started it, and leaks.  The group
-kill is the difference between a tool that times out and a tool that leaves
-strays behind.
+kill is the difference between a tool that ends -- by timeout or by
+cancellation -- and a tool that leaves strays behind.
 
 **The output is the child's own words, plus the exit code when it failed.**
 stdout and stderr are merged so nothing the command tried to say is lost,
@@ -76,9 +79,17 @@ from mitocode.core.tool.builtin.errors import tool_boundary
 #: (which includes newlines), ``;``, ``&`` and ``|``.  Splitting on the
 #: individual characters subsumes the two-character operators -- ``&&`` is a
 #: run of ``&``, ``||`` a run of ``|`` -- and also splits on a single ``&``
-#: (a backgrounded job) and on redirections such as ``2>&1``, which is
-#: harmless: the fragments on either side are not paths, and are not judged
-#: as if they were.
+#: (a backgrounded job).  Redirections are where the split is only half
+#: right.  ``2>&1`` is broken into ``2>`` and ``1``, and no misjudgment
+#: follows -- neither fragment is path-shaped, so neither is judged as if it
+#: were a path.  The reverse case is a blind spot: a redirection operator
+#: *glued* to its target survives the split as one token -- ``echo hi
+#: >/etc/passwd`` tokenises to ``>/etc/passwd`` and ``sort 2>/tmp/x`` to
+#: ``2>/tmp/x`` -- and a leading ``>`` or digit defeats the absolute-path
+#: rule in :func:`scan_for_escape`, so the target is never flagged.  That is
+#: not because splitting makes redirections harmless; it is one more shape
+#: the scan does not see, same class as a flag with an attached path, and it
+#: is listed in the bypass documentation rather than claimed away.
 _TOKEN_SEPARATORS = re.compile(r"[;&|\s]+")
 
 #: Seconds to wait for a killed process group to release its output pipes
@@ -121,7 +132,10 @@ def scan_for_escape(command: str, root: Path) -> Optional[str]:
     **This is a guardrail against accidental escapes, not a security
     boundary, and it is not a sandbox.**  It is bypassable by anyone who
     tries -- command substitution, variables, quoted whitespace, a ``..``
-    buried mid-path, a flag with an attached path -- and it exists to catch
+    buried mid-path, a flag with an attached path, a redirection operator
+    glued to its target (``echo hi >/etc/passwd`` produces the token
+    ``>/etc/passwd``, whose leading ``>`` defeats the absolute-path rule) --
+    and it exists to catch
     the model reaching outside the workspace *by mistake* and hand that case
     to the approver, never to stop a determined escapee.
 
@@ -218,6 +232,20 @@ async def bash(command: str, timeout: int = 120_000) -> str:
     children it spawned -- a backgrounded ``sleep``, a server it started --
     die with it instead of outliving the call.
 
+    Cancellation kills the group too.  Interrupting a running command is
+    done by cancelling the task the tool runs in -- that is how
+    ``AgentRuntime`` stops a turn -- so the ``CancelledError`` handler
+    signals the whole process group before re-raising, exactly as the
+    timeout path does.  The cancellation then propagates untouched
+    (``tool_boundary`` never catches ``BaseException``), which means there
+    is no result to attach output to: whatever the command printed before
+    it was killed is dropped on this path, and the reader task that was
+    collecting it is cancelled rather than awaited -- bounded, best-effort
+    cleanup, not a second result channel.  Like the reaper bound below,
+    this can leave the subprocess transport to be closed at garbage
+    collection, which surfaces as bounded ``Event loop is closed`` noise
+    from ``__del__`` at teardown; the kill itself always happens first.
+
     Args:
         command: The shell command line to run.  Interpreted by the shell,
             so pipes, redirection and quoting all work -- and so a command
@@ -239,9 +267,17 @@ async def bash(command: str, timeout: int = 120_000) -> str:
         A refused escape or a timeout is a failure of the tool and begins
         with ``"Error: "``: the refusal names the command, the workspace
         root and the token that was flagged; the timeout message says
-        ``"timed out"`` and names the command, and includes whatever the
-        command managed to print before it was killed.  Never raises:
-        anything unexpected is rendered by ``tool_boundary``.
+        ``"timed out"`` and names the command, and normally includes
+        whatever the command managed to print before it was killed --
+        normally, because collecting that output is bounded by a wait
+        (``_REAP_WAIT_SECONDS``) and when the bound expires -- a
+        grandchild that escaped the killed group into a session of its own
+        still holding the output pipe -- the printed output is dropped and
+        the message carries no output section at all.  The kill itself has
+        always happened by then either way.  Never raises for anything
+        unexpected -- that is rendered by ``tool_boundary`` -- and never
+        swallows a cancellation: the one deliberate escape is
+        ``CancelledError``, re-raised after the group kill (above).
     """
     ctx = current()
     root = ctx.root()
@@ -289,6 +325,31 @@ async def bash(command: str, timeout: int = 120_000) -> str:
         stdout_bytes, _ = await asyncio.wait_for(
             asyncio.shield(communicate), timeout / 1000
         )
+    except asyncio.CancelledError:
+        # The tool's own task was cancelled -- how AgentRuntime interrupts a
+        # running command -- and wait_for cancelled the shield wrapper, not
+        # the reader behind it.  Without this handler the cancellation would
+        # propagate with nothing signalling the group: the shell and every
+        # child it spawned would keep running detached from the tool, the
+        # exact stray-leaking failure the timeout path exists to prevent.
+        # Kill first, consume the orphaned reader, then re-raise; swallowing
+        # the cancellation instead would make a cancelled turn uncancellable,
+        # the same bug class errors.py exists to prevent.
+        _kill_group(proc.pid)
+        # The reader survived the shield's cancellation and is still running;
+        # cancel it so no task lingers pending on a loop that may be shutting
+        # down.  Its partial output is deliberately dropped -- a cancellation
+        # carries no result to attach it to -- and whatever ends the reader
+        # (its own cancellation, an unexpected error, even a second
+        # cancellation of this task arriving mid-await) must not replace the
+        # cancellation about to be re-raised: cleanup never outranks the
+        # signal.
+        communicate.cancel()
+        try:
+            await communicate
+        except BaseException:  # pylint: disable=broad-exception-caught
+            pass
+        raise
     except asyncio.TimeoutError:
         _kill_group(proc.pid)
         partial = b""
