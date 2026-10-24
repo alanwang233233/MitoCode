@@ -31,6 +31,7 @@ class AgentOrchestrator:
         self,
         tool_manager: ToolManager | None = None,
         default_provider: SampleChatProvider | ScenarioProvider | None = None,
+        default_system_prompt: str | None = None,
     ):
         self._sessions: Dict[int, AgentSession] = {}
         self._tasks: Dict[int, asyncio.Task | None] = {}
@@ -39,6 +40,7 @@ class AgentOrchestrator:
         self._default_provider: SampleChatProvider | ScenarioProvider | None = (
             default_provider
         )
+        self._default_system_prompt: str | None = default_system_prompt
         self._bridge = EventBridge(tool_manager)
         self.event_queue: asyncio.Queue = asyncio.Queue()
 
@@ -87,6 +89,12 @@ class AgentOrchestrator:
         if hasattr(provider, "turn"):
             provider = copy.deepcopy(provider)
             setattr(provider, "turn", 0)
+
+        # Sessions that do not name a system prompt inherit the orchestrator
+        # default, so sub-agents spawned through the Agent tool are covered
+        # too: they are created through this same method.
+        if "system_prompt" not in session_kwargs and self._default_system_prompt:
+            session_kwargs["system_prompt"] = self._default_system_prompt
 
         agent_id = self._counter
         self._counter += 1
@@ -139,6 +147,20 @@ class AgentOrchestrator:
             **session_kwargs,
         )
         return session.agent_id
+
+    def set_default_provider(
+        self, provider: SampleChatProvider | ScenarioProvider
+    ) -> None:
+        """Replace the provider used for future sessions.
+
+        Existing sessions keep the provider they were constructed with:
+        this only changes what :meth:`create_session` falls back to, so a
+        mid-conversation swap never mutates a running agent.
+
+        Args:
+            provider: The new default chat provider.
+        """
+        self._default_provider = provider
 
     async def destroy_agent(self, agent_id: int, _sync: bool = True) -> None:
         """Remove a session and all of its descendants.
