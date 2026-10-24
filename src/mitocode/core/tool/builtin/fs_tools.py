@@ -602,10 +602,9 @@ def _grep_sync(  # pylint: disable=too-many-arguments,too-many-positional-argume
     crash.  Files arrive from
     :func:`~mitocode.core.tool.builtin.file_walker._iter_files` in sorted
     order, so
-    ``head_limit`` truncates a stable prefix; in ``files_with_matches``
-    mode the walk itself stops as soon as the budget is full, because one
-    output line per matching file means no later file can change the
-    result.
+    ``head_limit`` truncates a stable prefix, and the walk itself stops as
+    soon as the budget is full: each file's output only appends, so in
+    every mode a later file can no longer change the kept prefix.
 
     Args:
         walk_root: The resolved directory to search.
@@ -657,11 +656,12 @@ def _grep_sync(  # pylint: disable=too-many-arguments,too-many-positional-argume
                 output_mode,
             )
         )
-        if output_mode == "files_with_matches" and len(entries) >= ceiling:
-            # One output line per matching file, so once the budget is full
-            # no later file can change the output: stop walking instead of
-            # scanning the rest of the tree.  In content and count modes the
-            # per-file output is unbounded, so those still scan everything.
+        if len(entries) >= ceiling:
+            # Files arrive in sorted order and each file's output only
+            # appends, so once the budget is full no later file can change
+            # the kept prefix -- in any mode.  Stop walking instead of
+            # scanning the rest of the tree and holding every match in
+            # memory only to drop it at the truncation below.
             break
     entries = entries[:ceiling]
     if not entries:
@@ -902,9 +902,9 @@ async def grep_files(  # pylint: disable=too-many-arguments,too-many-positional-
             ``content`` emits ``path:lineno:line`` per matching line;
             ``count`` emits ``path:n`` per matching file.
         head_limit: The maximum number of output lines.  Non-positive
-            values truncate to none.  In ``files_with_matches`` mode the
-            walk stops early once this many paths are found; the other
-            modes scan every file.
+            values truncate to none.  In every mode the walk stops early
+            once this many lines are found: the output is a sorted prefix,
+            so a later file can no longer change it.
         case_insensitive: Match without regard to case.
 
     Returns:

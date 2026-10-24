@@ -1292,6 +1292,42 @@ async def test_grep_head_limit_truncates_the_output(grep_tree):
 
 
 @pytest.mark.asyncio
+async def test_grep_stops_the_walk_once_the_budget_is_full(grep_tree, monkeypatch):
+    """Every output mode stops reading files once head_limit is reached.
+
+    The kept output is a prefix: files arrive sorted and each file's output
+    only appends, so once the budget is full no later file can change the
+    result in any mode.  The counter below proves the later files are never
+    even opened -- the walk stops instead of reading the whole tree only to
+    drop everything past the truncation.
+    """
+    import mitocode.core.tool.builtin.fs_tools as fs_module
+
+    _install(Workspace(grep_tree, "fs-tools-tests", 2), _RecordingApprover())
+    for n in range(6):
+        (grep_tree / f"{n}.txt").write_text(f"needle {n}\n", encoding="utf-8")
+
+    original = fs_module._grep_one_file
+    examined: list = []
+
+    def counting(candidate, *args, **kwargs):
+        examined.append(candidate.name)
+        return original(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(fs_module, "_grep_one_file", counting)
+
+    result = await grep_files("needle", output_mode="content", head_limit=2)
+
+    assert examined == [
+        "0.txt",
+        "1.txt",
+    ], f"only the files that fill the budget may be examined: {examined!r}"
+    assert (
+        result == "0.txt:1:needle 0\n1.txt:1:needle 1"
+    ), f"the output is the sorted prefix, unchanged by the early stop: {result!r}"
+
+
+@pytest.mark.asyncio
 async def test_grep_head_limit_below_one_yields_the_no_matches_error(grep_tree):
     """A non-positive head_limit truncates to nothing, which is the error."""
     _install(Workspace(grep_tree, "fs-tools-tests", 2), _RecordingApprover())
