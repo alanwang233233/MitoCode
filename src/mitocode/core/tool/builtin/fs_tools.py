@@ -86,6 +86,7 @@ them all.
 
 import asyncio
 import difflib
+import os
 import re
 import stat
 from fnmatch import fnmatch
@@ -528,6 +529,16 @@ def _grep_one_file(  # pylint: disable=too-many-arguments,too-many-positional-ar
                 if output_mode == "content":
                     return [f"{shown}: [binary]"]
                 return []
+            # Byte cap: refuse files larger than MAX_READ_BYTES before reading
+            # the rest, to avoid memory spikes on huge files.  This mirrors the
+            # cap in Read.
+            if handle.tell() == BINARY_SNIFF_BYTES:
+                # We only read the sniff bytes so far; check file size via stat
+                stat_result = os.fstat(handle.fileno())
+                if stat_result.st_size > MAX_READ_BYTES:
+                    if output_mode == "content":
+                        return [f"{shown}: [file too large, skipped]"]
+                    return []
             data = head + handle.read()
     except OSError:
         return []
@@ -838,6 +849,15 @@ async def grep_files(  # pylint: disable=too-many-arguments,too-many-positional-
     than failing.  When nothing matches, the result is an error string
     rather than empty output, so "no matches" is never indistinguishable
     from a tool that did not run.
+
+    Two independent caps apply, and the model should know both exist.
+    ``head_limit`` is a *line* cap on the number of output lines.  A
+    separate *byte* cap (:data:`MAX_READ_BYTES`, 10 MiB) refuses any regular
+    file larger than the cap outright, from its size alone and before
+    anything is read, so a multi-gigabyte file is never loaded whole only to
+    be scanned.  A target that is not a regular file -- a named pipe, a
+    directory -- is refused the same way, before any open: reading a named
+    pipe would never return at all.
 
     Args:
         pattern: The regular expression, or the literal text when the regex
