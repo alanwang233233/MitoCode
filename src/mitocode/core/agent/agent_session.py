@@ -170,7 +170,10 @@ class AgentSession:
             tool_schemas = user_tool_schemas
 
         self.provider = provider
+        self.system_prompt: str | None = settings.get("system_prompt", None)
         self.messages: List[_MessageBlock] = []
+        if self.system_prompt:
+            self.messages.append(_PlainTextMessageBlock("system", self.system_prompt))
         self.tools_map: Dict[str, Callable] = tools_map
         self.tool_schemas = tool_schemas
         self.tool_manager: ToolManager | None = tool_manager
@@ -200,6 +203,19 @@ class AgentSession:
         """Adds a user prompt to the context and clears any prior cancellation."""
         self._cancel_event.clear()  # Reset cancellation state before new run
         self.messages.append(_PlainTextMessageBlock("user", prompt))
+
+    def clear_context(self) -> None:
+        """Reset the conversation history, keeping the system prompt.
+
+        The message list is rebuilt from scratch: the system prompt block
+        survives (every session context starts with it) while every user,
+        assistant and tool message is dropped. Background task handles are
+        untouched — they live in the ToolContext registry, not in this
+        history.
+        """
+        self.messages = []
+        if self.system_prompt:
+            self.messages.append(_PlainTextMessageBlock("system", self.system_prompt))
 
     def append_assistant_delta(self, delta: str):
         """Appends streaming text chunks to the latest assistant message."""

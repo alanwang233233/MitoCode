@@ -220,13 +220,35 @@ def test_event_bridge_tool_call_result():
     }
 
 
+def test_event_bridge_tool_execution():
+    bridge = EventBridge()
+    result = bridge.adapt(
+        {"event": "agent.tool_call.execution", "name": "Bash", "args": {"command": "ls"}},
+        agent_id=2,
+    )
+    assert result == {
+        "type": "tool_execution",
+        "agent_id": 2,
+        "name": "Bash",
+        "args": {"command": "ls"},
+    }
+
+
+def test_event_bridge_turn_end():
+    bridge = EventBridge()
+    result = bridge.adapt(
+        {"event": "system.finished.standard", "reason": "stop"}, agent_id=3
+    )
+    assert result == {"type": "turn_end", "agent_id": 3, "reason": "stop"}
+
+
+def test_event_bridge_cancelled():
+    bridge = EventBridge()
+    result = bridge.adapt({"event": "system.cancelled"}, agent_id=4)
+    assert result == {"type": "cancelled", "agent_id": 4}
+
+
 def test_event_bridge_skips_internal():
     bridge = EventBridge()
-    assert bridge.adapt({"event": "system.cancelled"}, agent_id=1) is None
-    assert (
-        bridge.adapt(
-            {"event": "system.finished.standard", "reason": "stop"}, agent_id=1
-        )
-        is None
-    )
     assert bridge.adapt({"event": "system.finished.tool_calls"}, agent_id=1) is None
+    assert bridge.adapt({"event": "totally.unknown.event"}, agent_id=1) is None

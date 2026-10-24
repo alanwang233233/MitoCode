@@ -10,9 +10,13 @@ class EventBridge:
 
     Raw events (yielded by ``AgentRuntime.run()``) use internal event types
     such as ``agent.text`` or ``agent.tool_call.header``.  The TUI expects
-    ``token``, ``tool_call``, and ``tool_result`` type keys.  ``EventBridge``
-    performs this mapping and optionally enriches tool-call headers with
-    display metadata from a :class:`ToolManager`.
+    ``token``, ``tool_call``, and ``tool_result`` type keys; the interactive
+    CLI additionally consumes ``tool_execution`` (with the call's parsed
+    arguments), ``turn_end`` and ``cancelled`` — the old TUI's if/elif
+    chain ignores types it does not know, so the additive mappings are safe
+    for both consumers.  ``EventBridge`` performs this mapping and
+    optionally enriches tool-call headers with display metadata from a
+    :class:`ToolManager`.
     """
 
     def __init__(self, tool_manager: ToolManager | None = None):
@@ -76,5 +80,23 @@ class EventBridge:
                 "result": result,
                 "success": event.get("success", False),
             }
+
+        if event_type == "agent.tool_call.execution":
+            return {
+                "type": "tool_execution",
+                "agent_id": agent_id,
+                "name": event.get("name", ""),
+                "args": event.get("args", {}),
+            }
+
+        if event_type == "system.finished.standard":
+            return {
+                "type": "turn_end",
+                "agent_id": agent_id,
+                "reason": event.get("reason", ""),
+            }
+
+        if event_type == "system.cancelled":
+            return {"type": "cancelled", "agent_id": agent_id}
 
         return None

@@ -924,3 +924,45 @@ def _make_unfinished_plain_text() -> _PlainTextMessageBlock:
     block = _PlainTextMessageBlock("assistant", "半截输出")
     block.finished = False
     return block
+
+
+# ──────────────────────────────────────────────
+# 系统提示词注入与上下文清空
+# ──────────────────────────────────────────────
+
+
+def test_system_prompt_becomes_first_system_message(mock_provider):
+    """传入 system_prompt → 首个消息块为 system 角色."""
+    made = AgentSession(provider=mock_provider, system_prompt="SYS")
+    assert made.system_prompt == "SYS"
+    assert made.messages[0].role == "system"
+    assert made.messages[0].message == "SYS"
+
+
+def test_system_prompt_leads_standard_context(mock_provider):
+    """系统提示词 → 编译后的标准上下文首条为 system 消息."""
+    made = AgentSession(provider=mock_provider, system_prompt="SYS")
+    made.append_user_prompt("hi")
+    context = made.build_standard_context()
+    assert context[0] == {"role": "system", "content": "SYS"}
+    assert context[1] == {"role": "user", "content": "hi"}
+
+
+def test_clear_context_keeps_system_block(mock_provider):
+    """clear_context → 仅保留 system 块，其余历史全部清空."""
+    made = AgentSession(provider=mock_provider, system_prompt="SYS")
+    made.append_user_prompt("hi")
+    made.append_assistant_delta("hello")
+    made.clear_context()
+    assert len(made.messages) == 1
+    assert made.messages[0].role == "system"
+    assert made.build_standard_context() == [{"role": "system", "content": "SYS"}]
+
+
+def test_clear_context_without_system_prompt_empties_history(mock_provider):
+    """无系统提示词时 clear_context → 历史清空为空列表."""
+    made = AgentSession(provider=mock_provider)
+    made.append_user_prompt("hi")
+    made.clear_context()
+    assert made.messages == []
+    assert made.build_standard_context() == []
