@@ -97,17 +97,27 @@ manager = McpManager(
     tool_manager=tool_manager,
 )
 
-asyncio.run(manager.start())  # 连不上的 server 只丢自己的工具，不抛异常
 
-print(manager.status())
-# {'weather': McpServerStatus(state='connected', error='', tool_count=12),
-#  'files':   McpServerStatus(state='failed', error='MCPError: ...', tool_count=0)}
+async def main():
+    await manager.start()  # 连不上的 server 只丢自己的工具，不抛异常
 
-# agent 从这里开始就能看到 mcp__weather__get_forecast 之类的工具
-session = AgentSession(provider=provider, tool_manager=tool_manager)
+    print(manager.status())
+    # {'weather': McpServerStatus(state='connected', error='', tool_count=12),
+    #  'files':   McpServerStatus(state='failed', error='MCPError: ...', tool_count=0)}
+
+    # agent 从这里开始就能看到 mcp__weather__get_forecast 之类的工具
+    session = AgentSession(provider=provider, tool_manager=tool_manager)
+    # ... agent / TUI 的整个工作循环也在同一个循环里 ...
+
+    await manager.stop()  # 事件循环仍然活着，stdio 子进程的拆解受 shield 保护
+
+
+asyncio.run(main())
 ```
 
-`start()` **不会因为任何一个 server 失败而抛异常** —— 这正是这个模块存在的理由。
+`start()` **不会因为任何一个 server 失败而抛异常** —— 这正是这个模块存在的理由。注意
+`start()`、全部工作与 `stop()` 必须运行在**同一个**事件循环里：`asyncio.run()` 返回时会把
+循环关掉，stdio 传输在循环上跑的任务随之失效，`stop()` 的清理也不再受保护。
 
 ---
 
@@ -166,11 +176,13 @@ session = AgentSession(provider=provider, tool_manager=tool_manager)
 
 ```python
 cfg = McpServerConfig.parse("weather", {"url": "https://x/mcp"})
-cfg = McpServerConfig.parse_config({"mcpServers": {...}})   # -> list[McpServerConfig]
-transport = cfg.build_transport()                            # fastmcp transport 对象
+configs = McpServerConfig.parse_config({"mcpServers": {...}})  # -> list[McpServerConfig]
+transport = configs[0].build_transport()                       # fastmcp transport 对象
 ```
 
-`parse_config` 只接受带 `mcpServers` 包装的字典；重复的 server 名会被拒绝（报位置，不报值）。
+`parse_config` 只接受带 `mcpServers` 包装的字典。它收到的是**字典**：重复的键在 Python 构造
+字典时就已被覆盖，进到函数里已无重复可言，所以这个 API 无法拒绝重复的 server 名 ——
+配置源（JSON 文件等）中的键必须唯一。
 
 ### `McpClient` — `mcp_client.py`
 
@@ -178,7 +190,7 @@ transport = cfg.build_transport()                            # fastmcp transport
 
 ```python
 c = McpClient(cfg)
-await c.connect()            # -> bool，失败只记录不抛
+await c.connect()            # -> bool，失败只记录不抛；取消（CancelledError）除外，会传播
 c.state                      # McpConnectionState: DISCONNECTED | CONNECTED | FAILED
 c.last_error                 # 最近的失败原因（已脱敏），无错则 ""
 c.tools                      # connect() 缓存的工具对象列表
@@ -250,7 +262,10 @@ MitoCodeBaseError
 2. **`status()` 永远和注册表一致。** 已注册、可调用的工具不会被报成不存在；活着的 server
    不会被报成 `disabled`。
 3. **没有工具能活过 `stop()`。** 也没有哪个 server 的失败能拖垮另一个的工具。
-4. **凭据值不进入异常消息。** `status().error` 和所有异常都会进 TUI 错误面板和日志。
+4. **凭据值不进入异常消息。** 限定为**本代码生成或清洗过的**值 —— 配置校验期的配置值、
+   连接期的 endpoint、调用期的 pydantic 载荷（细节见[下节](#安全凭据不进入消息)）。
+   `status().error` 和所有异常都会进 TUI 错误面板和日志；server 自己返回的错误文本按
+   调用期契约**原样保留**，不在本保证范围内。
 5. **导入方向单向。** `mcp` 包不在运行时 import `tool_manager`。
 6. **取消是被传播的，不是被吞掉的** —— `start` / `stop` / `refresh` 都如此。
 
@@ -280,13 +295,27 @@ tool_manager = ToolManager()
 _register_builtin_tools(tool_manager)
 
 manager = McpManager(config, tool_manager=tool_manager)
-asyncio.run(manager.start())          # ← 必须在这里完成
 
-orchestrator = AgentOrchestrator(tool_manager=tool_manager, default_provider=provider)
-asyncio.run(orchestrator.create_agent(name="Main"))
-app = VibeFrontend(orchestrator=orchestrator)
-app.run()
+
+async def main():
+    await manager.start()  # ← 必须在创建任何 AgentSession 之前完成
+
+    orchestrator = AgentOrchestrator(tool_manager=tool_manager, default_provider=provider)
+    await orchestrator.create_agent(name="Main")
+    try:
+        # agent / TUI 的整个工作循环 —— 与 manager 同一个事件循环，这里从略
+        ...
+    finally:
+        # 取消是被传播的，关闭路径上用 shield 保护拆解
+        await asyncio.shield(manager.stop())
+
+
+asyncio.run(main())
 ```
+
+TUI（Textual）自带事件循环时，不必额外包一层 `asyncio.run`：把 `manager.start()` 挂在
+TUI 的启动路径、`stop()` 挂在关闭路径即可。关键是 `start()`、全部工作与 `stop()` 共用**同一个**
+循环，而不是各开各的 `asyncio.run`。
 
 `stop()` 挂在 TUI 关闭路径上时，因为取消是被传播的，`finally` 里应该
 `await asyncio.shield(manager.stop())`。
