@@ -10,6 +10,8 @@ from .agent_session import (
     _ToolResultMessageBlock,
 )
 
+from mitocode.core.tool.builtin.context import current_agent_id
+
 
 class AgentRuntime:
     """Stateless executor that streams LLM responses and runs tool calls.
@@ -193,6 +195,7 @@ class AgentRuntime:
                     elif func_name in session.tools_map:
                         tool_func = session.tools_map[func_name]
                         try:
+                            current_agent_id.set(session.agent_id)
                             result = await AgentRuntime._invoke_tool(
                                 tool_func, func_args
                             )
