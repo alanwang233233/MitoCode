@@ -60,7 +60,9 @@ UNKNOWN_AGENT_ID = -1
 #: background sub-agents, and a plain global would let a sub-agent's ``set``
 #: be observed by the main turn that spawned it.  ``ToolContext.max_sub_agent_depth``
 #: bounds the depth, but only the ContextVar keeps concurrent turns apart.
-current_agent_id: ContextVar[int] = ContextVar("current_agent_id", default=UNKNOWN_AGENT_ID)
+current_agent_id: ContextVar[int] = ContextVar(
+    "current_agent_id", default=UNKNOWN_AGENT_ID
+)
 
 
 @dataclass
@@ -240,4 +242,4 @@ def clamp(text: str, limit: int) -> str:
     # `text[len(text) - tail:]` rather than `text[-tail:]`: with tail == 0 the
     # latter is `text[0:]` -- the whole string, the opposite of what an empty
     # tail means.
-    return text[:head] + marker + text[len(text) - tail:]
+    return text[:head] + marker + text[len(text) - tail :]

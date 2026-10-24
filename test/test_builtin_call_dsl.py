@@ -39,7 +39,12 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mitocode.core.tool.builtin.call_dsl import _MAX_NAMES, ParsedCall, bind_arguments, parse_call
+from mitocode.core.tool.builtin.call_dsl import (
+    _MAX_NAMES,
+    ParsedCall,
+    bind_arguments,
+    parse_call,
+)
 from mitocode.core.tool.builtin.errors import MitoCodeBuiltinToolError
 from mitocode.core.tool.tool_manager import ToolManager, ToolSpec
 
@@ -120,7 +125,7 @@ def test_keyword_arguments():
 
 
 def test_nested_quotes_survive():
-    parsed = parse_call('Bash("echo \'hello world\'")')
+    parsed = parse_call("Bash(\"echo 'hello world'\")")
     assert parsed.args == ["echo 'hello world'"]
 
 
@@ -228,12 +233,12 @@ def test_code_execution_argument_is_rejected_at_the_literal_step(dsl):
         parse_call(dsl)
 
     message = str(excinfo.value)
-    assert "is not a literal value" in message, (
-        f"the argument must be refused by literal_eval, got: {message}"
-    )
-    assert "not a tool call" not in message, (
-        f"the AST shape is a legal call, so the shape gate must not be what refused it: {message}"
-    )
+    assert (
+        "is not a literal value" in message
+    ), f"the argument must be refused by literal_eval, got: {message}"
+    assert (
+        "not a tool call" not in message
+    ), f"the AST shape is a legal call, so the shape gate must not be what refused it: {message}"
     assert isinstance(excinfo.value.__cause__, ValueError), (
         f"literal_eval signals a non-literal node with ValueError, got "
         f"{type(excinfo.value.__cause__).__name__}"
@@ -258,15 +263,15 @@ def test_writing_payload_argument_performs_no_filesystem_write(template, canary_
     with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
         parse_call(dsl)
 
-    assert "is not a literal value" in str(excinfo.value), (
-        f"the write must be refused as a non-literal, got: {excinfo.value}"
-    )
-    assert canary_file.read_text(encoding="utf-8") == "original", (
-        "the payload's write() ran; the canary was overwritten"
-    )
-    assert sorted(path.name for path in canary_file.parent.iterdir()) == ["canary.txt"], (
-        "the payload created a file"
-    )
+    assert "is not a literal value" in str(
+        excinfo.value
+    ), f"the write must be refused as a non-literal, got: {excinfo.value}"
+    assert (
+        canary_file.read_text(encoding="utf-8") == "original"
+    ), "the payload's write() ran; the canary was overwritten"
+    assert sorted(path.name for path in canary_file.parent.iterdir()) == [
+        "canary.txt"
+    ], "the payload created a file"
 
 
 def test_exec_argument_does_not_import_a_module():
@@ -277,11 +282,13 @@ def test_exec_argument_does_not_import_a_module():
         parse_call('Bash(exec("import wave"))')
 
     new_modules = set(sys.modules) - modules_before
-    assert new_modules == set(), f"the payload's exec ran and imported {sorted(new_modules)}"
+    assert (
+        new_modules == set()
+    ), f"the payload's exec ran and imported {sorted(new_modules)}"
     assert "wave" not in sys.modules, "the payload's import statement actually executed"
-    assert isinstance(excinfo.value.__cause__, ValueError), (
-        "the refusal must come from literal_eval, not from a partially-run exec"
-    )
+    assert isinstance(
+        excinfo.value.__cause__, ValueError
+    ), "the refusal must come from literal_eval, not from a partially-run exec"
 
 
 def test_builtin_name_is_carried_through_as_an_inert_tool_name():
@@ -297,10 +304,12 @@ def test_builtin_name_is_carried_through_as_an_inert_tool_name():
     """
     parsed = parse_call('__import__("os")')
 
-    assert parsed.tool_name == "__import__", (
-        f"the callee name is forwarded verbatim, got {parsed.tool_name!r}"
-    )
-    assert parsed.args == ["os"], f"its argument is still literal-evaluated, got {parsed.args!r}"
+    assert (
+        parsed.tool_name == "__import__"
+    ), f"the callee name is forwarded verbatim, got {parsed.tool_name!r}"
+    assert parsed.args == [
+        "os"
+    ], f"its argument is still literal-evaluated, got {parsed.args!r}"
 
 
 def test_bytes_input_is_parsed_because_ast_accepts_bytes():
@@ -316,7 +325,9 @@ def test_bytes_input_is_parsed_because_ast_accepts_bytes():
     assert parsed.args == ["a"], f"got {parsed.args!r}"
 
 
-@pytest.mark.parametrize("bad", [None, 123, 4.5, ["x"]], ids=["none", "int", "float", "list"])
+@pytest.mark.parametrize(
+    "bad", [None, 123, 4.5, ["x"]], ids=["none", "int", "float", "list"]
+)
 def test_non_string_input_is_wrapped_as_a_builtin_error(bad):
     """A non-``str`` ``text`` surfaces as ``MitoCodeBuiltinToolError``.
 
@@ -331,16 +342,16 @@ def test_non_string_input_is_wrapped_as_a_builtin_error(bad):
         parse_call(bad)
 
     message = str(excinfo.value)
-    assert type(excinfo.value) is MitoCodeBuiltinToolError, (
-        f"nothing but the builtin error may escape, got {type(excinfo.value).__name__}"
-    )
+    assert (
+        type(excinfo.value) is MitoCodeBuiltinToolError
+    ), f"nothing but the builtin error may escape, got {type(excinfo.value).__name__}"
     assert "not a tool call" in message, f"got: {message}"
-    assert f"<{type(bad).__name__}>" in message, (
-        f"the message must name the offending value's type, got: {message}"
-    )
-    assert isinstance(excinfo.value.__cause__, TypeError), (
-        f"the original TypeError must be chained, got {type(excinfo.value.__cause__).__name__}"
-    )
+    assert (
+        f"<{type(bad).__name__}>" in message
+    ), f"the message must name the offending value's type, got: {message}"
+    assert isinstance(
+        excinfo.value.__cause__, TypeError
+    ), f"the original TypeError must be chained, got {type(excinfo.value.__cause__).__name__}"
 
 
 # ---------------------------------------------------------------------------
@@ -392,12 +403,12 @@ def test_non_call_shape_is_rejected_by_the_shape_gate(dsl):
 
     message = str(excinfo.value)
     assert "not a tool call" in message, f"shape rejection must say so, got: {message}"
-    assert "expected a call of the form" in message, (
-        f"the shape gate must be the one refusing this, got: {message}"
-    )
-    assert excinfo.value.__cause__ is None, (
-        "the shape gate raises directly; a chained cause would mean the parser failed first"
-    )
+    assert (
+        "expected a call of the form" in message
+    ), f"the shape gate must be the one refusing this, got: {message}"
+    assert (
+        excinfo.value.__cause__ is None
+    ), "the shape gate raises directly; a chained cause would mean the parser failed first"
 
 
 @pytest.mark.parametrize(
@@ -430,9 +441,9 @@ def test_non_name_callee_is_rejected(dsl):
 
     message = str(excinfo.value)
     assert "not a tool call" in message, f"got: {message}"
-    assert "callee must be a bare tool name" in message, (
-        f"the callee check must be the one refusing this, got: {message}"
-    )
+    assert (
+        "callee must be a bare tool name" in message
+    ), f"the callee check must be the one refusing this, got: {message}"
 
 
 @pytest.mark.parametrize(
@@ -486,12 +497,12 @@ def test_non_literal_argument_is_rejected_at_the_literal_step(dsl):
 
     message = str(excinfo.value)
     assert "is not a literal value" in message, f"got: {message}"
-    assert "at position 0" in message, (
-        f"the message must name which argument was refused, got: {message}"
-    )
-    assert isinstance(excinfo.value.__cause__, ValueError), (
-        f"literal_eval raises ValueError, got {type(excinfo.value.__cause__).__name__}"
-    )
+    assert (
+        "at position 0" in message
+    ), f"the message must name which argument was refused, got: {message}"
+    assert isinstance(
+        excinfo.value.__cause__, ValueError
+    ), f"literal_eval raises ValueError, got {type(excinfo.value.__cause__).__name__}"
 
 
 @pytest.mark.parametrize(
@@ -510,9 +521,9 @@ def test_double_star_unpacking_is_rejected_by_its_own_branch(dsl):
 
     message = str(excinfo.value)
     assert "not a tool call" in message, f"got: {message}"
-    assert "** unpacking is not supported" in message, (
-        f"the dedicated splat branch must be the one refusing this, got: {message}"
-    )
+    assert (
+        "** unpacking is not supported" in message
+    ), f"the dedicated splat branch must be the one refusing this, got: {message}"
     assert excinfo.value.__cause__ is None, (
         "the splat branch raises directly; a chained cause means it fell "
         "through to _literal instead"
@@ -528,9 +539,9 @@ def test_keyword_splat_with_a_literal_payload_is_not_flattened_into_kwargs():
     with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
         parse_call('Bash(**{"a": 1})')
 
-    assert "** unpacking is not supported" in str(excinfo.value), (
-        f"a literal splat payload must not be expanded, got: {excinfo.value}"
-    )
+    assert "** unpacking is not supported" in str(
+        excinfo.value
+    ), f"a literal splat payload must not be expanded, got: {excinfo.value}"
 
 
 def test_empty_call_parses_with_no_arguments():
@@ -583,11 +594,13 @@ def test_signed_and_special_number_literals_are_accepted(dsl, expected):
     """
     parsed = parse_call(dsl)
 
-    assert len(parsed.args) == 1, f"{dsl} should yield one positional, got {parsed.args!r}"
+    assert (
+        len(parsed.args) == 1
+    ), f"{dsl} should yield one positional, got {parsed.args!r}"
     value = parsed.args[0]
-    assert type(value) is type(expected), (
-        f"{dsl} should yield a {type(expected).__name__}, got {type(value).__name__} {value!r}"
-    )
+    assert type(value) is type(
+        expected
+    ), f"{dsl} should yield a {type(expected).__name__}, got {type(value).__name__} {value!r}"
     assert value == expected, f"{dsl} should yield {expected!r}, got {value!r}"
 
 
@@ -603,7 +616,9 @@ def test_signed_and_special_number_literals_are_accepted(dsl, expected):
     ],
     ids=["bytes", "set", "tuple", "list", "dict", "nested-list"],
 )
-def test_container_and_bytes_literals_pass_through_unchanged(dsl, expected_type, expected):
+def test_container_and_bytes_literals_pass_through_unchanged(
+    dsl, expected_type, expected
+):
     """FINDING: the accepted value set is wider than the schema types.
 
     ``bytes``, ``set`` and ``tuple`` are literals, so they are accepted -- and
@@ -613,11 +628,13 @@ def test_container_and_bytes_literals_pass_through_unchanged(dsl, expected_type,
     """
     parsed = parse_call(dsl)
 
-    assert len(parsed.args) == 1, f"{dsl} should yield one positional, got {parsed.args!r}"
+    assert (
+        len(parsed.args) == 1
+    ), f"{dsl} should yield one positional, got {parsed.args!r}"
     value = parsed.args[0]
-    assert isinstance(value, expected_type), (
-        f"{dsl} should yield a {expected_type.__name__}, got {type(value).__name__}"
-    )
+    assert isinstance(
+        value, expected_type
+    ), f"{dsl} should yield a {expected_type.__name__}, got {type(value).__name__}"
     assert value == expected, f"{dsl} should yield {expected!r}, got {value!r}"
 
 
@@ -631,7 +648,9 @@ def test_overflowing_float_literal_becomes_infinity():
 
     assert len(parsed.args) == 1, f"got {parsed.args!r}"
     value = parsed.args[0]
-    assert isinstance(value, float), f"1e400 must still be a float, got {type(value).__name__}"
+    assert isinstance(
+        value, float
+    ), f"1e400 must still be a float, got {type(value).__name__}"
     assert math.isinf(value), f"1e400 should overflow to infinity, got {value!r}"
 
 
@@ -647,12 +666,16 @@ def test_infinite_timeout_keyword_reaches_the_bound_arguments():
     spec = manager.register(_background_tool, name="Background")
     assert spec is not None, "the Background fixture tool must register"
 
-    bound = bind_arguments(spec, parse_call('Background(call=\'Bash("ls")\', timeout=1e400)'))
-
-    assert bound["call"] == 'Bash("ls")', f"the string argument must survive, got {bound!r}"
-    assert math.isinf(bound["timeout"]), (
-        f"an infinite timeout reaches the tool unchallenged, got {bound['timeout']!r}"
+    bound = bind_arguments(
+        spec, parse_call("Background(call='Bash(\"ls\")', timeout=1e400)")
     )
+
+    assert (
+        bound["call"] == 'Bash("ls")'
+    ), f"the string argument must survive, got {bound!r}"
+    assert math.isinf(
+        bound["timeout"]
+    ), f"an infinite timeout reaches the tool unchallenged, got {bound['timeout']!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -683,12 +706,12 @@ def test_duplicate_keyword_is_rejected_instead_of_silently_last_wins(dsl, repeat
 
     message = str(excinfo.value)
     assert "not a tool call" in message, f"got: {message}"
-    assert f"'{repeated}' is repeated" in message, (
-        f"the message must name the repeated parameter, got: {message}"
-    )
-    assert excinfo.value.__cause__ is None, (
-        "the duplicate check raises directly, before any literal evaluation"
-    )
+    assert (
+        f"'{repeated}' is repeated" in message
+    ), f"the message must name the repeated parameter, got: {message}"
+    assert (
+        excinfo.value.__cause__ is None
+    ), "the duplicate check raises directly, before any literal evaluation"
 
 
 @pytest.mark.parametrize(
@@ -711,9 +734,9 @@ def test_distinct_keywords_are_unaffected(dsl, expected_kwargs):
     parsed = parse_call(dsl)
 
     assert parsed.tool_name == "Bash", f"got {parsed.tool_name!r}"
-    assert parsed.kwargs == expected_kwargs, (
-        f"every keyword must survive exactly as written, got {parsed.kwargs!r}"
-    )
+    assert (
+        parsed.kwargs == expected_kwargs
+    ), f"every keyword must survive exactly as written, got {parsed.kwargs!r}"
 
 
 def test_duplicate_keyword_rejection_agrees_with_cpython_compile():
@@ -731,9 +754,9 @@ def test_duplicate_keyword_rejection_agrees_with_cpython_compile():
     with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
         parse_call(source)
 
-    assert "is repeated" in str(excinfo.value), (
-        f"the parser must refuse what CPython refuses, got: {excinfo.value}"
-    )
+    assert "is repeated" in str(
+        excinfo.value
+    ), f"the parser must refuse what CPython refuses, got: {excinfo.value}"
 
 
 def test_positional_and_keyword_for_one_parameter_is_rejected(mixed_spec):
@@ -751,17 +774,21 @@ def test_positional_and_keyword_for_one_parameter_is_rejected(mixed_spec):
     ``parse_call`` never sees.
     """
     with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
-        bind_arguments(mixed_spec, parse_call('Mixed("from-positional", first="from-keyword")'))
+        bind_arguments(
+            mixed_spec, parse_call('Mixed("from-positional", first="from-keyword")')
+        )
 
     message = str(excinfo.value)
     assert "Got multiple values for parameter 'first'" in message, f"got: {message}"
     assert "Mixed" in message, f"the message must name the tool, got: {message}"
-    assert "from-positional" not in message, (
-        f"neither value may be silently chosen; the message was: {message}"
-    )
+    assert (
+        "from-positional" not in message
+    ), f"neither value may be silently chosen; the message was: {message}"
 
 
-def test_a_keyword_for_an_earlier_parameter_than_the_positionals_is_rejected(mixed_spec):
+def test_a_keyword_for_an_earlier_parameter_than_the_positionals_is_rejected(
+    mixed_spec,
+):
     """The collision is detected wherever the keyword lands in the prefix.
 
     ``Mixed("a", "b", first="x")`` collides with the *first* of three
@@ -780,12 +807,12 @@ def test_several_colliding_parameters_are_all_reported(mixed_spec):
 
     message = str(excinfo.value)
     headline = message.split(" for tool ")[0]
-    assert headline == "Got multiple values for parameters 'first', 'second'", (
-        f"the headline must name exactly the collided parameters, got: {headline!r}"
-    )
-    assert "third" in message.split("expects parameters")[1], (
-        f"'third' belongs in the expected-parameter list, got: {message}"
-    )
+    assert (
+        headline == "Got multiple values for parameters 'first', 'second'"
+    ), f"the headline must name exactly the collided parameters, got: {headline!r}"
+    assert (
+        "third" in message.split("expects parameters")[1]
+    ), f"'third' belongs in the expected-parameter list, got: {message}"
 
 
 def test_keyword_overlays_an_earlier_positional_without_error(mixed_spec):
@@ -795,20 +822,24 @@ def test_keyword_overlays_an_earlier_positional_without_error(mixed_spec):
     This is the boundary the collision check must not cross.  ``second`` is
     outside the prefix the first positional consumes, so it is not a collision.
     """
-    bound = bind_arguments(mixed_spec, parse_call('Mixed("from-positional", second="explicit")'))
-
-    assert bound == {"first": "from-positional", "second": "explicit"}, (
-        f"the positional should be kept and the later keyword overlaid, got {bound!r}"
+    bound = bind_arguments(
+        mixed_spec, parse_call('Mixed("from-positional", second="explicit")')
     )
+
+    assert bound == {
+        "first": "from-positional",
+        "second": "explicit",
+    }, f"the positional should be kept and the later keyword overlaid, got {bound!r}"
 
 
 def test_a_keyword_beyond_the_positional_prefix_is_not_a_collision(mixed_spec):
     """``Mixed("pos", third=1)`` skips a slot and is legitimate."""
     bound = bind_arguments(mixed_spec, parse_call('Mixed("pos", third=1)'))
 
-    assert bound == {"first": "pos", "third": 1}, (
-        f"'third' is outside the consumed prefix, so it is not a collision, got {bound!r}"
-    )
+    assert bound == {
+        "first": "pos",
+        "third": 1,
+    }, f"'third' is outside the consumed prefix, so it is not a collision, got {bound!r}"
 
 
 def test_call_name_is_checked_against_the_spec_name(mixed_spec):
@@ -821,22 +852,26 @@ def test_call_name_is_checked_against_the_spec_name(mixed_spec):
     tools exist, it only confirms the handed spec is the spec the call named.
     """
     parsed = parse_call('Write("payload")')
-    assert parsed.tool_name == "Write", "precondition: the call must name a different tool"
-    assert parsed.tool_name != mixed_spec.name, (
-        "precondition: the call name and the spec name must differ for this test to prove anything"
-    )
+    assert (
+        parsed.tool_name == "Write"
+    ), "precondition: the call must name a different tool"
+    assert (
+        parsed.tool_name != mixed_spec.name
+    ), "precondition: the call name and the spec name must differ for this test to prove anything"
 
     with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
         bind_arguments(mixed_spec, parsed)
 
     message = str(excinfo.value)
-    assert "names 'Write'" in message, f"the message must name what the call asked for, got: {message}"
-    assert "this spec is 'Mixed'" in message, (
-        f"the message must name the spec that was handed in, got: {message}"
-    )
-    assert "payload" not in message, (
-        f"no argument may be bound before the mismatch is caught, got: {message}"
-    )
+    assert (
+        "names 'Write'" in message
+    ), f"the message must name what the call asked for, got: {message}"
+    assert (
+        "this spec is 'Mixed'" in message
+    ), f"the message must name the spec that was handed in, got: {message}"
+    assert (
+        "payload" not in message
+    ), f"no argument may be bound before the mismatch is caught, got: {message}"
 
 
 def test_a_matching_call_name_still_binds(mixed_spec):
@@ -880,7 +915,9 @@ def test_name_mismatch_names_are_bounded_in_the_message():
         bind_arguments(spec, parse_call('Write("payload")'))
 
     message = str(excinfo.value)
-    assert len(message) < 400, f"the message must stay bounded, got {len(message)} characters"
+    assert (
+        len(message) < 400
+    ), f"the message must stay bounded, got {len(message)} characters"
     assert "more characters" in message, f"the clipping marker is missing: {message}"
 
 
@@ -899,7 +936,9 @@ def test_mismatch_message_clips_the_model_supplied_call_name(mixed_spec):
 
     message = str(excinfo.value)
     assert name not in message, "the model-supplied tool name leaked into the message"
-    assert len(message) < 400, f"the message must stay bounded, got {len(message)} characters"
+    assert (
+        len(message) < 400
+    ), f"the message must stay bounded, got {len(message)} characters"
     assert "more characters" in message, f"the clipping marker is missing: {message}"
 
 
@@ -918,9 +957,9 @@ def test_unicode_tool_name_and_argument_survive_without_normalisation():
 
     assert parsed.tool_name == "Ünïcödé", f"got {parsed.tool_name!r}"
     assert parsed.args == ["héllo 🌍 中文"], f"got {parsed.args!r}"
-    assert unicodedata.normalize("NFC", parsed.args[0]) == parsed.args[0], (
-        "the parser must not normalise argument text"
-    )
+    assert (
+        unicodedata.normalize("NFC", parsed.args[0]) == parsed.args[0]
+    ), "the parser must not normalise argument text"
 
 
 @pytest.mark.parametrize(
@@ -933,13 +972,22 @@ def test_unicode_tool_name_and_argument_survive_without_normalisation():
         (r'Bash("a\nb")', "a\nb"),
         (r'Bash("a\rb")', "a\rb"),
     ],
-    ids=["unicode-escape", "tab", "backslash", "nul-escape", "newline-escape", "carriage-return"],
+    ids=[
+        "unicode-escape",
+        "tab",
+        "backslash",
+        "nul-escape",
+        "newline-escape",
+        "carriage-return",
+    ],
 )
 def test_escape_sequences_in_arguments_are_decoded(dsl, expected):
     """An escape is *decoded*, which is how a shell command can carry a newline."""
     parsed = parse_call(dsl)
 
-    assert parsed.args == [expected], f"{dsl!r} should decode to {expected!r}, got {parsed.args!r}"
+    assert parsed.args == [
+        expected
+    ], f"{dsl!r} should decode to {expected!r}, got {parsed.args!r}"
 
 
 @pytest.mark.parametrize(
@@ -967,13 +1015,15 @@ def test_string_that_cannot_be_tokenised_is_a_parse_failure(dsl):
         parse_call(dsl)
 
     message = str(excinfo.value)
-    assert "could not be parsed as a ToolName(...) expression" in message, f"got: {message}"
-    assert isinstance(excinfo.value.__cause__, SyntaxError), (
-        f"a tokeniser failure is a SyntaxError, got {type(excinfo.value.__cause__).__name__}"
-    )
-    assert "\n" not in message, (
-        f"the message must stay on one line for the TUI error pane, got: {message!r}"
-    )
+    assert (
+        "could not be parsed as a ToolName(...) expression" in message
+    ), f"got: {message}"
+    assert isinstance(
+        excinfo.value.__cause__, SyntaxError
+    ), f"a tokeniser failure is a SyntaxError, got {type(excinfo.value.__cause__).__name__}"
+    assert (
+        "\n" not in message
+    ), f"the message must stay on one line for the TUI error pane, got: {message!r}"
 
 
 def test_nul_byte_in_the_source_is_wrapped_and_not_echoed_raw():
@@ -987,7 +1037,9 @@ def test_nul_byte_in_the_source_is_wrapped_and_not_echoed_raw():
         f"{type(excinfo.value.__cause__).__name__}"
     )
     assert "\x00" not in message, "a raw NUL in a message breaks the TUI renderer"
-    assert "\\x00" in message, f"the excerpt should still show where the NUL was, got: {message!r}"
+    assert (
+        "\\x00" in message
+    ), f"the excerpt should still show where the NUL was, got: {message!r}"
 
 
 def test_long_argument_value_is_preserved_intact():
@@ -1001,7 +1053,9 @@ def test_long_argument_value_is_preserved_intact():
     parsed = parse_call(f'Bash("{value}")')
 
     assert len(parsed.args) == 1, f"got {len(parsed.args)} positional arguments"
-    assert parsed.args[0] == value, "an unbounded argument must not be silently truncated"
+    assert (
+        parsed.args[0] == value
+    ), "an unbounded argument must not be silently truncated"
     assert len(parsed.args[0]) == 20_000, f"got {len(parsed.args[0])} characters"
 
 
@@ -1018,12 +1072,14 @@ def test_error_message_bounds_an_unbounded_offending_body():
         parse_call(dsl)
 
     message = str(excinfo.value)
-    assert f"({len(dsl)} characters total)" in message, (
-        f"the truncation marker must report the real length, got: {message[-80:]!r}"
-    )
+    assert (
+        f"({len(dsl)} characters total)" in message
+    ), f"the truncation marker must report the real length, got: {message[-80:]!r}"
     assert hostile not in message, "the whole untrusted body leaked into the message"
     assert "x" * 20_000 not in message, "the untrusted body leaked into the message"
-    assert len(message) < 1_000, f"the message should stay bounded, got {len(message)} characters"
+    assert (
+        len(message) < 1_000
+    ), f"the message should stay bounded, got {len(message)} characters"
 
 
 @pytest.mark.parametrize(
@@ -1036,7 +1092,14 @@ def test_error_message_bounds_an_unbounded_offending_body():
         'os.system("ls")',
         '"' + "x" * 500,
     ],
-    ids=["raw-newline", "star-star", "star", "bare-name", "attribute-callee", "long-body"],
+    ids=[
+        "raw-newline",
+        "star-star",
+        "star",
+        "bare-name",
+        "attribute-callee",
+        "long-body",
+    ],
 )
 def test_error_message_is_one_non_empty_line(dsl):
     """Every failure path renders a single printable line.
@@ -1050,12 +1113,20 @@ def test_error_message_is_one_non_empty_line(dsl):
     message = str(excinfo.value)
     assert message, "an empty message tells the model nothing"
     assert "\n" not in message, f"the message must be one line, got: {message!r}"
-    assert len(message) < 600, f"the message should stay bounded, got {len(message)} characters"
+    assert (
+        len(message) < 600
+    ), f"the message should stay bounded, got {len(message)} characters"
 
 
 @pytest.mark.parametrize(
     "dsl",
-    [' Bash("ls")', 'Bash("ls") ', ' Bash("ls") ', '\n\t Bash("ls")\n', '\r\nBash("ls")\r\n'],
+    [
+        ' Bash("ls")',
+        'Bash("ls") ',
+        ' Bash("ls") ',
+        '\n\t Bash("ls")\n',
+        '\r\nBash("ls")\r\n',
+    ],
     ids=["leading", "trailing", "both", "indented-newline", "crlf"],
 )
 def test_surrounding_whitespace_is_stripped_before_parsing(dsl):
@@ -1097,9 +1168,9 @@ def test_whitespace_inside_quoted_arguments_is_untouched():
     """
     parsed = parse_call('  Bash("  padded  ")  ')
 
-    assert parsed.args == ["  padded  "], (
-        f"whitespace inside the argument must survive, got {parsed.args!r}"
-    )
+    assert parsed.args == [
+        "  padded  "
+    ], f"whitespace inside the argument must survive, got {parsed.args!r}"
 
 
 @pytest.mark.parametrize(
@@ -1121,7 +1192,9 @@ def test_whitespace_inside_quoted_arguments_is_untouched():
         "tabs",
     ],
 )
-def test_lexical_noise_outside_the_argument_is_tolerated(dsl, expected_args, expected_kwargs):
+def test_lexical_noise_outside_the_argument_is_tolerated(
+    dsl, expected_args, expected_kwargs
+):
     """Whitespace, comments and empty strings around a legal call are fine.
 
     Quoted padding must survive untouched -- a stripping regex would eat it.
@@ -1129,10 +1202,12 @@ def test_lexical_noise_outside_the_argument_is_tolerated(dsl, expected_args, exp
     parsed = parse_call(dsl)
 
     assert parsed.tool_name == "Bash", f"got {parsed.tool_name!r}"
-    assert parsed.args == expected_args, f"{dsl!r} should yield {expected_args!r}, got {parsed.args!r}"
-    assert parsed.kwargs == expected_kwargs, (
-        f"{dsl!r} should yield {expected_kwargs!r}, got {parsed.kwargs!r}"
-    )
+    assert (
+        parsed.args == expected_args
+    ), f"{dsl!r} should yield {expected_args!r}, got {parsed.args!r}"
+    assert (
+        parsed.kwargs == expected_kwargs
+    ), f"{dsl!r} should yield {expected_kwargs!r}, got {parsed.kwargs!r}"
 
 
 @pytest.mark.parametrize(
@@ -1144,7 +1219,13 @@ def test_lexical_noise_outside_the_argument_is_tolerated(dsl, expected_args, exp
         'Bash("a"), os.system("ls")',
         "import os; Bash('a')",
     ],
-    ids=["semicolon", "newline-statement", "or-chain", "tuple-with-call", "leading-statement"],
+    ids=[
+        "semicolon",
+        "newline-statement",
+        "or-chain",
+        "tuple-with-call",
+        "leading-statement",
+    ],
 )
 def test_code_appended_to_a_call_is_rejected(dsl):
     """Text that smuggles a second statement in must never parse.
@@ -1181,7 +1262,9 @@ def test_pathologically_nested_input_is_contained(dsl):
 
     assert "not a tool call" in str(excinfo.value), f"got: {excinfo.value}"
     # The interpreter's own limits are still intact afterwards.
-    assert parse_call("Bash(1)").args == [1], "parsing must still work after a nested failure"
+    assert parse_call("Bash(1)").args == [
+        1
+    ], "parsing must still work after a nested failure"
 
 
 # ---------------------------------------------------------------------------
@@ -1200,22 +1283,25 @@ def test_positional_binding_consumes_an_optional_parameter_rather_than_skipping_
     """
     bound = bind_arguments(mixed_spec, parse_call('Mixed("a", "b")'))
 
-    assert bound == {"first": "a", "second": "b"}, (
-        f"the second positional should consume the optional 'second', got {bound!r}"
-    )
+    assert bound == {
+        "first": "a",
+        "second": "b",
+    }, f"the second positional should consume the optional 'second', got {bound!r}"
     assert "third" not in bound, f"'third' must be left alone, got {bound!r}"
-    assert mixed_spec.parameters_schema["properties"]["second"]["default"] == "DEFAULT", (
-        "precondition: 'second' really is optional"
-    )
+    assert (
+        mixed_spec.parameters_schema["properties"]["second"]["default"] == "DEFAULT"
+    ), "precondition: 'second' really is optional"
 
 
 def test_positional_binding_fills_every_declared_property_in_order(mixed_spec):
     """All three positionals land on their declared slots, in order."""
     bound = bind_arguments(mixed_spec, parse_call('Mixed("a", "b", 3)'))
 
-    assert bound == {"first": "a", "second": "b", "third": 3}, (
-        f"positionals must fill first, second, third in order, got {bound!r}"
-    )
+    assert bound == {
+        "first": "a",
+        "second": "b",
+        "third": 3,
+    }, f"positionals must fill first, second, third in order, got {bound!r}"
 
 
 def test_omitted_optional_parameter_is_absent_so_the_function_default_applies(
@@ -1229,12 +1315,18 @@ def test_omitted_optional_parameter_is_absent_so_the_function_default_applies(
     """
     bound = bind_arguments(mixed_spec, parse_call('Mixed("a")'))
 
-    assert bound == {"first": "a"}, f"only the supplied parameter should be bound, got {bound!r}"
-    assert "second" not in bound, f"an unsupplied optional must be absent, got {bound!r}"
+    assert bound == {
+        "first": "a"
+    }, f"only the supplied parameter should be bound, got {bound!r}"
+    assert (
+        "second" not in bound
+    ), f"an unsupplied optional must be absent, got {bound!r}"
     assert "third" not in bound, f"an unsupplied optional must be absent, got {bound!r}"
-    assert _mixed_tool(**bound) == ("a", "DEFAULT", 7), (
-        "the function's own defaults must be what actually applies"
-    )
+    assert _mixed_tool(**bound) == (
+        "a",
+        "DEFAULT",
+        7,
+    ), "the function's own defaults must be what actually applies"
 
 
 def test_required_list_wins_over_a_property_default():
@@ -1250,32 +1342,37 @@ def test_required_list_wins_over_a_property_default():
         "Weird",
         {
             "type": "object",
-            "properties": {"a": {"type": "string", "default": "D"}, "b": {"type": "string"}},
+            "properties": {
+                "a": {"type": "string", "default": "D"},
+                "b": {"type": "string"},
+            },
             "required": ["a", "b"],
         },
     )
-    assert spec.parameters_schema["properties"]["a"]["default"] == "D", (
-        "precondition: 'a' really does carry a default"
-    )
-    assert spec.parameters_schema["required"] == ["a", "b"], (
-        "precondition: 'a' really is listed as required"
-    )
+    assert (
+        spec.parameters_schema["properties"]["a"]["default"] == "D"
+    ), "precondition: 'a' really does carry a default"
+    assert spec.parameters_schema["required"] == [
+        "a",
+        "b",
+    ], "precondition: 'a' really is listed as required"
 
     with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
         bind_arguments(spec, parse_call("Weird()"))
-    assert "Missing required parameters for tool 'Weird'" in str(excinfo.value), (
-        f"both required names must be reported, got: {excinfo.value}"
-    )
+    assert "Missing required parameters for tool 'Weird'" in str(
+        excinfo.value
+    ), f"both required names must be reported, got: {excinfo.value}"
 
     with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
         bind_arguments(spec, parse_call('Weird(a="x")'))
-    assert "Missing required parameter for tool 'Weird': b" in str(excinfo.value), (
-        f"'a' must count as supplied so only 'b' is reported, got: {excinfo.value}"
-    )
+    assert "Missing required parameter for tool 'Weird': b" in str(
+        excinfo.value
+    ), f"'a' must count as supplied so only 'b' is reported, got: {excinfo.value}"
 
-    assert bind_arguments(spec, parse_call('Weird(a="x", b="y")')) == {"a": "x", "b": "y"}, (
-        "both supplied parameters must bind"
-    )
+    assert bind_arguments(spec, parse_call('Weird(a="x", b="y")')) == {
+        "a": "x",
+        "b": "y",
+    }, "both supplied parameters must bind"
 
 
 def test_container_argument_binds_to_a_scalar_parameter_without_type_check(mixed_spec):
@@ -1286,13 +1383,17 @@ def test_container_argument_binds_to_a_scalar_parameter_without_type_check(mixed
     """
     bound = bind_arguments(mixed_spec, parse_call('Mixed(["a", "b"])'))
 
-    assert mixed_spec.parameters_schema["properties"]["first"]["type"] == "string", (
-        "precondition: the schema declares this parameter as a string"
-    )
-    assert bound == {"first": ["a", "b"]}, f"a list should bind unchecked, got {bound!r}"
-    assert _mixed_tool(**bound) == (["a", "b"], "DEFAULT", 7), (
-        "the wrong type must reach the function body unchallenged"
-    )
+    assert (
+        mixed_spec.parameters_schema["properties"]["first"]["type"] == "string"
+    ), "precondition: the schema declares this parameter as a string"
+    assert bound == {
+        "first": ["a", "b"]
+    }, f"a list should bind unchecked, got {bound!r}"
+    assert _mixed_tool(**bound) == (
+        ["a", "b"],
+        "DEFAULT",
+        7,
+    ), "the wrong type must reach the function body unchallenged"
 
 
 def test_falsy_argument_values_are_bound_and_not_treated_as_missing():
@@ -1307,17 +1408,21 @@ def test_falsy_argument_values_are_bound_and_not_treated_as_missing():
     assert spec is not None, "the Flags fixture tool must register"
 
     bound = bind_arguments(spec, parse_call("Flags(False)"))
-    assert bound == {"flag": False}, (
-        f"a falsy required argument is present, not missing; got {bound!r}"
-    )
-    assert _flags_tool(**bound) == (False, 1, "x"), (
-        "the defaults must survive alongside a falsy required argument"
-    )
+    assert bound == {
+        "flag": False
+    }, f"a falsy required argument is present, not missing; got {bound!r}"
+    assert _flags_tool(**bound) == (
+        False,
+        1,
+        "x",
+    ), "the defaults must survive alongside a falsy required argument"
 
     bound = bind_arguments(spec, parse_call("Flags(True, 0, '')"))
-    assert bound == {"flag": True, "count": 0, "note": ""}, (
-        f"every falsy value must reach the bound dict unchanged, got {bound!r}"
-    )
+    assert bound == {
+        "flag": True,
+        "count": 0,
+        "note": "",
+    }, f"every falsy value must reach the bound dict unchanged, got {bound!r}"
 
 
 def test_bound_arguments_are_ready_to_pass_to_the_registered_function():
@@ -1330,13 +1435,21 @@ def test_bound_arguments_are_ready_to_pass_to_the_registered_function():
 
     assert type(bound) is dict, f"expected a plain dict, got {type(bound).__name__}"
     assert bound == {"first": "a", "second": "b", "third": 3}, f"got {bound!r}"
-    assert spec.func(**bound) == ("a", "b", 3), "the bound dict must splat into the tool"
+    assert spec.func(**bound) == (
+        "a",
+        "b",
+        3,
+    ), "the bound dict must splat into the tool"
 
 
 @pytest.mark.parametrize(
     "schema",
     [
-        {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+        {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
         {
             "type": "object",
             "properties": {"command": {"type": "string"}},
@@ -1371,7 +1484,14 @@ def test_unknown_keyword_is_rejected_whatever_additional_properties_says(schema)
         {"properties": "command"},
         None,
     ],
-    ids=["empty", "no-properties-key", "properties-none", "properties-list", "properties-string", "none"],
+    ids=[
+        "empty",
+        "no-properties-key",
+        "properties-none",
+        "properties-list",
+        "properties-string",
+        "none",
+    ],
 )
 def test_schema_without_usable_properties_is_a_zero_parameter_tool(schema):
     """Every defensive ``isinstance`` guard collapses to the same safe outcome.
@@ -1390,7 +1510,9 @@ def test_schema_without_usable_properties_is_a_zero_parameter_tool(schema):
     assert "expects parameters: (none)" in message, f"got: {message}"
 
 
-@pytest.mark.parametrize("required", [None, "command", 7], ids=["none", "string", "int"])
+@pytest.mark.parametrize(
+    "required", [None, "command", 7], ids=["none", "string", "int"]
+)
 def test_non_list_required_means_nothing_is_required(required):
     """``required`` is guarded by ``isinstance(list)``; anything else means the
     tool declares no required parameters.
@@ -1400,7 +1522,11 @@ def test_non_list_required_means_nothing_is_required(required):
     """
     spec = _spec_named(
         "Bare",
-        {"type": "object", "properties": {"command": {"type": "string"}}, "required": required},
+        {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": required,
+        },
     )
 
     bound = bind_arguments(spec, ParsedCall(tool_name="Bare", kwargs={"command": "ls"}))
@@ -1425,25 +1551,30 @@ def test_positional_order_follows_properties_not_the_required_list():
 
     bound = bind_arguments(spec, ParsedCall(tool_name="Two", args=["x", "y"]))
 
-    assert bound == {"b": "x", "a": "y"}, (
-        f"the first positional must go to the first *declared* property, got {bound!r}"
-    )
+    assert bound == {
+        "b": "x",
+        "a": "y",
+    }, f"the first positional must go to the first *declared* property, got {bound!r}"
 
 
 def test_too_many_positionals_message_is_singular_for_a_one_parameter_tool():
     """The count wording follows the number of declared parameters."""
     spec = _spec_named(
         "Bash",
-        {"type": "object", "properties": {"only": {"type": "string"}}, "required": ["only"]},
+        {
+            "type": "object",
+            "properties": {"only": {"type": "string"}},
+            "required": ["only"],
+        },
     )
 
     with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
         bind_arguments(spec, ParsedCall(tool_name="Bash", args=["a", "b"]))
 
     message = str(excinfo.value)
-    assert "2 given but only 1 parameter is declared" in message, (
-        f"a single declared parameter must read singularly, got: {message}"
-    )
+    assert (
+        "2 given but only 1 parameter is declared" in message
+    ), f"a single declared parameter must read singularly, got: {message}"
     assert "only" in message, f"the message must list what it expected, got: {message}"
 
 
@@ -1462,9 +1593,9 @@ def test_too_many_positionals_message_is_plural_for_a_multi_parameter_tool():
     with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
         bind_arguments(spec, ParsedCall(tool_name="Two", args=["1", "2", "3"]))
 
-    assert "3 given but only 2 parameters are declared" in str(excinfo.value), (
-        f"two declared parameters must read plural, got: {excinfo.value}"
-    )
+    assert "3 given but only 2 parameters are declared" in str(
+        excinfo.value
+    ), f"two declared parameters must read plural, got: {excinfo.value}"
 
 
 def test_bind_arguments_does_not_mutate_the_spec_schema_or_the_parsed_call():
@@ -1487,15 +1618,17 @@ def test_bind_arguments_does_not_mutate_the_spec_schema_or_the_parsed_call():
     bound = bind_arguments(spec, parsed)
     bound["b"] = "MUTATED"
 
-    assert spec.parameters_schema == schema_before, (
-        f"the registered schema must not change, got {spec.parameters_schema!r}"
-    )
-    assert parsed.args == ["x"] and parsed.kwargs == {"a": "y"}, (
-        f"the parsed call must not change, got {parsed!r}"
-    )
-    assert bound == {"b": "MUTATED", "a": "y"}, (
-        f"the returned dict must be the caller's own, got {bound!r}"
-    )
+    assert (
+        spec.parameters_schema == schema_before
+    ), f"the registered schema must not change, got {spec.parameters_schema!r}"
+    assert parsed.args == ["x"] and parsed.kwargs == {
+        "a": "y"
+    }, f"the parsed call must not change, got {parsed!r}"
+    assert bound == {
+        "b": "MUTATED",
+        "a": "y",
+    }, f"the returned dict must be the caller's own, got {bound!r}"
+
 
 # ---------------------------------------------------------------------------
 # Error messages are bounded in the size AND the count of the identifiers they
@@ -1517,14 +1650,22 @@ _HUGE = _huge_name()
 @pytest.mark.parametrize(
     ("parsed_call", "marker"),
     [
-        (ParsedCall(tool_name=_HUGE, args=["a", "b", "c"]), "Too many positional arguments"),
+        (
+            ParsedCall(tool_name=_HUGE, args=["a", "b", "c"]),
+            "Too many positional arguments",
+        ),
         (ParsedCall(tool_name=_HUGE, kwargs={"nope": 1}), "Unknown parameter"),
-        (ParsedCall(tool_name=_HUGE, args=["v"], kwargs={_HUGE: "w"}), "Got multiple values"),
+        (
+            ParsedCall(tool_name=_HUGE, args=["v"], kwargs={_HUGE: "w"}),
+            "Got multiple values",
+        ),
         (ParsedCall(tool_name=_HUGE), "Missing required parameter"),
     ],
     ids=["too-many-positional", "unknown-parameter", "collision", "missing-required"],
 )
-def test_every_message_naming_the_tool_clips_an_oversized_tool_name(parsed_call, marker):
+def test_every_message_naming_the_tool_clips_an_oversized_tool_name(
+    parsed_call, marker
+):
     """The clip on ``spec.name`` is reached by every message that echoes the tool.
 
     ``test_name_mismatch_names_are_bounded_in_the_message`` proves the clip on
@@ -1547,9 +1688,15 @@ def test_every_message_naming_the_tool_clips_an_oversized_tool_name(parsed_call,
         bind_arguments(spec, parsed_call)
 
     message = str(excinfo.value)
-    assert marker in message, f"this case must reach the {marker!r} message, got: {message}"
-    assert "expects parameters:" in message, f"the summary must be reached too, got: {message}"
-    assert _HUGE not in message, f"the whole tool name leaked into the message: {message!r}"
+    assert (
+        marker in message
+    ), f"this case must reach the {marker!r} message, got: {message}"
+    assert (
+        "expects parameters:" in message
+    ), f"the summary must be reached too, got: {message}"
+    assert (
+        _HUGE not in message
+    ), f"the whole tool name leaked into the message: {message!r}"
     assert len(message) < 700, (
         f"the message must stay bounded, got {len(message)} characters; a bound that "
         f"grew with the name would reach {4 * len(_HUGE)}"
@@ -1561,10 +1708,12 @@ def test_repeated_keyword_message_does_not_echo_the_whole_identifier():
     name = _huge_name()
 
     with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
-        parse_call(f'Bash({name}=1, {name}=2)')
+        parse_call(f"Bash({name}=1, {name}=2)")
 
     message = str(excinfo.value)
-    assert len(message) < 600, f"the message must stay bounded, got {len(message)} characters"
+    assert (
+        len(message) < 600
+    ), f"the message must stay bounded, got {len(message)} characters"
     assert name not in message, "the whole identifier leaked into the message"
     assert "is repeated" in message, f"got: {message}"
     assert "more characters" in message, f"the clipping marker is missing: {message}"
@@ -1582,7 +1731,9 @@ def test_literal_failure_label_does_not_echo_the_whole_identifier():
         parse_call(f'Bash({name}=eval("x"))')
 
     message = str(excinfo.value)
-    assert len(message) < 600, f"the message must stay bounded, got {len(message)} characters"
+    assert (
+        len(message) < 600
+    ), f"the message must stay bounded, got {len(message)} characters"
     assert name not in message, "the whole identifier leaked into the message"
     assert "is not a literal value" in message, f"got: {message}"
 
@@ -1592,14 +1743,20 @@ def test_unknown_parameter_message_does_not_echo_the_whole_identifier():
     name = _huge_name()
     spec = _spec_named(
         "Two",
-        {"type": "object", "properties": {"first": {"type": "string"}}, "required": ["first"]},
+        {
+            "type": "object",
+            "properties": {"first": {"type": "string"}},
+            "required": ["first"],
+        },
     )
 
     with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
         bind_arguments(spec, ParsedCall(tool_name="Two", kwargs={name: "v"}))
 
     message = str(excinfo.value)
-    assert len(message) < 400, f"the message must stay bounded, got {len(message)} characters"
+    assert (
+        len(message) < 400
+    ), f"the message must stay bounded, got {len(message)} characters"
     assert name not in message, "the whole identifier leaked into the message"
     assert "Unknown parameter" in message, f"got: {message}"
 
@@ -1610,13 +1767,17 @@ def test_summary_does_not_echo_a_whole_schema_supplied_parameter_name():
     The name reaches the message through `summary`, which is appended to four
     different messages, so it is the widest-reaching echo site in the module.
     """
-    spec = _spec_named("Mcp", {"type": "object", "properties": {_huge_name(): {"type": "string"}}})
+    spec = _spec_named(
+        "Mcp", {"type": "object", "properties": {_huge_name(): {"type": "string"}}}
+    )
 
     with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
         bind_arguments(spec, ParsedCall(tool_name="Mcp", kwargs={"nope": 1}))
 
     message = str(excinfo.value)
-    assert len(message) < 400, f"the message must stay bounded, got {len(message)} characters"
+    assert (
+        len(message) < 400
+    ), f"the message must stay bounded, got {len(message)} characters"
     assert _huge_name() not in message, "the whole schema name leaked into the message"
     assert "expects parameters:" in message, f"got: {message}"
 
@@ -1629,16 +1790,23 @@ def test_summary_bounds_the_number_of_parameter_names_not_just_their_length():
     """
     spec = _spec_named(
         "Wide",
-        {"type": "object", "properties": {f"p{index}": {"type": "string"} for index in range(10_000)}},
+        {
+            "type": "object",
+            "properties": {f"p{index}": {"type": "string"} for index in range(10_000)},
+        },
     )
 
     with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
         bind_arguments(spec, ParsedCall(tool_name="Wide", kwargs={"nope": 1}))
 
     message = str(excinfo.value)
-    assert len(message) < 400, f"the message must stay bounded, got {len(message)} characters"
+    assert (
+        len(message) < 400
+    ), f"the message must stay bounded, got {len(message)} characters"
     assert "and 9992 more" in message, f"the overflow marker is missing: {message}"
-    assert "p9999" not in message, f"names past the limit must be summarised, got: {message}"
+    assert (
+        "p9999" not in message
+    ), f"names past the limit must be summarised, got: {message}"
 
 
 def test_missing_required_message_bounds_the_number_of_names():
@@ -1656,7 +1824,9 @@ def test_missing_required_message_bounds_the_number_of_names():
         bind_arguments(spec, ParsedCall(tool_name="Wide"))
 
     message = str(excinfo.value)
-    assert len(message) < 500, f"the message must stay bounded, got {len(message)} characters"
+    assert (
+        len(message) < 500
+    ), f"the message must stay bounded, got {len(message)} characters"
     assert "and 9992 more" in message, f"the overflow marker is missing: {message}"
 
 
@@ -1666,13 +1836,19 @@ def test_collision_message_bounds_the_names_it_lists():
     Collided names come from the schema side of the intersection, so this is the
     MCP-sourced variant of the same bound.
     """
-    spec = _spec_named("Mcp", {"type": "object", "properties": {_huge_name(): {"type": "string"}}})
+    spec = _spec_named(
+        "Mcp", {"type": "object", "properties": {_huge_name(): {"type": "string"}}}
+    )
 
     with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
-        bind_arguments(spec, ParsedCall(tool_name="Mcp", args=["v"], kwargs={_huge_name(): "w"}))
+        bind_arguments(
+            spec, ParsedCall(tool_name="Mcp", args=["v"], kwargs={_huge_name(): "w"})
+        )
 
     message = str(excinfo.value)
-    assert len(message) < 500, f"the message must stay bounded, got {len(message)} characters"
+    assert (
+        len(message) < 500
+    ), f"the message must stay bounded, got {len(message)} characters"
     assert _huge_name() not in message, "the whole identifier leaked into the message"
     assert "Got multiple values" in message, f"got: {message}"
 
@@ -1708,11 +1884,15 @@ def test_the_overflow_marker_is_not_quoted_like_a_parameter_name():
         bind_arguments(spec, parsed)
 
     headline = str(excinfo.value).split(" for tool ")[0]
-    assert "'p0'" in headline, f"real parameter names must still be quoted, got: {headline}"
-    assert "... and " in headline, f"the overflow marker must still be shown, got: {headline}"
-    assert "'... and " not in headline, (
-        f"the overflow marker must not be quoted as a parameter name, got: {headline}"
-    )
+    assert (
+        "'p0'" in headline
+    ), f"real parameter names must still be quoted, got: {headline}"
+    assert (
+        "... and " in headline
+    ), f"the overflow marker must still be shown, got: {headline}"
+    assert (
+        "'... and " not in headline
+    ), f"the overflow marker must not be quoted as a parameter name, got: {headline}"
 
 
 @pytest.mark.parametrize(
@@ -1766,11 +1946,11 @@ def test_message_length_is_flat_in_the_identifier_length(size):
     name = "n" * size
 
     with pytest.raises(MitoCodeBuiltinToolError) as excinfo:
-        parse_call(f'Bash({name}=1, {name}=2)')
+        parse_call(f"Bash({name}=1, {name}=2)")
 
-    assert len(str(excinfo.value)) < 600, (
-        f"a {size}-character identifier produced a {len(str(excinfo.value))}-character message"
-    )
+    assert (
+        len(str(excinfo.value)) < 600
+    ), f"a {size}-character identifier produced a {len(str(excinfo.value))}-character message"
 
 
 def test_ordinary_parameter_names_are_not_clipped():
@@ -1780,7 +1960,10 @@ def test_ordinary_parameter_names_are_not_clipped():
     test above.
     """
     parsed = parse_call('Bash(command="ls", timeout=300000)')
-    assert parsed.kwargs == {"command": "ls", "timeout": 300000}, f"got {parsed.kwargs!r}"
+    assert parsed.kwargs == {
+        "command": "ls",
+        "timeout": 300000,
+    }, f"got {parsed.kwargs!r}"
 
     manager = ToolManager()
     spec = manager.register(_mixed_tool, name="Mixed")
@@ -1790,15 +1973,17 @@ def test_ordinary_parameter_names_are_not_clipped():
         bind_arguments(spec, parse_call('Mixed("a", "b", first="x")'))
 
     message = str(excinfo.value)
-    assert "first" in message and "second" in message and "third" in message, (
-        f"real parameter names must appear in full, got: {message}"
-    )
-    assert "more characters" not in message, (
-        f"real parameter names must not be marked as truncated, got: {message}"
-    )
+    assert (
+        "first" in message and "second" in message and "third" in message
+    ), f"real parameter names must appear in full, got: {message}"
+    assert (
+        "more characters" not in message
+    ), f"real parameter names must not be marked as truncated, got: {message}"
     split = message.split("expects parameters:")
     assert len(split) == 2, f"the summary must be present, got: {message}"
-    assert "and " not in split[1], f"three real names fit under the count limit, got: {message}"
+    assert (
+        "and " not in split[1]
+    ), f"three real names fit under the count limit, got: {message}"
 
 
 def test_non_string_schema_keys_do_not_crash_the_message():

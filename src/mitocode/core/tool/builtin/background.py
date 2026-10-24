@@ -348,7 +348,9 @@ class BackgroundRegistry:
         # it does so *before* the task is marked done.  This callback only
         # matters for a task cancelled before its first line ran, where the
         # coroutine body never got the chance to record anything.
-        task.add_done_callback(lambda finished, key=handle: self._on_done(key, finished))
+        task.add_done_callback(
+            lambda finished, key=handle: self._on_done(key, finished)
+        )
         return handle
 
     async def collect(self, handle: str) -> BackgroundTask:
@@ -849,7 +851,9 @@ class BackgroundRegistry:
             record.result = ""
             return
         record.state = TaskState.FAILED
-        record.result = f"Error: {type(error).__name__}: {safe_exception_message(error)}"
+        record.result = (
+            f"Error: {type(error).__name__}: {safe_exception_message(error)}"
+        )
 
 
 def _seconds(timeout_ms: int) -> float:

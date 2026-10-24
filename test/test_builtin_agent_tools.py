@@ -38,8 +38,7 @@ DEADLINE_SECONDS = 10.0
 
 #: The documented 'no assistant message yet' sentence of ``query_agent``.
 NONE_YET = (
-    "last message: (none yet -- this agent has not produced an assistant "
-    "message)"
+    "last message: (none yet -- this agent has not produced an assistant " "message)"
 )
 
 #: Sentinel for "this attribute does not exist on the block at all".
@@ -327,15 +326,15 @@ def _assert_plain_orchestrator_error(result: str) -> None:
     """The no-orchestrator answer is prose naming the wiring fix, no class name."""
     assert result.startswith("Error:"), f"expected an Error sentence: {result!r}"
     assert "no orchestrator" in result, f"must name the missing wiring: {result!r}"
-    assert "attach_orchestrator" in result, (
-        f"must name the call that fixes it: {result!r}"
-    )
-    assert "Retrying will not help" in result, (
-        f"must say retrying is pointless: {result!r}"
-    )
-    assert "MitoCodeBuiltinToolError" not in result, (
-        f"a Python class name leaked into the model's answer: {result!r}"
-    )
+    assert (
+        "attach_orchestrator" in result
+    ), f"must name the call that fixes it: {result!r}"
+    assert (
+        "Retrying will not help" in result
+    ), f"must say retrying is pointless: {result!r}"
+    assert (
+        "MitoCodeBuiltinToolError" not in result
+    ), f"a Python class name leaked into the model's answer: {result!r}"
 
 
 def _query_orchestrator(messages: Any = None, **overrides: Any) -> _Orchestrator:
@@ -361,22 +360,22 @@ def test_require_orchestrator_returns_the_attached_orchestrator():
     """An attached orchestrator is returned as-is, not copied or wrapped."""
     orch = _Orchestrator()
     ctx = _make_ctx(orch)
-    assert agent_tools.require_orchestrator(ctx) is orch, (
-        "the duck-typed handle must come back untouched"
-    )
+    assert (
+        agent_tools.require_orchestrator(ctx) is orch
+    ), "the duck-typed handle must come back untouched"
 
 
 def test_require_orchestrator_absent_in_every_shape_returns_none():
     """None context, an attribute-less context, and an unattached context."""
-    assert agent_tools.require_orchestrator(None) is None, (
-        "a None context reads as 'no orchestrator', never a crash"
-    )
-    assert agent_tools.require_orchestrator(object()) is None, (
-        "a context without the attribute reads as 'no orchestrator'"
-    )
-    assert agent_tools.require_orchestrator(_make_ctx(None)) is None, (
-        "an attached-None orchestrator reads as 'no orchestrator'"
-    )
+    assert (
+        agent_tools.require_orchestrator(None) is None
+    ), "a None context reads as 'no orchestrator', never a crash"
+    assert (
+        agent_tools.require_orchestrator(object()) is None
+    ), "a context without the attribute reads as 'no orchestrator'"
+    assert (
+        agent_tools.require_orchestrator(_make_ctx(None)) is None
+    ), "an attached-None orchestrator reads as 'no orchestrator'"
 
 
 # --- depth_of ----------------------------------------------------------------
@@ -401,21 +400,21 @@ def test_depth_of_none_id_or_no_orchestrator_reports_zero():
     """A None id, a None context, and an unattached context all read as 0."""
     orch = _Orchestrator(sessions={5: _Session(5, parent_id=None)})
     assert agent_tools.depth_of(None, 5) == 0, "no context means no chain"
-    assert agent_tools.depth_of(_make_ctx(None), 5) == 0, (
-        "no orchestrator means no walk is possible"
-    )
-    assert agent_tools.depth_of(_make_ctx(orch), None) == 0, (
-        "no owning turn means no chain to walk"
-    )
+    assert (
+        agent_tools.depth_of(_make_ctx(None), 5) == 0
+    ), "no orchestrator means no walk is possible"
+    assert (
+        agent_tools.depth_of(_make_ctx(orch), None) == 0
+    ), "no owning turn means no chain to walk"
 
 
 def test_depth_of_dangling_parent_link_ends_the_walk():
     """A parent id the orchestrator does not have ends the walk where it stops."""
     orch = _Orchestrator(sessions={5: _Session(5, parent_id=99)})
     ctx = _make_ctx(orch)
-    assert agent_tools.depth_of(ctx, 5) == 1, (
-        "the hop toward the missing parent 99 counts; nothing beyond it does"
-    )
+    assert (
+        agent_tools.depth_of(ctx, 5) == 1
+    ), "the hop toward the missing parent 99 counts; nothing beyond it does"
 
 
 @pytest.mark.parametrize("cycle_len,expected", [(1, 0), (2, 1), (3, 2)])
@@ -424,9 +423,9 @@ def test_depth_of_cyclic_parent_chain_terminates(cycle_len, expected):
     orch = _Orchestrator(sessions=_cycle_sessions(cycle_len))
     ctx = _make_ctx(orch)
     depth = _finish_within(lambda: agent_tools.depth_of(ctx, 1))
-    assert depth == expected, (
-        f"a {cycle_len}-cycle must terminate having counted {expected} hops"
-    )
+    assert (
+        depth == expected
+    ), f"a {cycle_len}-cycle must terminate having counted {expected} hops"
 
 
 # --- _derive_name ------------------------------------------------------------
@@ -437,50 +436,50 @@ def test_derive_name_takes_the_stripped_first_line():
     assert agent_tools._derive_name("Fix the bug\nsecond line\nthird", 5) == (
         "Fix the bug"
     ), "only the first line labels the tree row"
-    assert agent_tools._derive_name("   padded first\nsecond", 5) == "padded first", (
-        "the first line is stripped before it becomes the label"
-    )
+    assert (
+        agent_tools._derive_name("   padded first\nsecond", 5) == "padded first"
+    ), "the first line is stripped before it becomes the label"
 
 
 def test_derive_name_truncates_the_first_line_to_forty_chars():
     """Forty characters fit; the forty-first and everything after is cut."""
-    assert agent_tools._derive_name("A" * 40, 7) == "A" * 40, (
-        "a forty-character first line fits exactly"
-    )
-    assert agent_tools._derive_name("A" * 41, 7) == "A" * 40, (
-        "one character over the limit is truncated to the limit"
-    )
-    assert agent_tools._derive_name("B" * 45 + "\nsecond", 7) == "B" * 40, (
-        "truncation applies to the first line before the label is returned"
-    )
+    assert (
+        agent_tools._derive_name("A" * 40, 7) == "A" * 40
+    ), "a forty-character first line fits exactly"
+    assert (
+        agent_tools._derive_name("A" * 41, 7) == "A" * 40
+    ), "one character over the limit is truncated to the limit"
+    assert (
+        agent_tools._derive_name("B" * 45 + "\nsecond", 7) == "B" * 40
+    ), "truncation applies to the first line before the label is returned"
 
 
 def test_derive_name_empty_description_falls_back_to_sub_id():
     """No first line means the fallback label, or '' while the id is unknown."""
-    assert agent_tools._derive_name("", 9) == "sub-9", (
-        "an empty description falls back to the id-based label"
-    )
-    assert agent_tools._derive_name("", None) == "", (
-        "with no id yet there is nothing to build the fallback from"
-    )
+    assert (
+        agent_tools._derive_name("", 9) == "sub-9"
+    ), "an empty description falls back to the id-based label"
+    assert (
+        agent_tools._derive_name("", None) == ""
+    ), "with no id yet there is nothing to build the fallback from"
 
 
 @pytest.mark.parametrize("description", [None, 42, ["line one"]])
 def test_derive_name_non_string_description_counts_as_absent(description):
     """Anything that is not a str is treated as absent, never measured."""
-    assert agent_tools._derive_name(description, 9) == "sub-9", (
-        f"a {type(description).__name__} description must not crash or be measured"
-    )
-    assert agent_tools._derive_name(description, None) == "", (
-        "a non-str description with no id yields the empty label"
-    )
+    assert (
+        agent_tools._derive_name(description, 9) == "sub-9"
+    ), f"a {type(description).__name__} description must not crash or be measured"
+    assert (
+        agent_tools._derive_name(description, None) == ""
+    ), "a non-str description with no id yields the empty label"
 
 
 def test_derive_name_whitespace_only_description_counts_as_absent():
     """A first line of pure whitespace is no first line at all."""
-    assert agent_tools._derive_name("   \t  ", 9) == "sub-9", (
-        "whitespace-only descriptions fall back to the id-based label"
-    )
+    assert (
+        agent_tools._derive_name("   \t  ", 9) == "sub-9"
+    ), "whitespace-only descriptions fall back to the id-based label"
 
 
 # --- spawn_agent -------------------------------------------------------------
@@ -510,9 +509,9 @@ async def test_spawn_agent_creates_child_returns_id_sends_prompt_without_awaitin
         timeout=DEADLINE_SECONDS,
     )
 
-    assert result == _created_sentence(100, "Write tests", " under agent 1"), (
-        "the id, the derived name and the parent must all be in the answer"
-    )
+    assert result == _created_sentence(
+        100, "Write tests", " under agent 1"
+    ), "the id, the derived name and the parent must all be in the answer"
     assert orch.created == [
         {
             "name": "Write tests",
@@ -539,21 +538,21 @@ async def test_spawn_agent_child_inherits_provider_and_keeps_description():
     description = "Fix the login bug\nand add regression tests"
     result = await agent_tools.spawn_agent(description, "go", parent_id=1)
 
-    assert orch.created[0]["provider"] is parent_provider, (
-        "the child must run on the parent's provider, not the orchestrator default"
-    )
-    assert orch.created[0]["description"] == description, (
-        "the whole description is kept; only the name is derived from line one"
-    )
-    assert orch.created[0]["name"] == "Fix the login bug", (
-        "the name handed to create_session is the first line"
-    )
-    assert orch.sessions[100].name == "Fix the login bug", (
-        "the session carries the derived name once the id exists"
-    )
-    assert result == _created_sentence(100, "Fix the login bug", " under agent 1"), (
-        "the answer names the child by its first line"
-    )
+    assert (
+        orch.created[0]["provider"] is parent_provider
+    ), "the child must run on the parent's provider, not the orchestrator default"
+    assert (
+        orch.created[0]["description"] == description
+    ), "the whole description is kept; only the name is derived from line one"
+    assert (
+        orch.created[0]["name"] == "Fix the login bug"
+    ), "the name handed to create_session is the first line"
+    assert (
+        orch.sessions[100].name == "Fix the login bug"
+    ), "the session carries the derived name once the id exists"
+    assert result == _created_sentence(
+        100, "Fix the login bug", " under agent 1"
+    ), "the answer names the child by its first line"
 
 
 @pytest.mark.asyncio
@@ -564,15 +563,15 @@ async def test_spawn_agent_without_a_calling_agent_spawns_a_root():
 
     result = await agent_tools.spawn_agent("Solo agent", "run alone")
 
-    assert result == _created_sentence(100, "Solo agent", " at the root"), (
-        "a parentless spawn is reported as created at the root"
-    )
-    assert orch.created[0]["parent_id"] is None, (
-        "no calling agent means no parent is invented"
-    )
-    assert orch.created[0]["provider"] is None, (
-        "None tells create_session to use its own default"
-    )
+    assert result == _created_sentence(
+        100, "Solo agent", " at the root"
+    ), "a parentless spawn is reported as created at the root"
+    assert (
+        orch.created[0]["parent_id"] is None
+    ), "no calling agent means no parent is invented"
+    assert (
+        orch.created[0]["provider"] is None
+    ), "None tells create_session to use its own default"
     assert orch.lookups == [], "a parentless spawn has no parent session to fetch"
     assert orch.sent == [(100, "run alone")], "the prompt still reaches the child"
 
@@ -586,15 +585,15 @@ async def test_spawn_agent_defaults_parent_to_the_calling_agent():
 
     result = await agent_tools.spawn_agent("Child", "go")
 
-    assert result == _created_sentence(100, "Child", " under agent 7"), (
-        "the calling agent from the context becomes the parent"
-    )
-    assert orch.created[0]["parent_id"] == 7, (
-        "the default parent must come from the current agent context"
-    )
-    assert orch.created[0]["provider"] == "prov-7", (
-        "the inherited provider follows the resolved parent"
-    )
+    assert result == _created_sentence(
+        100, "Child", " under agent 7"
+    ), "the calling agent from the context becomes the parent"
+    assert (
+        orch.created[0]["parent_id"] == 7
+    ), "the default parent must come from the current agent context"
+    assert (
+        orch.created[0]["provider"] == "prov-7"
+    ), "the inherited provider follows the resolved parent"
     assert orch.sent == [(100, "go")], "the prompt reaches the new child"
 
 
@@ -612,15 +611,13 @@ async def test_spawn_agent_at_the_depth_cap_refuses_and_names_the_numbers():
 
     result = await agent_tools.spawn_agent("Too deep", "go", parent_id=60)
 
-    assert result.startswith("Error: refusing to spawn"), (
-        f"a cap refusal is an Error sentence: {result!r}"
-    )
+    assert result.startswith(
+        "Error: refusing to spawn"
+    ), f"a cap refusal is an Error sentence: {result!r}"
     assert "under agent 60" in result, f"the refused parent is named: {result!r}"
     assert "nesting depth 2" in result, f"the current depth is named: {result!r}"
     assert "limit is 1" in result, f"the limit is named: {result!r}"
-    assert "would be depth 3" in result, (
-        f"the would-be depth is named: {result!r}"
-    )
+    assert "would be depth 3" in result, f"the would-be depth is named: {result!r}"
     assert orch.created == [], "a refused spawn must not create anything"
     assert orch.sent == [], "a refused spawn must not send anything"
 
@@ -634,14 +631,12 @@ def test_spawn_agent_cyclic_parent_chain_terminates(cycle_len):
     _make_ctx(orch, max_sub_agent_depth=10)
 
     result = _finish_within(
-        lambda: asyncio.run(
-            agent_tools.spawn_agent("Under cycle", "go", parent_id=1)
-        )
+        lambda: asyncio.run(agent_tools.spawn_agent("Under cycle", "go", parent_id=1))
     )
 
-    assert result == _created_sentence(100, "Under cycle", " under agent 1"), (
-        f"a spawn under a {cycle_len}-cycle must terminate with the child created"
-    )
+    assert result == _created_sentence(
+        100, "Under cycle", " under agent 1"
+    ), f"a spawn under a {cycle_len}-cycle must terminate with the child created"
     assert orch.sent == [(100, "go")], "the prompt is sent once the walk ends"
 
 
@@ -653,9 +648,9 @@ async def test_spawn_agent_unknown_parent_answers_error_and_creates_nothing():
 
     result = await agent_tools.spawn_agent("Orphan", "go", parent_id=99)
 
-    assert result.startswith("Error: no agent with id 99"), (
-        f"the missing parent is named in an Error sentence: {result!r}"
-    )
+    assert result.startswith(
+        "Error: no agent with id 99"
+    ), f"the missing parent is named in an Error sentence: {result!r}"
     assert orch.created == [], "nothing is created under a parent that does not exist"
     assert orch.sent == [], "nothing is sent on behalf of a spawn that never happened"
 
@@ -668,12 +663,12 @@ async def test_spawn_agent_empty_description_assigns_the_fallback_name():
 
     result = await agent_tools.spawn_agent("", "go", parent_id=1)
 
-    assert result == _created_sentence(100, "sub-100", " under agent 1"), (
-        "the fallback label is built from the id the orchestrator allocated"
-    )
-    assert orch.sessions[100].name == "sub-100", (
-        "the placeholder name is corrected on the session before the send"
-    )
+    assert result == _created_sentence(
+        100, "sub-100", " under agent 1"
+    ), "the fallback label is built from the id the orchestrator allocated"
+    assert (
+        orch.sessions[100].name == "sub-100"
+    ), "the placeholder name is corrected on the session before the send"
 
 
 @pytest.mark.asyncio
@@ -736,9 +731,9 @@ async def test_list_agents_single_agent_singular_header():
 
     result = await agent_tools.list_agents()
 
-    assert result == "1 agent:\n[5] solo (idle) | parent none | 0 children", (
-        "the singular header and the zero-children count are spelled out"
-    )
+    assert (
+        result == "1 agent:\n[5] solo (idle) | parent none | 0 children"
+    ), "the singular header and the zero-children count are spelled out"
 
 
 @pytest.mark.parametrize("snapshot", [[], None], ids=["empty-list", "none"])
@@ -750,9 +745,9 @@ async def test_list_agents_empty_or_none_snapshot_reports_no_agents(snapshot):
 
     result = await agent_tools.list_agents()
 
-    assert result == "There are no agents yet.", (
-        f"a {type(snapshot).__name__} snapshot reads as 'no agents yet'"
-    )
+    assert (
+        result == "There are no agents yet."
+    ), f"a {type(snapshot).__name__} snapshot reads as 'no agents yet'"
 
 
 @pytest.mark.asyncio
@@ -790,9 +785,9 @@ async def test_list_agents_missing_entry_keys_use_placeholders():
 
     result = await agent_tools.list_agents()
 
-    assert result == "1 agent:\n[?] <unnamed> (unknown) | parent none | 0 children", (
-        "every missing field falls back to its rendered placeholder"
-    )
+    assert (
+        result == "1 agent:\n[?] <unnamed> (unknown) | parent none | 0 children"
+    ), "every missing field falls back to its rendered placeholder"
 
 
 @pytest.mark.asyncio
@@ -803,9 +798,9 @@ async def test_list_agents_non_mapping_entries_render_placeholders():
 
     result = await agent_tools.list_agents()
 
-    assert result == "1 agent:\n[?] <unnamed> (unknown) | parent none | 0 children", (
-        "a non-mapping entry is rendered from placeholders, not crashed on"
-    )
+    assert (
+        result == "1 agent:\n[?] <unnamed> (unknown) | parent none | 0 children"
+    ), "a non-mapping entry is rendered from placeholders, not crashed on"
 
 
 @pytest.mark.asyncio
@@ -817,9 +812,9 @@ async def test_spawn_agent_session_without_an_id_reports_the_error():
 
     result = await agent_tools.spawn_agent("No id", "go", parent_id=1)
 
-    assert result.startswith("Error: the orchestrator created a session"), (
-        f"the missing id is diagnosed in an Error sentence: {result!r}"
-    )
+    assert result.startswith(
+        "Error: the orchestrator created a session"
+    ), f"the missing id is diagnosed in an Error sentence: {result!r}"
     assert "agent id" in result, f"the diagnosis names what is missing: {result!r}"
     assert orch.sent == [], "no prompt can be sent to a session with no id"
 
@@ -837,9 +832,9 @@ async def test_list_agents_clamps_a_long_rendering():
     # The full rendering is 127 characters ("1 agent:\n[5] " + 80 + the
     # suffix), so a budget of 10 keeps 5 head characters, 5 tail characters
     # and reports the 117 dropped in between.
-    assert "[truncated: 117 characters omitted]" in clamped, (
-        f"a long rendering must say how much was dropped: {clamped!r}"
-    )
+    assert (
+        "[truncated: 117 characters omitted]" in clamped
+    ), f"a long rendering must say how much was dropped: {clamped!r}"
     assert clamped.startswith("1 age"), "the head of the rendering is kept"
     assert clamped.endswith("ldren"), "the tail of the rendering is kept"
     assert "N" * 80 not in clamped, "the middle payload is genuinely dropped"
@@ -883,13 +878,13 @@ async def test_query_agent_scans_backwards_past_tool_blocks():
 
     result = await agent_tools.query_agent(3)
 
-    assert result.endswith("last message:\nNEWEST-ANSWER"), (
-        f"the newest assistant block is reported: {result!r}"
-    )
+    assert result.endswith(
+        "last message:\nNEWEST-ANSWER"
+    ), f"the newest assistant block is reported: {result!r}"
     for leaked in ("OLDER-ANSWER", "CALL-ONE", "RESULT-ONE", "CALL-TWO", "RESULT-TWO"):
-        assert leaked not in result, (
-            f"{leaked} must never reach the answer; only assistant text does"
-        )
+        assert (
+            leaked not in result
+        ), f"{leaked} must never reach the answer; only assistant text does"
 
 
 @pytest.mark.asyncio
@@ -905,9 +900,9 @@ async def test_query_agent_reports_the_newest_assistant_message():
 
     result = await agent_tools.query_agent(3)
 
-    assert result.endswith("last message:\nnewer"), (
-        f"the scan runs backwards, so the newest block wins: {result!r}"
-    )
+    assert result.endswith(
+        "last message:\nnewer"
+    ), f"the scan runs backwards, so the newest block wins: {result!r}"
     assert "older" not in result, "an older assistant message must not be reported"
 
 
@@ -925,8 +920,7 @@ async def test_query_agent_without_assistant_blocks_reports_none_yet(messages):
     result = await agent_tools.query_agent(3)
 
     assert result == (
-        "Agent 3 (writer) [running]\n"
-        "description: Writes drafts\n" + NONE_YET
+        "Agent 3 (writer) [running]\n" "description: Writes drafts\n" + NONE_YET
     ), "an agent with no assistant message yet says so honestly"
 
 
@@ -940,16 +934,19 @@ async def test_query_agent_none_block_is_skipped():
 
     result = await agent_tools.query_agent(3)
 
-    assert result.endswith("last message:\nreal"), (
-        f"a None block must not crash the scan or hide the answer: {result!r}"
-    )
+    assert result.endswith(
+        "last message:\nreal"
+    ), f"a None block must not crash the scan or hide the answer: {result!r}"
 
 
 @pytest.mark.parametrize(
     "messages",
     [
         [_Block(role="assistant", message="older text"), _Block(role="assistant")],
-        [_Block(role="assistant", message="older text"), _Block(role="assistant", message=None)],
+        [
+            _Block(role="assistant", message="older text"),
+            _Block(role="assistant", message=None),
+        ],
     ],
     ids=["no-message-attr", "message-none"],
 )
@@ -962,17 +959,14 @@ async def test_query_agent_textless_last_assistant_stops_the_scan(messages):
     result = await agent_tools.query_agent(3)
 
     assert result == (
-        "Agent 3 (writer) [running]\n"
-        "description: Writes drafts\n" + NONE_YET
+        "Agent 3 (writer) [running]\n" "description: Writes drafts\n" + NONE_YET
     ), "the scan stops at the first assistant block even when it has no text"
-    assert "older text" not in result, (
-        "falling through to an older block would dress a stale answer as current"
-    )
+    assert (
+        "older text" not in result
+    ), "falling through to an older block would dress a stale answer as current"
 
 
-@pytest.mark.parametrize(
-    "messages", [None, "not-a-list"], ids=["none", "str"]
-)
+@pytest.mark.parametrize("messages", [None, "not-a-list"], ids=["none", "str"])
 @pytest.mark.asyncio
 async def test_query_agent_non_list_messages_count_as_none(messages):
     """A messages field that is not a list or tuple counts as no messages."""
@@ -982,8 +976,7 @@ async def test_query_agent_non_list_messages_count_as_none(messages):
     result = await agent_tools.query_agent(3)
 
     assert result == (
-        "Agent 3 (writer) [running]\n"
-        "description: Writes drafts\n" + NONE_YET
+        "Agent 3 (writer) [running]\n" "description: Writes drafts\n" + NONE_YET
     ), "an unreadable transcript is reported as 'no message yet'"
 
 
@@ -995,9 +988,9 @@ async def test_query_agent_unknown_id_answers_an_error_sentence():
 
     result = await agent_tools.query_agent(99)
 
-    assert result.startswith("Error: no agent with id 99"), (
-        f"the missing agent is named in an Error sentence: {result!r}"
-    )
+    assert result.startswith(
+        "Error: no agent with id 99"
+    ), f"the missing agent is named in an Error sentence: {result!r}"
 
 
 @pytest.mark.asyncio
@@ -1024,15 +1017,15 @@ async def test_query_agent_clamps_the_message_but_not_the_description():
 
     result = await agent_tools.query_agent(3)
 
-    assert "description: " + "D" * 200 in result, (
-        "the description is reported in full — it is not clamped"
-    )
-    assert "M" * 20 + "\n\n[truncated: 160 characters omitted]\n\n" + "M" * 20 in result, (
-        "the message keeps its head and tail around the truncation marker"
-    )
-    assert "[truncated: 160 characters omitted]" in result, (
-        "the marker names how much was dropped"
-    )
+    assert (
+        "description: " + "D" * 200 in result
+    ), "the description is reported in full — it is not clamped"
+    assert (
+        "M" * 20 + "\n\n[truncated: 160 characters omitted]\n\n" + "M" * 20 in result
+    ), "the message keeps its head and tail around the truncation marker"
+    assert (
+        "[truncated: 160 characters omitted]" in result
+    ), "the marker names how much was dropped"
     assert "M" * 200 not in result, "the middle of the message is genuinely dropped"
 
 
@@ -1050,10 +1043,7 @@ async def test_query_agent_falsy_name_and_description_use_placeholders(descripti
     result = await agent_tools.query_agent(3)
 
     assert result == (
-        "Agent 3 (<unnamed>) [running]\n"
-        "description: (none)\n"
-        "last message:\n"
-        "hi"
+        "Agent 3 (<unnamed>) [running]\n" "description: (none)\n" "last message:\n" "hi"
     ), "blank identity fields render as explicit placeholders"
 
 
@@ -1068,9 +1058,9 @@ async def test_query_agent_enum_state_renders_its_value():
 
     result = await agent_tools.query_agent(3)
 
-    assert result.startswith("Agent 3 (writer) [running]"), (
-        f"the enum member's value is what the model reads: {result!r}"
-    )
+    assert result.startswith(
+        "Agent 3 (writer) [running]"
+    ), f"the enum member's value is what the model reads: {result!r}"
 
 
 @pytest.mark.asyncio
@@ -1083,9 +1073,9 @@ async def test_query_agent_non_string_state_renders_unknown():
 
     result = await agent_tools.query_agent(3)
 
-    assert result.startswith("Agent 3 (writer) [unknown]"), (
-        f"an unreadable state is reported as 'unknown', never blank: {result!r}"
-    )
+    assert result.startswith(
+        "Agent 3 (writer) [unknown]"
+    ), f"an unreadable state is reported as 'unknown', never blank: {result!r}"
 
 
 # --- error boundary ----------------------------------------------------------
@@ -1098,6 +1088,6 @@ async def test_boundary_a_raising_get_session_keeps_the_class_name():
 
     result = await agent_tools.query_agent(1)
 
-    assert result == "Error: RuntimeError: boom", (
-        "the boundary format is exactly right for an unexpected exception"
-    )
+    assert (
+        result == "Error: RuntimeError: boom"
+    ), "the boundary format is exactly right for an unexpected exception"

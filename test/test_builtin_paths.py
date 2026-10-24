@@ -142,9 +142,7 @@ class _TripwireApprover:
         Raises:
             AssertionError: Always.
         """
-        raise AssertionError(
-            f"the approver was consulted for an in-root path: {req!r}"
-        )
+        raise AssertionError(f"the approver was consulted for an in-root path: {req!r}")
 
 
 class _FlakyWorkspace:
@@ -455,9 +453,9 @@ async def test_resolve_returns_the_in_root_path_without_asking_the_approver(
 
     path, error = await resolve(_context(workspace, spy), target, "read")
 
-    assert error is None, (
-        f"{case_id}: an in-root target must not produce an error, got {error!r}"
-    )
+    assert (
+        error is None
+    ), f"{case_id}: an in-root target must not produce an error, got {error!r}"
     assert path == expected, f"{case_id}: must resolve to {expected}, got {path!r}"
     assert spy.requests == [], (
         f"{case_id}: an in-root target must not reach the approver, "
@@ -486,9 +484,9 @@ async def test_resolve_answers_in_root_traffic_with_no_working_approver_at_all(
     path, error = await resolve(ctx, "src/main.py", "read")
 
     assert error is None, f"in-root work must not fail: {error!r}"
-    assert path == root / "src/main.py", (
-        "the containment verdict alone decides the path"
-    )
+    assert (
+        path == root / "src/main.py"
+    ), "the containment verdict alone decides the path"
 
 
 @pytest.mark.asyncio
@@ -522,15 +520,15 @@ async def test_resolve_returns_the_in_root_path_under_the_shipped_default_approv
 
     path, error = await resolve(ctx, "src/main.py", "read")
 
-    assert isinstance(ctx.approver, AlwaysAllow), (
-        "precondition: the default approver is AlwaysAllow"
-    )
-    assert path == root / "src/main.py", (
-        "in-root work is unaffected by the default policy"
-    )
-    assert error is None, (
-        f"the default policy must not refuse in-root work, got {error!r}"
-    )
+    assert isinstance(
+        ctx.approver, AlwaysAllow
+    ), "precondition: the default approver is AlwaysAllow"
+    assert (
+        path == root / "src/main.py"
+    ), "in-root work is unaffected by the default policy"
+    assert (
+        error is None
+    ), f"the default policy must not refuse in-root work, got {error!r}"
 
 
 # ──────────────────────────────────────────────────────────────
@@ -552,17 +550,17 @@ async def test_resolve_asks_the_approver_exactly_once_about_each_escape(
 
     path, error = await resolve(_context(workspace, spy), target, "read")
 
-    assert len(spy.requests) == 1, (
-        f"{case_id}: exactly one approval request, got {len(spy.requests)}"
-    )
+    assert (
+        len(spy.requests) == 1
+    ), f"{case_id}: exactly one approval request, got {len(spy.requests)}"
     assert spy.requests[0].action == "read", f"{case_id}: the request names the action"
-    assert spy.requests[0].detail == str(expected), (
-        f"{case_id}: the request must name the resolved path {expected}"
-    )
+    assert spy.requests[0].detail == str(
+        expected
+    ), f"{case_id}: the request must name the resolved path {expected}"
     assert path == expected, f"{case_id}: an allowed escape returns the resolved path"
-    assert error is None, (
-        f"{case_id}: an allowed escape produces no error, got {error!r}"
-    )
+    assert (
+        error is None
+    ), f"{case_id}: an allowed escape produces no error, got {error!r}"
 
 
 @pytest.mark.asyncio
@@ -624,9 +622,9 @@ async def test_resolve_asks_about_an_absolute_target_without_re_rooting_it(
     path, error = await resolve(_context(workspace, DenyAll()), "/etc/hostname", "read")
 
     assert decoy.exists(), "precondition: an in-root file of the same name exists"
-    assert decoy != Path("/etc/hostname").resolve(), (
-        "precondition: the decoy is a different path than the requested one"
-    )
+    assert (
+        decoy != Path("/etc/hostname").resolve()
+    ), "precondition: the decoy is a different path than the requested one"
     assert path is None, "an absolute target outside the root is refused"
     assert error == REFUSAL_TEMPLATE.format(
         action="read", path=Path("/etc/hostname").resolve(), root=root
@@ -682,15 +680,15 @@ async def test_resolve_carries_the_resolved_path_the_action_and_the_root_in_the_
 
     assert len(spy.requests) == 1, "one request, one dialog"
     request = spy.requests[0]
-    assert isinstance(request, ApprovalRequest), (
-        "the approver is handed an ApprovalRequest"
-    )
+    assert isinstance(
+        request, ApprovalRequest
+    ), "the approver is handed an ApprovalRequest"
     assert request.action == "grep", "the action is passed through verbatim"
     assert request.detail == str(expected), "the detail is the resolved path"
     assert isinstance(request.reason, str), "the reason is prose for a human"
-    assert "workspace root" in request.reason, (
-        f"the reason must say what the boundary is, got {request.reason!r}"
-    )
+    assert (
+        "workspace root" in request.reason
+    ), f"the reason must say what the boundary is, got {request.reason!r}"
 
 
 @pytest.mark.asyncio
@@ -714,9 +712,9 @@ async def test_resolve_passes_an_unvalidated_action_through_to_approver_and_refu
     path, error = await resolve(_context(workspace, denying), "escape_link", action)
 
     assert len(denying.requests) == 1, "an escape is still escalated whatever the verb"
-    assert denying.requests[0].action == action, (
-        "the verb reaches the approver verbatim"
-    )
+    assert (
+        denying.requests[0].action == action
+    ), "the verb reaches the approver verbatim"
     assert path is None, "the escape is refused by the denying policy"
     assert error == REFUSAL_TEMPLATE.format(
         action=action, path=expected, root=root
@@ -737,9 +735,9 @@ async def test_resolve_names_the_resolved_root_when_the_workspace_path_is_a_syml
     real_root.mkdir()
     alias = tmp_path / "alias"
     alias.symlink_to(real_root, target_is_directory=True)
-    assert str(alias) != str(real_root), (
-        "precondition: the alias is not the physical path"
-    )
+    assert str(alias) != str(
+        real_root
+    ), "precondition: the alias is not the physical path"
     outside = tmp_path / "outside.txt"
     outside.write_text("secret\n", encoding="utf-8")
 
@@ -751,9 +749,9 @@ async def test_resolve_names_the_resolved_root_when_the_workspace_path_is_a_syml
     assert error == REFUSAL_TEMPLATE.format(
         action="read", path=outside.resolve(), root=real_root
     ), "the refusal must name the resolved root, not the symlink the caller passed"
-    assert str(alias) not in error, (
-        f"the alias is a spelling, not a location; the model must be given {real_root}"
-    )
+    assert (
+        str(alias) not in error
+    ), f"the alias is a spelling, not a location; the model must be given {real_root}"
 
 
 # ──────────────────────────────────────────────────────────────
@@ -836,9 +834,9 @@ async def test_resolve_hands_back_an_approved_loop_un_normalised_so_open_still_f
     path, error = await resolve(_context(workspace, AlwaysAllow()), "loop_a", "read")
 
     assert error is None, f"AlwaysAllow permits the escape, got {error!r}"
-    assert path == loop, (
-        "an unresolvable target comes back as the candidate, un-normalised"
-    )
+    assert (
+        path == loop
+    ), "an unresolvable target comes back as the candidate, un-normalised"
     # No `match=` on purpose: ELOOP's message text is platform wording, and the
     # errno assertion below says strictly more than any string match could.
     with pytest.raises(OSError) as excinfo:
@@ -877,9 +875,9 @@ async def test_resolve_escalates_a_target_the_resolved_path_would_have_accepted(
     path, error = await resolve(_context(workspace, spy), "src/main.py", "read")
 
     assert workspace.path == root, "precondition: the double answers about this root"
-    assert accepted == root / "src" / "main.py", (
-        "precondition: the path its permissive call returns really is in-root"
-    )
+    assert (
+        accepted == root / "src" / "main.py"
+    ), "precondition: the path its permissive call returns really is in-root"
     assert workspace.resolve_within_targets == [], (
         "is_within answering False must end the gate before anything asks for the "
         f"resolved path; got {workspace.resolve_within_targets!r}"
@@ -946,19 +944,20 @@ async def test_resolve_without_a_workspace_answers_every_path_and_asks_nothing(
         "precondition: with no workspace the root is the process working directory, "
         "so every relative target below is measured against this directory"
     )
-    assert error is None, (
-        f"{case_id}: no boundary means nothing to refuse, got {error!r}"
-    )
+    assert (
+        error is None
+    ), f"{case_id}: no boundary means nothing to refuse, got {error!r}"
     assert path == expected, f"{case_id}: must resolve to {expected}, got {path!r}"
     assert ctx.approver is denying, "precondition: the denying approver is installed"
-    assert denying.requests == [], (
-        f"{case_id}: with no workspace there is no escape to approve"
-    )
+    assert (
+        denying.requests == []
+    ), f"{case_id}: with no workspace there is no escape to approve"
 
 
 @pytest.mark.asyncio
 async def test_resolve_without_a_workspace_raises_when_the_working_directory_is_gone(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """A deleted cwd fails at ``root()``, before any candidate or verdict exists.
 
@@ -1041,9 +1040,9 @@ async def test_resolve_propagates_an_approver_failure_verbatim(workspace, root):
         await resolve(_context(workspace, approver), "escape_link", "read")
 
     assert excinfo.value is boom, "the very exception raised must be what escapes"
-    assert len(approver.requests) == 1, (
-        "the approver was asked, and it was the one that failed"
-    )
+    assert (
+        len(approver.requests) == 1
+    ), "the approver was asked, and it was the one that failed"
 
 
 @pytest.mark.asyncio
@@ -1086,9 +1085,9 @@ async def test_resolve_refuses_a_verdict_that_is_not_the_allow_decision(
 
     path, error = await resolve(_context(workspace, approver), "escape_link", "read")
 
-    assert path is None, (
-        f"a verdict of {verdict!r} is not ALLOW, so the escape is refused"
-    )
+    assert (
+        path is None
+    ), f"a verdict of {verdict!r} is not ALLOW, so the escape is refused"
     assert error == REFUSAL_TEMPLATE.format(
         action="read", path=expected, root=_root_of(workspace)
     ), "the refusal is the same sentence an explicit DENY produces"

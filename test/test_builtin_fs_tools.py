@@ -443,9 +443,9 @@ async def test_read_numbers_lines_from_one_and_offset_zero_and_one_agree(
 
     result = await read("note.txt", offset=offset)
 
-    assert result == "1\talpha\n2\tbeta\n3\tgamma", (
-        f"offset={offset} must read the whole file numbered from 1, got {result!r}"
-    )
+    assert (
+        result == "1\talpha\n2\tbeta\n3\tgamma"
+    ), f"offset={offset} must read the whole file numbered from 1, got {result!r}"
 
 
 @pytest.mark.asyncio
@@ -456,9 +456,9 @@ async def test_read_window_keeps_absolute_line_numbers(root, workspace, spy):
 
     result = await read("five.txt", offset=2, limit=2)
 
-    assert result == "2\tl2\n3\tl3", (
-        f"the window must keep the file's own line numbers, got {result!r}"
-    )
+    assert (
+        result == "2\tl2\n3\tl3"
+    ), f"the window must keep the file's own line numbers, got {result!r}"
 
 
 @pytest.mark.asyncio
@@ -469,9 +469,9 @@ async def test_read_limit_caps_the_number_of_lines(root, workspace, spy):
 
     result = await read("five.txt", limit=2)
 
-    assert result == "1\tl1\n2\tl2", (
-        f"limit=2 must return exactly the first two lines, got {result!r}"
-    )
+    assert (
+        result == "1\tl1\n2\tl2"
+    ), f"limit=2 must return exactly the first two lines, got {result!r}"
 
 
 @pytest.mark.asyncio
@@ -484,9 +484,9 @@ async def test_read_offset_equal_to_the_line_count_still_reads_the_last_line(
 
     result = await read("three.txt", offset=3)
 
-    assert result == "3\tl3", (
-        f"offset 3 of a 3-line file is its last line, got {result!r}"
-    )
+    assert (
+        result == "3\tl3"
+    ), f"offset 3 of a 3-line file is its last line, got {result!r}"
 
 
 @pytest.mark.asyncio
@@ -510,9 +510,9 @@ async def test_read_missing_file_is_an_error_not_empty_output(root, workspace, s
 
     result = await read("ghost.txt")
 
-    assert result == "Error: read failed: ghost.txt does not exist.", (
-        f"a missing file must be named as such, got {result!r}"
-    )
+    assert (
+        result == "Error: read failed: ghost.txt does not exist."
+    ), f"a missing file must be named as such, got {result!r}"
 
 
 @pytest.mark.asyncio
@@ -525,12 +525,12 @@ async def test_read_empty_file_is_distinguishable_from_a_missing_one(
 
     result = await read("hollow.txt")
 
-    assert result == "Error: hollow.txt is empty; there is nothing to read.", (
-        f"an empty file must be reported as empty, got {result!r}"
-    )
-    assert result != "Error: read failed: ghost.txt does not exist.", (
-        "empty and missing must stay distinguishable"
-    )
+    assert (
+        result == "Error: hollow.txt is empty; there is nothing to read."
+    ), f"an empty file must be reported as empty, got {result!r}"
+    assert (
+        result != "Error: read failed: ghost.txt does not exist."
+    ), "empty and missing must stay distinguishable"
 
 
 @pytest.mark.asyncio
@@ -555,9 +555,9 @@ async def test_read_negative_offset_starts_at_the_first_line(root, workspace, sp
 
     result = await read("note.txt", offset=-5)
 
-    assert result == "1\talpha\n2\tbeta", (
-        f"a negative offset must read from the first line, got {result!r}"
-    )
+    assert (
+        result == "1\talpha\n2\tbeta"
+    ), f"a negative offset must read from the first line, got {result!r}"
 
 
 def test_read_refuses_a_named_pipe_by_name_without_hanging(root, workspace, spy):
@@ -598,9 +598,9 @@ async def test_read_refuses_a_file_above_the_cap_from_its_size_alone(
 
     result = await read("big.bin")
 
-    assert big.stat().st_size == READ_CAP_BYTES + 1, (
-        "precondition: the file is one byte above the cap"
-    )
+    assert (
+        big.stat().st_size == READ_CAP_BYTES + 1
+    ), "precondition: the file is one byte above the cap"
     assert result == (
         f"Error: read refused: big.bin is {READ_CAP_BYTES + 1} bytes, above "
         f"the {READ_CAP_BYTES}-byte read cap; a file this large is never "
@@ -617,12 +617,12 @@ async def test_read_allows_a_file_exactly_at_the_cap(root, workspace, spy):
 
     result = await read("edge.bin")
 
-    assert not result.startswith("Error: "), (
-        f"a file exactly at the cap must be read, got {result!r}"
-    )
-    assert result.startswith("1\t"), (
-        f"the read must come back as numbered lines, got {result[:20]!r}"
-    )
+    assert not result.startswith(
+        "Error: "
+    ), f"a file exactly at the cap must be read, got {result!r}"
+    assert result.startswith(
+        "1\t"
+    ), f"the read must come back as numbered lines, got {result[:20]!r}"
 
 
 @pytest.mark.asyncio
@@ -633,12 +633,12 @@ async def test_read_clamps_output_to_the_context_budget(root, workspace, spy):
 
     result = await read("wide.txt")
 
-    assert result.startswith("1\t0123456789"), (
-        f"the clamped output keeps its head, got {result[:20]!r}"
-    )
-    assert "[truncated:" in result, (
-        f"an output above the budget must carry the truncation marker, got {result!r}"
-    )
+    assert result.startswith(
+        "1\t0123456789"
+    ), f"the clamped output keeps its head, got {result[:20]!r}"
+    assert (
+        "[truncated:" in result
+    ), f"an output above the budget must carry the truncation marker, got {result!r}"
 
 
 # --- write -------------------------------------------------------------------
@@ -653,12 +653,12 @@ async def test_write_creates_a_file_and_reports_the_character_count(
 
     result = await write("made.txt", "abc")
 
-    assert result == "Wrote 3 characters to made.txt.", (
-        f"the success sentence must report the character count, got {result!r}"
-    )
-    assert (root / "made.txt").read_text(encoding="utf-8") == "abc", (
-        "the file must hold exactly the content that was written"
-    )
+    assert (
+        result == "Wrote 3 characters to made.txt."
+    ), f"the success sentence must report the character count, got {result!r}"
+    assert (root / "made.txt").read_text(
+        encoding="utf-8"
+    ) == "abc", "the file must hold exactly the content that was written"
 
 
 @pytest.mark.asyncio
@@ -668,9 +668,9 @@ async def test_write_creates_missing_parent_directories(root, workspace, spy):
 
     result = await write("deep/nested/made.txt", "abc")
 
-    assert result == "Wrote 3 characters to deep/nested/made.txt.", (
-        f"parents must be created and the path named in full, got {result!r}"
-    )
+    assert (
+        result == "Wrote 3 characters to deep/nested/made.txt."
+    ), f"parents must be created and the path named in full, got {result!r}"
     assert (root / "deep" / "nested" / "made.txt").read_text(
         encoding="utf-8"
     ) == "abc", "the nested file must hold exactly the content that was written"
@@ -690,9 +690,9 @@ async def test_write_refuses_to_clobber_and_names_edit(root, workspace, spy):
         "replacing a whole file to make one change destroys the rest without "
         "a trace."
     ), f"the clobber refusal must name Edit, got {result!r}"
-    assert (root / "note.txt").read_text(encoding="utf-8") == "original\n", (
-        "a refused write must leave the existing file byte-identical"
-    )
+    assert (root / "note.txt").read_text(
+        encoding="utf-8"
+    ) == "original\n", "a refused write must leave the existing file byte-identical"
 
 
 @pytest.mark.asyncio
@@ -702,18 +702,14 @@ async def test_write_empty_content_creates_an_empty_file(root, workspace, spy):
 
     result = await write("hollow.txt", "")
 
-    assert result == "Wrote 0 characters to hollow.txt.", (
-        f"empty content must succeed with a zero count, got {result!r}"
-    )
-    assert (root / "hollow.txt").stat().st_size == 0, (
-        "the created file must be empty"
-    )
+    assert (
+        result == "Wrote 0 characters to hollow.txt."
+    ), f"empty content must succeed with a zero count, got {result!r}"
+    assert (root / "hollow.txt").stat().st_size == 0, "the created file must be empty"
 
 
 @pytest.mark.asyncio
-async def test_write_through_a_broken_symlink_lands_on_the_target(
-    root, workspace, spy
-):
+async def test_write_through_a_broken_symlink_lands_on_the_target(root, workspace, spy):
     """A broken in-root link resolves away, and the write names the target.
 
     ``resolve`` collapses the symlink before Write sees it, so the write is
@@ -725,15 +721,15 @@ async def test_write_through_a_broken_symlink_lands_on_the_target(
 
     result = await write("broken.txt", "boom\n")
 
-    assert result == "Wrote 5 characters to never_target.txt.", (
-        f"the sentence must name the resolved target, not the link, got {result!r}"
-    )
-    assert (root / "never_target.txt").read_text(encoding="utf-8") == "boom\n", (
-        "the file must exist at the link's target"
-    )
-    assert spy.requests == [], (
-        f"an in-root target must not reach the approver, got {spy.requests!r}"
-    )
+    assert (
+        result == "Wrote 5 characters to never_target.txt."
+    ), f"the sentence must name the resolved target, not the link, got {result!r}"
+    assert (root / "never_target.txt").read_text(
+        encoding="utf-8"
+    ) == "boom\n", "the file must exist at the link's target"
+    assert (
+        spy.requests == []
+    ), f"an in-root target must not reach the approver, got {spy.requests!r}"
 
 
 @pytest.mark.asyncio
@@ -755,12 +751,10 @@ async def test_write_refuses_a_symlink_loop_target(root, workspace, spy):
         "a loop is unresolvable and must be escalated exactly once, "
         f"got {len(spy.requests)}"
     )
-    assert result.startswith("Error: write refused: loop_a already exists."), (
-        f"a symlink loop target must be refused, got {result!r}"
-    )
-    assert not (root / "loop_a").exists(), (
-        "nothing may be written through a loop"
-    )
+    assert result.startswith(
+        "Error: write refused: loop_a already exists."
+    ), f"a symlink loop target must be refused, got {result!r}"
+    assert not (root / "loop_a").exists(), "nothing may be written through a loop"
 
 
 def test_write_refuses_a_named_pipe_by_name_without_hanging(root, workspace, spy):
@@ -784,9 +778,9 @@ async def test_write_refuses_a_directory_target(root, workspace, spy):
 
     result = await write("sub", "x")
 
-    assert result == "Error: write refused: sub is a directory.", (
-        f"a directory target must be refused, got {result!r}"
-    )
+    assert (
+        result == "Error: write refused: sub is a directory."
+    ), f"a directory target must be refused, got {result!r}"
 
 
 # --- edit --------------------------------------------------------------------
@@ -821,9 +815,9 @@ async def test_edit_replaces_across_lines_in_one_exact_swap(root, workspace, spy
     assert result == (
         "Replaced 1 occurrence in swap.txt: the file went from 3 to 2 lines."
     ), f"a cross-line swap must report the line movement, got {result!r}"
-    assert (root / "swap.txt").read_text(encoding="utf-8") == "X\nc\n", (
-        "the file must hold the collapsed replacement"
-    )
+    assert (root / "swap.txt").read_text(
+        encoding="utf-8"
+    ) == "X\nc\n", "the file must hold the collapsed replacement"
 
 
 @pytest.mark.asyncio
@@ -841,9 +835,9 @@ async def test_edit_ambiguous_match_reports_the_count_and_names_replace_all(
         "surrounding text to make it unique, or pass replace_all to replace "
         "every occurrence."
     ), f"the ambiguity refusal must state the count, got {result!r}"
-    assert (root / "dups.txt").read_text(encoding="utf-8") == "dup\ndup\n", (
-        "a refused ambiguous edit must leave the file byte-identical"
-    )
+    assert (root / "dups.txt").read_text(
+        encoding="utf-8"
+    ) == "dup\ndup\n", "a refused ambiguous edit must leave the file byte-identical"
 
 
 @pytest.mark.asyncio
@@ -857,9 +851,9 @@ async def test_edit_replace_all_replaces_every_occurrence(root, workspace, spy):
     assert result == (
         "Replaced 3 occurrences in many.txt: the file went from 1 to 1 lines."
     ), f"replace_all must report every occurrence, got {result!r}"
-    assert (root / "many.txt").read_text(encoding="utf-8") == "z b z b b z\n", (
-        "every occurrence must be replaced"
-    )
+    assert (root / "many.txt").read_text(
+        encoding="utf-8"
+    ) == "z b z b b z\n", "every occurrence must be replaced"
 
 
 @pytest.mark.asyncio
@@ -873,18 +867,16 @@ async def test_edit_no_match_suggests_the_closest_lines(root, workspace, spy):
     assert result.startswith(
         "Error: edit on poem.txt: old_string was not found."
     ), f"the no-match refusal must say so, got {result!r}"
-    assert "'apple pie'" in result, (
-        f"the closest line must be suggested, got {result!r}"
-    )
+    assert (
+        "'apple pie'" in result
+    ), f"the closest line must be suggested, got {result!r}"
     assert (root / "poem.txt").read_text(encoding="utf-8") == (
         "apple pie\nbanana bread\n"
     ), "a refused edit must leave the file byte-identical"
 
 
 @pytest.mark.asyncio
-async def test_edit_on_an_empty_file_reports_not_found_and_empty(
-    root, workspace, spy
-):
+async def test_edit_on_an_empty_file_reports_not_found_and_empty(root, workspace, spy):
     """An empty file with a non-empty old_string reports both facts."""
     _install(workspace, spy)
     _make(root, "hollow.txt", "")
@@ -892,8 +884,7 @@ async def test_edit_on_an_empty_file_reports_not_found_and_empty(
     result = await edit("hollow.txt", "anything", "x")
 
     assert result == (
-        "Error: edit on hollow.txt: old_string was not found and the file "
-        "is empty."
+        "Error: edit on hollow.txt: old_string was not found and the file " "is empty."
     ), f"the empty-file refusal must state both facts, got {result!r}"
 
 
@@ -905,12 +896,12 @@ async def test_edit_refuses_an_empty_old_string(root, workspace, spy):
 
     result = await edit("note.txt", "", "x")
 
-    assert result == "Error: edit on note.txt: old_string must not be empty.", (
-        f"an empty old_string must be refused, got {result!r}"
-    )
-    assert (root / "note.txt").read_text(encoding="utf-8") == "stable\n", (
-        "the file must be untouched"
-    )
+    assert (
+        result == "Error: edit on note.txt: old_string must not be empty."
+    ), f"an empty old_string must be refused, got {result!r}"
+    assert (root / "note.txt").read_text(
+        encoding="utf-8"
+    ) == "stable\n", "the file must be untouched"
 
 
 @pytest.mark.asyncio
@@ -925,14 +916,12 @@ async def test_edit_refuses_identical_old_and_new(root, workspace, spy):
         "Error: edit on note.txt: new_string is identical to old_string; "
         "nothing would change."
     ), f"an identical old/new pair must be refused, got {result!r}"
-    assert (root / "note.txt").read_text(encoding="utf-8") == "same text\n", (
-        "the file must be untouched"
-    )
+    assert (root / "note.txt").read_text(
+        encoding="utf-8"
+    ) == "same text\n", "the file must be untouched"
 
 
-def test_edit_substring_replacement_terminates_and_replaces_once(
-    root, workspace, spy
-):
+def test_edit_substring_replacement_terminates_and_replaces_once(root, workspace, spy):
     """old_string contained in new_string must terminate: one str.replace."""
     _install(workspace, spy)
     _make(root, "grow.txt", "one a two\n")
@@ -942,9 +931,9 @@ def test_edit_substring_replacement_terminates_and_replaces_once(
     assert result == (
         "Replaced 1 occurrence in grow.txt: the file went from 1 to 1 lines."
     ), f"the substring replacement must succeed, got {result!r}"
-    assert (root / "grow.txt").read_text(encoding="utf-8") == "one aa two\n", (
-        'str.replace semantics: "one a two" becomes "one aa two"'
-    )
+    assert (root / "grow.txt").read_text(
+        encoding="utf-8"
+    ) == "one aa two\n", 'str.replace semantics: "one a two" becomes "one aa two"'
 
 
 def test_edit_substring_replace_all_terminates(root, workspace, spy):
@@ -961,7 +950,9 @@ def test_edit_substring_replace_all_terminates(root, workspace, spy):
     assert result == (
         "Replaced 2 occurrences in abab.txt: the file went from 1 to 1 lines."
     ), f"the expansion must replace the two original occurrences, got {result!r}"
-    assert (root / "abab.txt").read_text(encoding="utf-8") == "aabaab\n", (
+    assert (root / "abab.txt").read_text(
+        encoding="utf-8"
+    ) == "aabaab\n", (
         'str.replace semantics: "abab" becomes "aabaab", never "aa" or a hang'
     )
 
@@ -992,9 +983,9 @@ async def test_edit_refuses_a_file_that_is_not_valid_utf8(root, workspace, spy):
         "Error: edit on latin.txt failed: the file is not valid UTF-8 text; "
         "Edit refuses to rewrite a file it cannot decode."
     ), f"a non-UTF-8 file must be refused, got {result!r}"
-    assert (root / "latin.txt").read_bytes() == raw, (
-        "the file's bytes must be untouched"
-    )
+    assert (
+        root / "latin.txt"
+    ).read_bytes() == raw, "the file's bytes must be untouched"
 
 
 @pytest.mark.asyncio
@@ -1004,9 +995,9 @@ async def test_edit_missing_file_is_an_error(root, workspace, spy):
 
     result = await edit("ghost.txt", "a", "b")
 
-    assert result == "Error: edit failed: ghost.txt does not exist.", (
-        f"a missing file must be named as such, got {result!r}"
-    )
+    assert (
+        result == "Error: edit failed: ghost.txt does not exist."
+    ), f"a missing file must be named as such, got {result!r}"
 
 
 # --- glob --------------------------------------------------------------------
@@ -1019,9 +1010,9 @@ async def test_glob_lists_matching_files_sorted_and_omits_directories(walk_tree)
 
     result = await glob_files("*.txt")
 
-    assert result == "a.txt\nc.txt\nsub/b.txt", (
-        f"matches must be sorted relative paths, got {result!r}"
-    )
+    assert (
+        result == "a.txt\nc.txt\nsub/b.txt"
+    ), f"matches must be sorted relative paths, got {result!r}"
     assert "m.txt" not in result, "a directory matching the pattern is not listed"
 
 
@@ -1032,13 +1023,13 @@ async def test_glob_skips_git_and_dot_directories(walk_tree):
 
     result = await glob_files("*")
 
-    assert result == "a.txt\nc.txt\nsub/b.txt", (
-        f"only files outside skipped directories may be listed, got {result!r}"
-    )
+    assert (
+        result == "a.txt\nc.txt\nsub/b.txt"
+    ), f"only files outside skipped directories may be listed, got {result!r}"
     for banned in (".git", ".hg", ".svn", "__pycache__", ".hidden", "HEAD"):
-        assert banned not in result, (
-            f"{banned} must never appear in the walk output, got {result!r}"
-        )
+        assert (
+            banned not in result
+        ), f"{banned} must never appear in the walk output, got {result!r}"
 
 
 @pytest.mark.asyncio
@@ -1052,9 +1043,9 @@ async def test_glob_honours_gitignore_negation_with_last_match_wins(root):
 
     result = await glob_files("*.log")
 
-    assert result == "keep.log", (
-        f"the negated rule must keep keep.log and drop a.log, got {result!r}"
-    )
+    assert (
+        result == "keep.log"
+    ), f"the negated rule must keep keep.log and drop a.log, got {result!r}"
 
 
 @pytest.mark.asyncio
@@ -1068,12 +1059,12 @@ async def test_glob_honours_a_gitignore_rule_containing_a_slash(root):
     excluded = await glob_files("*.tmp")
     kept = await glob_files("*.txt")
 
-    assert excluded == "No files matched '*.tmp' under ..", (
-        f"the slash rule must exclude sub/x.tmp, got {excluded!r}"
-    )
-    assert kept == "sub/keep.txt", (
-        f"files the rule does not name must still be listed, got {kept!r}"
-    )
+    assert (
+        excluded == "No files matched '*.tmp' under .."
+    ), f"the slash rule must exclude sub/x.tmp, got {excluded!r}"
+    assert (
+        kept == "sub/keep.txt"
+    ), f"files the rule does not name must still be listed, got {kept!r}"
 
 
 @pytest.mark.asyncio
@@ -1083,9 +1074,9 @@ async def test_glob_no_matches_says_so_without_an_error_prefix(walk_tree):
 
     result = await glob_files("*.zzz")
 
-    assert result == "No files matched '*.zzz' under ..", (
-        f"the no-match sentence is not an error, got {result!r}"
-    )
+    assert (
+        result == "No files matched '*.zzz' under .."
+    ), f"the no-match sentence is not an error, got {result!r}"
 
 
 @pytest.mark.asyncio
@@ -1098,12 +1089,12 @@ async def test_glob_dot_pattern_unlocks_hidden_directories(root):
     plain = await glob_files("settings.txt")
     widened = await glob_files(".config/*")
 
-    assert plain == "No files matched 'settings.txt' under ..", (
-        f"a non-dot pattern must not see .config/, got {plain!r}"
-    )
-    assert widened == ".config/settings.txt", (
-        f"a dot-starting pattern must unlock .config/, got {widened!r}"
-    )
+    assert (
+        plain == "No files matched 'settings.txt' under .."
+    ), f"a non-dot pattern must not see .config/, got {plain!r}"
+    assert (
+        widened == ".config/settings.txt"
+    ), f"a dot-starting pattern must unlock .config/, got {widened!r}"
 
 
 @pytest.mark.asyncio
@@ -1113,24 +1104,25 @@ async def test_glob_refuses_an_empty_pattern(walk_tree):
 
     result = await glob_files("")
 
-    assert result == "Error: glob: pattern must not be empty.", (
-        f"an empty pattern must be refused, got {result!r}"
-    )
+    assert (
+        result == "Error: glob: pattern must not be empty."
+    ), f"an empty pattern must be refused, got {result!r}"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("path", "expected"),
     [
-        ("no_such_dir", "Error: glob failed: no_such_dir does not exist, so "
-         "there is nothing to walk."),
+        (
+            "no_such_dir",
+            "Error: glob failed: no_such_dir does not exist, so "
+            "there is nothing to walk.",
+        ),
         ("note.txt", "Error: glob on note.txt failed: it is not a directory."),
     ],
     ids=["missing", "not-a-directory"],
 )
-async def test_glob_refuses_a_missing_or_non_directory_root(
-    root, path, expected
-):
+async def test_glob_refuses_a_missing_or_non_directory_root(root, path, expected):
     """A root that is missing or not a directory is refused in prose."""
     _install(Workspace(root, "fs-tools-tests", 2), _RecordingApprover())
     _make(root, "note.txt", "n\n")
@@ -1153,9 +1145,9 @@ async def test_glob_clamps_output_to_the_context_budget(root):
 
     result = await glob_files("*.txt")
 
-    assert "[truncated:" in result, (
-        f"an output above the budget must carry the truncation marker, got {result!r}"
-    )
+    assert (
+        "[truncated:" in result
+    ), f"an output above the budget must carry the truncation marker, got {result!r}"
 
 
 # --- grep --------------------------------------------------------------------
@@ -1168,9 +1160,9 @@ async def test_grep_files_with_matches_lists_each_matching_path_once(grep_tree):
 
     result = await grep_files("hello")
 
-    assert result == "code.py\nnote_a.txt\nnote_b.txt", (
-        f"each matching path must appear once, sorted, got {result!r}"
-    )
+    assert (
+        result == "code.py\nnote_a.txt\nnote_b.txt"
+    ), f"each matching path must appear once, sorted, got {result!r}"
 
 
 @pytest.mark.asyncio
@@ -1192,9 +1184,9 @@ async def test_grep_count_mode_reports_the_matching_lines_per_file(grep_tree):
 
     result = await grep_files("hello", output_mode="count")
 
-    assert result == "code.py:1\nnote_a.txt:1\nnote_b.txt:1", (
-        f"count mode must be path:n per file, got {result!r}"
-    )
+    assert (
+        result == "code.py:1\nnote_a.txt:1\nnote_b.txt:1"
+    ), f"count mode must be path:n per file, got {result!r}"
 
 
 @pytest.mark.asyncio
@@ -1206,9 +1198,9 @@ async def test_grep_glob_filter_restricts_which_files_are_read(grep_tree):
     only_txt = await grep_files("hello", glob="*.txt")
 
     assert only_py == "code.py", f"the filter must restrict to *.py, got {only_py!r}"
-    assert only_txt == "note_a.txt\nnote_b.txt", (
-        f"the filter must restrict to *.txt, got {only_txt!r}"
-    )
+    assert (
+        only_txt == "note_a.txt\nnote_b.txt"
+    ), f"the filter must restrict to *.txt, got {only_txt!r}"
 
 
 @pytest.mark.asyncio
@@ -1219,12 +1211,12 @@ async def test_grep_head_limit_truncates_the_output(grep_tree):
     paths = await grep_files("hello", head_limit=2)
     content = await grep_files("hello", output_mode="content", head_limit=2)
 
-    assert paths == "code.py\nnote_a.txt", (
-        f"head_limit=2 must keep a stable sorted prefix, got {paths!r}"
-    )
-    assert content == "code.py:1:# hello\nnote_a.txt:1:hello world", (
-        f"content mode must truncate to the same stable prefix, got {content!r}"
-    )
+    assert (
+        paths == "code.py\nnote_a.txt"
+    ), f"head_limit=2 must keep a stable sorted prefix, got {paths!r}"
+    assert (
+        content == "code.py:1:# hello\nnote_a.txt:1:hello world"
+    ), f"content mode must truncate to the same stable prefix, got {content!r}"
 
 
 @pytest.mark.asyncio
@@ -1234,9 +1226,9 @@ async def test_grep_head_limit_below_one_yields_the_no_matches_error(grep_tree):
 
     result = await grep_files("hello", head_limit=0)
 
-    assert result == "Error: no matches for 'hello' under ..", (
-        f"head_limit=0 must truncate to the no-matches error, got {result!r}"
-    )
+    assert (
+        result == "Error: no matches for 'hello' under .."
+    ), f"head_limit=0 must truncate to the no-matches error, got {result!r}"
 
 
 @pytest.mark.asyncio
@@ -1249,12 +1241,12 @@ async def test_grep_case_insensitive_matches_without_regard_to_case(root):
     sensitive = await grep_files("hello")
     insensitive = await grep_files("hello", case_insensitive=True)
 
-    assert sensitive == "soft.txt", (
-        f"the default must stay case-sensitive, got {sensitive!r}"
-    )
-    assert insensitive == "shout.txt\nsoft.txt", (
-        f"case_insensitive must match both spellings, got {insensitive!r}"
-    )
+    assert (
+        sensitive == "soft.txt"
+    ), f"the default must stay case-sensitive, got {sensitive!r}"
+    assert (
+        insensitive == "shout.txt\nsoft.txt"
+    ), f"case_insensitive must match both spellings, got {insensitive!r}"
 
 
 @pytest.mark.asyncio
@@ -1267,9 +1259,9 @@ async def test_grep_invalid_regex_falls_back_to_a_substring_match(root):
     content = await grep_files("h(llo", output_mode="content")
 
     assert paths == "odd.txt", f"the fallback must still find the text, got {paths!r}"
-    assert content == "odd.txt:1:value h(llo end", (
-        f"the fallback must match the literal text, got {content!r}"
-    )
+    assert (
+        content == "odd.txt:1:value h(llo end"
+    ), f"the fallback must match the literal text, got {content!r}"
 
 
 @pytest.mark.asyncio
@@ -1283,15 +1275,15 @@ async def test_grep_skips_binary_files_and_marks_them_in_content_mode(root):
     content = await grep_files("hello", output_mode="content")
     count = await grep_files("hello", output_mode="count")
 
-    assert paths == "hit.txt", (
-        f"a binary file must be skipped in files_with_matches, got {paths!r}"
-    )
-    assert content == "bin.dat: [binary]\nhit.txt:1:hello", (
-        f"content mode must note the skipped binary, got {content!r}"
-    )
-    assert count == "hit.txt:1", (
-        f"count mode must skip the binary silently, got {count!r}"
-    )
+    assert (
+        paths == "hit.txt"
+    ), f"a binary file must be skipped in files_with_matches, got {paths!r}"
+    assert (
+        content == "bin.dat: [binary]\nhit.txt:1:hello"
+    ), f"content mode must note the skipped binary, got {content!r}"
+    assert (
+        count == "hit.txt:1"
+    ), f"count mode must skip the binary silently, got {count!r}"
 
 
 @pytest.mark.asyncio
@@ -1302,9 +1294,9 @@ async def test_grep_treats_a_nul_after_the_sniff_window_as_text(root):
 
     result = await grep_files("needle", output_mode="content")
 
-    assert result == "big.bin:2:needle", (
-        f"a NUL past the sniff window must leave the file searchable, got {result!r}"
-    )
+    assert (
+        result == "big.bin:2:needle"
+    ), f"a NUL past the sniff window must leave the file searchable, got {result!r}"
 
 
 @pytest.mark.asyncio
@@ -1319,12 +1311,12 @@ async def test_grep_dot_starting_pattern_widens_the_walk_into_hidden_directories
     widened = await grep_files(".")
     narrowed = await grep_files("needle")
 
-    assert widened == ".hidden/h.txt\nvisible.txt", (
-        f"a dot-starting pattern must search .hidden/ too, got {widened!r}"
-    )
-    assert narrowed == "visible.txt", (
-        f"a non-dot pattern must not enter .hidden/, got {narrowed!r}"
-    )
+    assert (
+        widened == ".hidden/h.txt\nvisible.txt"
+    ), f"a dot-starting pattern must search .hidden/ too, got {widened!r}"
+    assert (
+        narrowed == "visible.txt"
+    ), f"a non-dot pattern must not enter .hidden/, got {narrowed!r}"
 
 
 @pytest.mark.asyncio
@@ -1347,24 +1339,25 @@ async def test_grep_refuses_an_empty_pattern(grep_tree):
 
     result = await grep_files("")
 
-    assert result == "Error: grep: pattern must not be empty.", (
-        f"an empty pattern must be refused, got {result!r}"
-    )
+    assert (
+        result == "Error: grep: pattern must not be empty."
+    ), f"an empty pattern must be refused, got {result!r}"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("path", "expected"),
     [
-        ("no_such_dir", "Error: grep failed: no_such_dir does not exist, so "
-         "there is nothing to search."),
+        (
+            "no_such_dir",
+            "Error: grep failed: no_such_dir does not exist, so "
+            "there is nothing to search.",
+        ),
         ("note_a.txt", "Error: grep on note_a.txt failed: it is not a directory."),
     ],
     ids=["missing", "not-a-directory"],
 )
-async def test_grep_refuses_a_missing_or_non_directory_root(
-    grep_tree, path, expected
-):
+async def test_grep_refuses_a_missing_or_non_directory_root(grep_tree, path, expected):
     """A root that is missing or not a directory is refused in prose."""
     _install(Workspace(grep_tree, "fs-tools-tests", 2), _RecordingApprover())
 
@@ -1381,9 +1374,9 @@ def test_grep_skips_a_named_pipe_without_hanging(root):
 
     result = _finish_within(lambda: grep_files("needle"))
 
-    assert result == "note.txt", (
-        f"the walk must skip the FIFO and still match the text file, got {result!r}"
-    )
+    assert (
+        result == "note.txt"
+    ), f"the walk must skip the FIFO and still match the text file, got {result!r}"
 
 
 @pytest.mark.asyncio
@@ -1397,9 +1390,9 @@ async def test_grep_clamps_output_to_the_context_budget(grep_tree):
 
     result = await grep_files("hello")
 
-    assert "[truncated:" in result, (
-        f"an output above the budget must carry the truncation marker, got {result!r}"
-    )
+    assert (
+        "[truncated:" in result
+    ), f"an output above the budget must carry the truncation marker, got {result!r}"
 
 
 # --- containment: one chokepoint, one approver --------------------------------
@@ -1407,9 +1400,7 @@ async def test_grep_clamps_output_to_the_context_budget(grep_tree):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool", TOOL_NAMES)
-async def test_in_root_paths_reach_the_approver_zero_times(
-    root, workspace, spy, tool
-):
+async def test_in_root_paths_reach_the_approver_zero_times(root, workspace, spy, tool):
     """Ordinary in-root work must never consult the approver, for any tool."""
     _install(workspace, spy)
     _make(root, "note.txt", "hello there\n")
@@ -1429,9 +1420,9 @@ async def test_in_root_paths_reach_the_approver_zero_times(
         f"{tool}: an in-root path must reach the approver zero times, "
         f"got {spy.requests!r}"
     )
-    assert not result.startswith("Error: "), (
-        f"{tool}: in-root work must succeed, got {result!r}"
-    )
+    assert not result.startswith(
+        "Error: "
+    ), f"{tool}: in-root work must succeed, got {result!r}"
 
 
 @pytest.mark.asyncio
@@ -1444,9 +1435,9 @@ async def test_escalated_escapes_reach_the_approver_exactly_once_and_are_honoure
 
     if tool == "read":
         result = await read("link_out.txt")
-        assert "outside treasure" in result, (
-            f"read: an approved escape must be actually read, got {result!r}"
-        )
+        assert (
+            "outside treasure" in result
+        ), f"read: an approved escape must be actually read, got {result!r}"
     elif tool == "write":
         result = await write("link_fresh.txt", "written through the link\n")
         assert escape.fresh.read_text(encoding="utf-8") == (
@@ -1454,30 +1445,30 @@ async def test_escalated_escapes_reach_the_approver_exactly_once_and_are_honoure
         ), "write: the approved escape must create the outside file"
     elif tool == "edit":
         result = await edit("link_edit.txt", "keep this line", "kept line")
-        assert escape.editable.read_text(encoding="utf-8") == "kept line\n", (
-            "edit: the approved escape must change the outside file"
-        )
+        assert (
+            escape.editable.read_text(encoding="utf-8") == "kept line\n"
+        ), "edit: the approved escape must change the outside file"
     elif tool == "glob":
         result = await glob_files("*.txt", "outlink")
-        assert str(escape.loot) in result, (
-            f"glob: the approved outside root must be walked, got {result!r}"
-        )
+        assert (
+            str(escape.loot) in result
+        ), f"glob: the approved outside root must be walked, got {result!r}"
     else:
         result = await grep_files("treasure", "outlink")
-        assert result == str(escape.loot), (
-            f"grep: the approved outside root must be searched, got {result!r}"
-        )
+        assert result == str(
+            escape.loot
+        ), f"grep: the approved outside root must be searched, got {result!r}"
 
     assert len(spy.requests) == 1, (
         f"{tool}: an escape must reach the approver exactly once, "
         f"got {len(spy.requests)}"
     )
-    assert spy.requests[0].action == tool, (
-        f"{tool}: the request must name the action that was attempted"
-    )
-    assert not result.startswith("Error: "), (
-        f"{tool}: an allowed escape must not come back as a refusal, got {result!r}"
-    )
+    assert (
+        spy.requests[0].action == tool
+    ), f"{tool}: the request must name the action that was attempted"
+    assert not result.startswith(
+        "Error: "
+    ), f"{tool}: an allowed escape must not come back as a refusal, got {result!r}"
 
 
 @pytest.mark.asyncio
@@ -1507,21 +1498,21 @@ async def test_denied_escapes_are_refused_in_prose_and_change_nothing(
     else:
         result = await grep_files("treasure", "outlink")
 
-    assert len(denying.requests) == 1, (
-        f"{tool}: a denial still escalates exactly once, got {len(denying.requests)}"
-    )
+    assert (
+        len(denying.requests) == 1
+    ), f"{tool}: a denial still escalates exactly once, got {len(denying.requests)}"
     assert result == DENIAL_TEMPLATE.format(
         action=tool, path=targets[tool], root=root
     ), f"{tool}: the refusal must name the action, path and root, got {result!r}"
 
     if tool == "write":
-        assert not escape.fresh.exists(), (
-            "write: a denied escape must create nothing outside the root"
-        )
+        assert (
+            not escape.fresh.exists()
+        ), "write: a denied escape must create nothing outside the root"
     elif tool == "edit":
-        assert escape.editable.read_text(encoding="utf-8") == "keep this line\n", (
-            "edit: a denied escape must leave the outside file byte-identical"
-        )
+        assert (
+            escape.editable.read_text(encoding="utf-8") == "keep this line\n"
+        ), "edit: a denied escape must leave the outside file byte-identical"
 
 
 # --- the documented walk asymmetry --------------------------------------------
@@ -1542,26 +1533,26 @@ async def test_read_escalates_but_the_walks_drop_the_same_symlink(
     _install(workspace, spy)
 
     escalated = await read("link_out.txt")
-    assert len(spy.requests) == 1, (
-        f"read: the symlink out of the root is an escape, got {spy.requests!r}"
-    )
-    assert "outside treasure" in escalated, (
-        f"read: the approved escape is honoured, got {escalated!r}"
-    )
+    assert (
+        len(spy.requests) == 1
+    ), f"read: the symlink out of the root is an escape, got {spy.requests!r}"
+    assert (
+        "outside treasure" in escalated
+    ), f"read: the approved escape is honoured, got {escalated!r}"
 
     spy.requests.clear()
     walked = await glob_files("*.txt")
-    assert walked == "No files matched '*.txt' under ..", (
-        f"glob: the outside symlink must be dropped, got {walked!r}"
-    )
-    assert spy.requests == [], (
-        f"glob: the walk must never consult the approver, got {spy.requests!r}"
-    )
+    assert (
+        walked == "No files matched '*.txt' under .."
+    ), f"glob: the outside symlink must be dropped, got {walked!r}"
+    assert (
+        spy.requests == []
+    ), f"glob: the walk must never consult the approver, got {spy.requests!r}"
 
     searched = await grep_files("treasure")
-    assert searched == "Error: no matches for 'treasure' under ..", (
-        f"grep: the outside symlink must be dropped, got {searched!r}"
-    )
-    assert spy.requests == [], (
-        f"grep: the walk must never consult the approver, got {spy.requests!r}"
-    )
+    assert (
+        searched == "Error: no matches for 'treasure' under .."
+    ), f"grep: the outside symlink must be dropped, got {searched!r}"
+    assert (
+        spy.requests == []
+    ), f"grep: the walk must never consult the approver, got {spy.requests!r}"

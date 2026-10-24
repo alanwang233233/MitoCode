@@ -91,14 +91,11 @@ logger = loguru_logger.bind(name=__name__)
 #: its tool does, what its arguments mean, and what it returns, assuming
 #: nothing about the caller's surroundings.  ``display_param`` is empty for
 #: the tools whose invocation has no single argument worth highlighting.
-_BUILTIN_TOOLS: Tuple[
-    Tuple[str, Callable[..., Any], str, str, str, str], ...
-] = (
+_BUILTIN_TOOLS: Tuple[Tuple[str, Callable[..., Any], str, str, str, str], ...] = (
     (
         "Read",
         read,
-        "Read a text file from the workspace and return its lines numbered "
-        "from 1.",
+        "Read a text file from the workspace and return its lines numbered " "from 1.",
         "Read a text file and return its lines numbered from 1, each "
         'rendered as "{number}\\t{line}" with absolute 1-indexed numbers, so '
         "paging through a large file shows the same line with the same "

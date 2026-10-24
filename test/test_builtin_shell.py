@@ -165,7 +165,9 @@ async def _pids_matching(pattern: str) -> list:
     return [int(line) for line in stdout.decode("utf-8").split()]
 
 
-async def _pgrep_until(pattern: str, present: bool, at_least: int, seconds: float) -> list:
+async def _pgrep_until(
+    pattern: str, present: bool, at_least: int, seconds: float
+) -> list:
     """Poll pgrep until the expected survivor state holds or *seconds* pass.
 
     Args:
@@ -272,44 +274,44 @@ def workspace_fixture(root):
 
 def test_scan_for_escape_flags_a_token_starting_with_a_tilde(root):
     """A ``~``-prefixed token leaves the root by definition and is flagged."""
-    assert scan_for_escape("cat ~/.zshrc", root) == "~/.zshrc", (
-        "a home-relative token must be handed to the approver"
-    )
+    assert (
+        scan_for_escape("cat ~/.zshrc", root) == "~/.zshrc"
+    ), "a home-relative token must be handed to the approver"
 
 
 def test_scan_for_escape_flags_the_bare_tilde_token(root):
     """A lone ``~`` token is flagged: there is no ``~`` meaning this root."""
-    assert scan_for_escape("~", root) == "~", (
-        "the bare tilde token must be flagged like any other"
-    )
+    assert (
+        scan_for_escape("~", root) == "~"
+    ), "the bare tilde token must be flagged like any other"
 
 
 def test_scan_for_escape_flags_the_dotdot_token(root):
     """The token ``..`` itself is a climb out of the root."""
-    assert scan_for_escape("cd ..", root) == "..", (
-        "the bare parent-directory token must be flagged"
-    )
+    assert (
+        scan_for_escape("cd ..", root) == ".."
+    ), "the bare parent-directory token must be flagged"
 
 
 def test_scan_for_escape_flags_a_token_starting_with_dotdot_slash(root):
     """A token starting ``../`` climbs out of the root and is flagged."""
-    assert scan_for_escape("cat ../outside.txt", root) == "../outside.txt", (
-        "a ../-prefixed token must be flagged verbatim"
-    )
+    assert (
+        scan_for_escape("cat ../outside.txt", root) == "../outside.txt"
+    ), "a ../-prefixed token must be flagged verbatim"
 
 
 def test_scan_for_escape_flags_an_absolute_path_outside_the_root(root):
     """An absolute path that resolves outside the root is flagged."""
-    assert scan_for_escape("cat /etc/passwd", root) == "/etc/passwd", (
-        "an absolute path outside the root must be handed to the approver"
-    )
+    assert (
+        scan_for_escape("cat /etc/passwd", root) == "/etc/passwd"
+    ), "an absolute path outside the root must be handed to the approver"
 
 
 def test_scan_for_escape_allows_an_absolute_path_inside_the_root(root):
     """An absolute path that resolves under the root is not flagged."""
-    assert scan_for_escape(f"cat {root}/inside.txt", root) is None, (
-        "an in-root absolute path is the common case and must never prompt"
-    )
+    assert (
+        scan_for_escape(f"cat {root}/inside.txt", root) is None
+    ), "an in-root absolute path is the common case and must never prompt"
 
 
 def test_scan_for_escape_compares_resolved_paths_through_a_symlink(root):
@@ -320,9 +322,9 @@ def test_scan_for_escape_compares_resolved_paths_through_a_symlink(root):
     """
     alias = root / "alias"
     alias.symlink_to(root, target_is_directory=True)
-    assert scan_for_escape(f"cat {alias}/inside.txt", root) is None, (
-        "a symlinked spelling of an in-root path must not be flagged"
-    )
+    assert (
+        scan_for_escape(f"cat {alias}/inside.txt", root) is None
+    ), "a symlinked spelling of an in-root path must not be flagged"
 
 
 def test_scan_for_escape_resolves_the_root_argument_itself(root, tmp_path):
@@ -337,12 +339,43 @@ def test_scan_for_escape_resolves_the_root_argument_itself(root, tmp_path):
     alias = tmp_path / "alias-root"
     alias.symlink_to(real, target_is_directory=True)
     (real / "inside.txt").write_text("x", encoding="utf-8")
-    assert scan_for_escape(f"cat {real}/inside.txt", alias) is None, (
-        "an unresolved root must not turn an in-root token into an escape"
-    )
-    assert scan_for_escape(f"cat {alias}/inside.txt", real) is None, (
-        "a symlinked token spelling must resolve against the real root"
-    )
+    assert (
+        scan_for_escape(f"cat {real}/inside.txt", alias) is None
+    ), "an unresolved root must not turn an in-root token into an escape"
+    assert (
+        scan_for_escape(f"cat {alias}/inside.txt", real) is None
+    ), "a symlinked token spelling must resolve against the real root"
+
+
+def test_scan_for_escape_allows_a_token_that_is_the_root_itself(root):
+    """A token that resolves to the root itself is inside, not an escape.
+
+    Boundary of the absolute-path rule: ``is_relative_to`` holds for the
+    root against itself.
+    """
+    assert (
+        scan_for_escape(f"cat {root}", root) is None
+    ), "the root itself must not be flagged as an escape from itself"
+
+
+def test_scan_for_escape_treats_glued_separators_and_newlines_as_token_boundaries(
+    root,
+):
+    """`;`, `||` and newlines split tokens even with no whitespace around them.
+
+    The tokeniser splits on runs of separator characters, so an escape glued
+    to the previous word (`a;cat /etc/passwd`) is still seen -- and so is an
+    escape on a continuation line.
+    """
+    assert (
+        scan_for_escape("echo a;cat /etc/passwd", root) == "/etc/passwd"
+    ), "a semicolon glued between words must still separate tokens"
+    assert (
+        scan_for_escape("echo a||cat /etc/passwd", root) == "/etc/passwd"
+    ), "a run of pipes glued between words must still separate tokens"
+    assert (
+        scan_for_escape("cat\n../up.txt", root) == "../up.txt"
+    ), "a newline must separate tokens like any other separator"
 
 
 def test_scan_for_escape_flags_a_sibling_of_the_root(root, tmp_path):
@@ -350,9 +383,9 @@ def test_scan_for_escape_flags_a_sibling_of_the_root(root, tmp_path):
     sibling = tmp_path / "sibling"
     sibling.mkdir()
     token = f"{sibling}/secret.txt"
-    assert scan_for_escape(f"cat {token}", root) == token, (
-        "a sibling of the root resolves outside it and must be flagged"
-    )
+    assert (
+        scan_for_escape(f"cat {token}", root) == token
+    ), "a sibling of the root resolves outside it and must be flagged"
 
 
 @pytest.mark.parametrize("token", ["--file=/tmp/x", "FOO=/tmp/x"])
@@ -362,9 +395,9 @@ def test_scan_for_escape_does_not_flag_option_or_env_shapes(root, token):
     ``--file=/tmp/x`` and ``FOO=/tmp/x`` are not paths; the path rules do
     not apply to them and they must not prompt the approver.
     """
-    assert scan_for_escape(f"probe {token}", root) is None, (
-        f"{token!r} is an option/env shape, not a path, and must not be flagged"
-    )
+    assert (
+        scan_for_escape(f"probe {token}", root) is None
+    ), f"{token!r} is an option/env shape, not a path, and must not be flagged"
 
 
 def test_scan_for_escape_flags_a_path_token_when_the_slash_precedes_the_equals(root):
@@ -434,17 +467,17 @@ def test_scan_for_escape_flags_against_an_unresolvable_root():
 
 def test_scan_for_escape_returns_the_first_offending_token(root):
     """The first flagged token in command order is the one returned."""
-    assert scan_for_escape("ls ~ ; cat /etc/passwd", root) == "~", (
-        "the scan reports the first offending token, not the last"
-    )
+    assert (
+        scan_for_escape("ls ~ ; cat /etc/passwd", root) == "~"
+    ), "the scan reports the first offending token, not the last"
 
 
 @pytest.mark.parametrize("command", ["", " ;; | & "])
 def test_scan_for_escape_allows_empty_and_separator_only_commands(root, command):
     """Empty tokens between separators name nothing and flag nothing."""
-    assert scan_for_escape(command, root) is None, (
-        f"{command!r} contains no path-shaped token and must not be flagged"
-    )
+    assert (
+        scan_for_escape(command, root) is None
+    ), f"{command!r} contains no path-shaped token and must not be flagged"
 
 
 # --- bash: running the command and shaping the output ------------------------
@@ -460,12 +493,12 @@ async def test_bash_runs_in_the_workspace_root(root, workspace):
     result = await bash(f"touch {marker}")
 
     assert result == "", "touch prints nothing on success"
-    assert (root / marker).is_file(), (
-        "the command must run with the workspace root as its cwd"
-    )
-    assert not Path(os.getcwd(), marker).exists(), (
-        "the marker must not have landed in the tool process's own cwd"
-    )
+    assert (
+        root / marker
+    ).is_file(), "the command must run with the workspace root as its cwd"
+    assert not Path(
+        os.getcwd(), marker
+    ).exists(), "the marker must not have landed in the tool process's own cwd"
 
 
 @pytest.mark.asyncio
@@ -476,9 +509,9 @@ async def test_bash_returns_the_command_output(root, workspace):
 
     result = await bash("echo stdout-payload")
 
-    assert result == "stdout-payload\n", (
-        "the tool returns the command's output and nothing else on success"
-    )
+    assert (
+        result == "stdout-payload\n"
+    ), "the tool returns the command's output and nothing else on success"
 
 
 @pytest.mark.asyncio
@@ -489,9 +522,9 @@ async def test_bash_merges_stderr_into_stdout(root, workspace):
 
     result = await bash("echo stderr-payload 1>&2")
 
-    assert result == "stderr-payload\n", (
-        "stderr must be merged into the returned stream"
-    )
+    assert (
+        result == "stderr-payload\n"
+    ), "stderr must be merged into the returned stream"
 
 
 @pytest.mark.asyncio
@@ -507,25 +540,47 @@ async def test_bash_merges_the_streams_in_order(root, workspace):
 
     result = await bash("/bin/echo first-line; /bin/echo second-line 1>&2")
 
-    assert result == "first-line\nsecond-line\n", (
-        "the merged stream must preserve the order the child wrote"
-    )
+    assert (
+        result == "first-line\nsecond-line\n"
+    ), "the merged stream must preserve the order the child wrote"
 
 
 @pytest.mark.asyncio
-async def test_bash_appends_the_exit_code_marker_when_the_command_fails(root, workspace):
+async def test_bash_appends_the_exit_code_marker_when_the_command_fails(
+    root, workspace
+):
     """A non-zero exit is data for the model, appended, never ``Error: ``."""
     approver = _RecordingApprover(ApprovalDecision.ALLOW)
     _install(workspace, approver)
 
     result = await bash("echo payload-line; exit 3")
 
-    assert result == "payload-line\n\n[exit code: 3]", (
-        "the exit-code marker sits one blank line under the last output line"
-    )
-    assert not result.startswith("Error:"), (
-        "a non-zero exit code is the command's failure, not the tool's"
-    )
+    assert (
+        result == "payload-line\n\n[exit code: 3]"
+    ), "the exit-code marker sits one blank line under the last output line"
+    assert not result.startswith(
+        "Error:"
+    ), "a non-zero exit code is the command's failure, not the tool's"
+
+
+@pytest.mark.asyncio
+async def test_bash_appends_the_exit_code_marker_to_empty_output(root, workspace):
+    """A failed command with no output produces just the marker.
+
+    Boundary of the exit-code rule: empty output, rstrip leaves nothing, so
+    the result is the marker alone, still without an ``Error: `` prefix.
+    """
+    approver = _RecordingApprover(ApprovalDecision.ALLOW)
+    _install(workspace, approver)
+
+    result = await bash("exit 3")
+
+    assert (
+        result == "\n\n[exit code: 3]"
+    ), "an empty failure is the marker alone, one blank line down"
+    assert not result.startswith(
+        "Error:"
+    ), "a non-zero exit code is the command's failure, not the tool's"
 
 
 @pytest.mark.asyncio
@@ -572,9 +627,9 @@ async def test_bash_clamps_long_output_keeping_both_ends(root, workspace):
     result = await bash("cat long.txt")
 
     dropped = len(lines) - 100
-    assert f"[truncated: {dropped} characters omitted]" in result, (
-        "the clamp marker must name how much was dropped"
-    )
+    assert (
+        f"[truncated: {dropped} characters omitted]" in result
+    ), "the clamp marker must name how much was dropped"
     assert result.startswith("1\n"), "the head of the output must be kept"
     assert result.endswith("1000\n"), "the tail of the output must be kept"
 
@@ -657,12 +712,12 @@ async def test_bash_deny_refuses_in_prose_and_does_not_run_the_command(root, wor
         "the refusal names the command, the root it was supposed to stay "
         f"inside and the flagged token; got {result!r}"
     )
-    assert not (root / "refused-side-effect.txt").exists(), (
-        "a DENY verdict must not run any part of the command"
-    )
-    assert len(approver.requests) == 1, (
-        "the refusal is decided by the single DENY the approver gave"
-    )
+    assert not (
+        root / "refused-side-effect.txt"
+    ).exists(), "a DENY verdict must not run any part of the command"
+    assert (
+        len(approver.requests) == 1
+    ), "the refusal is decided by the single DENY the approver gave"
 
 
 @pytest.mark.asyncio
@@ -677,9 +732,9 @@ async def test_bash_without_a_workspace_skips_the_scan_and_the_approver():
         "with no workspace there is no root to escape from, so an "
         "escape-shaped command must still not consult the approver"
     )
-    assert result.startswith("no-boundary\n"), (
-        "the command must run even though it names an absolute path"
-    )
+    assert result.startswith(
+        "no-boundary\n"
+    ), "the command must run even though it names an absolute path"
 
 
 # --- bash: the timeout kills the process group --------------------------------
@@ -707,7 +762,9 @@ async def test_bash_timeout_kills_the_process_group(root, workspace):
         f"a timeout is the tool's failure (prose, no output section when "
         f"nothing was printed); got {result!r}"
     )
-    survivors = await _pgrep_until(TIMEOUT_SLEEP, present=False, at_least=1, seconds=DEADLINE_SECONDS)
+    survivors = await _pgrep_until(
+        TIMEOUT_SLEEP, present=False, at_least=1, seconds=DEADLINE_SECONDS
+    )
     assert survivors == [], (
         f"the process group survived the timeout: pids {survivors} are still "
         "alive -- a bare proc.kill() killed the shell but not its children"
@@ -740,7 +797,9 @@ async def test_bash_timeout_message_carries_output_printed_before_the_kill(
 
 @pytest.mark.parametrize("timeout_ms", [0, -1])
 @pytest.mark.asyncio
-async def test_bash_non_positive_timeout_expires_immediately(root, workspace, timeout_ms):
+async def test_bash_non_positive_timeout_expires_immediately(
+    root, workspace, timeout_ms
+):
     """A timeout of zero or less expires immediately and still kills cleanly."""
     approver = _RecordingApprover(ApprovalDecision.ALLOW)
     _install(workspace, approver)

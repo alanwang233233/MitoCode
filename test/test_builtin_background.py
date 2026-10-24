@@ -394,9 +394,9 @@ def test_task_state_values_are_the_wire_strings_a_notification_embeds():
 
 def test_running_is_the_only_non_terminal_state():
     """``pending_notifications`` walks the set, so this is load-bearing."""
-    assert TaskState.RUNNING not in TERMINAL_STATES, (
-        "a running task has nothing to announce, so it must not be terminal"
-    )
+    assert (
+        TaskState.RUNNING not in TERMINAL_STATES
+    ), "a running task has nothing to announce, so it must not be terminal"
     assert TERMINAL_STATES == {
         TaskState.DONE,
         TaskState.FAILED,
@@ -412,9 +412,9 @@ def test_background_task_is_a_dataclass_with_the_fields_collect_hands_back():
     """The record is the thing ``collect`` returns and delivery reads."""
     import dataclasses
 
-    assert dataclasses.is_dataclass(BackgroundTask), (
-        "a plain class would not give callers a value-comparable snapshot"
-    )
+    assert dataclasses.is_dataclass(
+        BackgroundTask
+    ), "a plain class would not give callers a value-comparable snapshot"
     assert tuple(f.name for f in dataclasses.fields(BackgroundTask)) == (
         "handle",
         "state",
@@ -459,9 +459,9 @@ async def test_launch_returns_before_the_detached_work_has_run():
     handle = registry.launch(slow_work, caller_id=AGENT_ID, timeout=LONG_CEILING_MS)
     snapshot = await registry.collect(handle)
 
-    assert snapshot.state is TaskState.RUNNING, (
-        "collect right after launch must find the work in flight"
-    )
+    assert (
+        snapshot.state is TaskState.RUNNING
+    ), "collect right after launch must find the work in flight"
     assert snapshot.result == "", "a running task has no result to hand back yet"
     assert not started.is_set(), (
         "launch must not have run the coroutine; a ten-second operation has to "
@@ -508,9 +508,9 @@ async def test_launch_replaces_a_falsy_ceiling_with_the_five_minute_default(time
         "a falsy ceiling must fall back to five minutes, not to zero — a zero "
         "budget would fail every call the model makes"
     )
-    assert snapshot.state is TaskState.RUNNING, (
-        "the substituted ceiling must not fire immediately"
-    )
+    assert (
+        snapshot.state is TaskState.RUNNING
+    ), "the substituted ceiling must not fire immediately"
     registry.cancel_all()
     await _drain_loop()
 
@@ -555,9 +555,9 @@ async def test_a_negative_ceiling_expires_the_task_immediately():
         "a negative ceiling must not raise out of the tool body; the documented "
         "reading of a nonsensical budget is 'expire immediately'"
     )
-    assert record.result == "timed out after -100 ms", (
-        "the timeout text reports the ceiling that was actually asked for"
-    )
+    assert (
+        record.result == "timed out after -100 ms"
+    ), "the timeout text reports the ceiling that was actually asked for"
     registry.cancel_all()
     await _drain_loop()
 
@@ -583,9 +583,9 @@ async def test_a_one_millisecond_ceiling_is_not_rounded_up_to_the_default():
         "a one-millisecond ceiling must expire within the test, so it cannot "
         f"have been rounded up to {EXPECTED_DEFAULT_CEILING_MS} ms"
     )
-    assert record.result == "timed out after 1 ms", (
-        "the timeout text must report the ceiling that actually elapsed"
-    )
+    assert (
+        record.result == "timed out after 1 ms"
+    ), "the timeout text must report the ceiling that actually elapsed"
     registry.cancel_all()
     await _drain_loop()
 
@@ -621,9 +621,9 @@ async def test_launch_keeps_a_non_numeric_ceiling_verbatim_without_expiring_on_i
         "the ceiling is stored as asked; rewriting it would lose what the model "
         f"actually requested (got {snapshot.timeout!r})"
     )
-    assert snapshot.state is TaskState.RUNNING, (
-        "the call must be in flight, not failed by the ceiling it was given"
-    )
+    assert (
+        snapshot.state is TaskState.RUNNING
+    ), "the call must be in flight, not failed by the ceiling it was given"
     assert snapshot.result == "", (
         "a running call has nothing to report, least of all a complaint about "
         f"its own ceiling (got {snapshot.result!r})"
@@ -683,9 +683,9 @@ async def test_work_that_suppresses_its_own_cancellation_is_recorded_as_timed_ou
         "the deadline fired, so TIMEOUT must win over anything the inner "
         f"produced; got {record.state!r} with {record.result!r}"
     )
-    assert record.result == "timed out after 20 ms", (
-        "the timeout text reports the ceiling that actually elapsed"
-    )
+    assert (
+        record.result == "timed out after 20 ms"
+    ), "the timeout text reports the ceiling that actually elapsed"
     assert record.result != "a value produced after the ceiling", (
         "the value the callee produced after suppressing its cancellation must "
         "be discarded, not reported as the outcome"
@@ -728,9 +728,9 @@ async def test_a_late_failure_after_the_ceiling_is_logged_and_never_promoted():
     )
     try:
         settled = await _settled(registry, handle)
-        assert settled.state is TaskState.TIMEOUT, (
-            "the ceiling fires first; the late failure is a separate event"
-        )
+        assert (
+            settled.state is TaskState.TIMEOUT
+        ), "the ceiling fires first; the late failure is a separate event"
 
         lines = []
         sink = loguru_logger.add(lines.append, level="DEBUG")
@@ -746,9 +746,9 @@ async def test_a_late_failure_after_the_ceiling_is_logged_and_never_promoted():
             "a failure from work that outlived its ceiling must never be promoted "
             "over the timeout; the ceiling is the registry's promise"
         )
-        assert after[0].result == "timed out after 20 ms", (
-            "the timeout text is unchanged by the late failure"
-        )
+        assert (
+            after[0].result == "timed out after 20 ms"
+        ), "the timeout text is unchanged by the late failure"
         assert handle in logged, "the line must name the handle whose work misbehaved"
         assert "late failure" in logged, (
             "the late exception must reach the log, otherwise the drain would "
@@ -790,9 +790,9 @@ async def test_a_tool_raising_its_own_timeout_error_is_recorded_as_failed():
         "the failure is rendered with its real type and message so the model "
         "can tell a tool timeout from a registry timeout"
     )
-    assert "timed out after" not in record.result, (
-        "the registry must not invent a ceiling the call never hit"
-    )
+    assert (
+        "timed out after" not in record.result
+    ), "the registry must not invent a ceiling the call never hit"
 
 
 @pytest.mark.asyncio
@@ -810,9 +810,9 @@ async def test_a_tool_raising_the_builtin_timeout_error_is_also_failed():
         "the builtin spelling must reach the same ledger entry on every "
         f"interpreter (got {record.state!r})"
     )
-    assert record.result == "Error: TimeoutError: subprocess timed out", (
-        "the failure must name the exception type the tool really raised"
-    )
+    assert (
+        record.result == "Error: TimeoutError: subprocess timed out"
+    ), "the failure must name the exception type the tool really raised"
 
 
 # --- cancellation is recorded, never converted into success ---------------
@@ -847,15 +847,15 @@ async def test_a_wrapper_cancelled_from_outside_is_recorded_as_cancelled_not_don
 
     assert task.cancelled(), "the cancellation must be re-raised, not absorbed"
     snapshot = await registry.collect(handle)
-    assert snapshot.state is TaskState.CANCELLED, (
-        "a task cancelled from outside must not be reported as a success"
-    )
-    assert snapshot.result == "cancelled before it finished", (
-        "a cancelled task carries the explanation the model is given"
-    )
-    assert snapshot.state is not TaskState.DONE, (
-        "and it must never read as the success it did not reach"
-    )
+    assert (
+        snapshot.state is TaskState.CANCELLED
+    ), "a task cancelled from outside must not be reported as a success"
+    assert (
+        snapshot.result == "cancelled before it finished"
+    ), "a cancelled task carries the explanation the model is given"
+    assert (
+        snapshot.state is not TaskState.DONE
+    ), "and it must never read as the success it did not reach"
 
 
 @pytest.mark.asyncio
@@ -888,12 +888,12 @@ async def test_a_wrapper_cancelled_before_its_first_line_ran_is_reconciled():
         "a handle whose wrapper was cancelled before it started must still be "
         f"answerable (got {snapshot.state!r})"
     )
-    assert snapshot.result == "cancelled before it finished", (
-        "an unreconciled handle must still answer with the cancelled text"
-    )
-    assert snapshot.state is not TaskState.DONE, (
-        "and never as a success the work never got to produce"
-    )
+    assert (
+        snapshot.result == "cancelled before it finished"
+    ), "an unreconciled handle must still answer with the cancelled text"
+    assert (
+        snapshot.state is not TaskState.DONE
+    ), "and never as a success the work never got to produce"
 
 
 @pytest.mark.asyncio
@@ -921,9 +921,9 @@ async def test_work_that_hands_back_an_already_cancelled_future_is_cancelled():
         "a cancelled inner future is not a failure and not a success, and the "
         f"ceiling never fired (got {record.state!r})"
     )
-    assert record.result == "cancelled before it finished", (
-        "a cancelled future is reported with the same text as any other"
-    )
+    assert (
+        record.result == "cancelled before it finished"
+    ), "a cancelled future is reported with the same text as any other"
 
 
 # --- a factory that never handed over any work to run ---------------------
@@ -946,7 +946,9 @@ async def test_a_factory_that_raises_is_recorded_as_failed_not_left_running():
         raise TypeError("factory blew up")
 
     registry = BackgroundRegistry()
-    handle = registry.launch(raising_factory, caller_id=AGENT_ID, timeout=LONG_CEILING_MS)
+    handle = registry.launch(
+        raising_factory, caller_id=AGENT_ID, timeout=LONG_CEILING_MS
+    )
 
     record = await _settled(registry, handle)
 
@@ -999,9 +1001,9 @@ async def test_a_returning_coroutine_is_recorded_as_done():
     registry, handle, _ = _settled_registry()
     record = await _settled(registry, handle)
 
-    assert record.state is TaskState.DONE, (
-        "a returned coroutine settles DONE, which is the ordinary path"
-    )
+    assert (
+        record.state is TaskState.DONE
+    ), "a returned coroutine settles DONE, which is the ordinary path"
     assert record.result == WORK_RESULT, "collect hands back the rendered return"
 
 
@@ -1023,12 +1025,12 @@ async def test_a_non_string_return_value_is_rendered_through_str(value, expected
     )
     record = await _settled(registry, handle)
 
-    assert record.state is TaskState.DONE, (
-        "a value that rendered successfully still settled DONE"
-    )
-    assert record.result == expected, (
-        f"a non-string return is rendered with str(), not repr() (got {record.result!r})"
-    )
+    assert (
+        record.state is TaskState.DONE
+    ), "a value that rendered successfully still settled DONE"
+    assert (
+        record.result == expected
+    ), f"a non-string return is rendered with str(), not repr() (got {record.result!r})"
 
 
 @pytest.mark.asyncio
@@ -1048,12 +1050,12 @@ async def test_a_return_value_whose_str_raises_is_recorded_as_done_not_failed():
     )
     record = await _settled(registry, handle)
 
-    assert record.state is TaskState.DONE, (
-        "the work completed; a value that cannot be rendered is not a failure"
-    )
+    assert (
+        record.state is TaskState.DONE
+    ), "the work completed; a value that cannot be rendered is not a failure"
     assert record.result == "__str__ exploded", (
         "the guard returns safe_exception_message(exc), which for a renderable "
-                "message is that message rather than a name for its type"
+        "message is that message rather than a name for its type"
     )
 
 
@@ -1066,15 +1068,15 @@ async def test_an_ordinary_exception_is_recorded_as_failed_and_not_re_raised():
     )
     record = await _settled(registry, handle)
 
-    assert record.state is TaskState.FAILED, (
-        "an ordinary exception is a failure, never a timeout"
-    )
-    assert record.result == "Error: RuntimeError: boom", (
-        "the failure carries the real type and message for the model"
-    )
-    assert isinstance(record.result, str), (
-        "the exception object must never reach the model, only its rendering"
-    )
+    assert (
+        record.state is TaskState.FAILED
+    ), "an ordinary exception is a failure, never a timeout"
+    assert (
+        record.result == "Error: RuntimeError: boom"
+    ), "the failure carries the real type and message for the model"
+    assert isinstance(
+        record.result, str
+    ), "the exception object must never reach the model, only its rendering"
 
 
 # --- collect ---------------------------------------------------------------
@@ -1093,12 +1095,10 @@ async def test_collect_of_a_handle_the_registry_never_issued_reads_running():
         "model has to re-issue the call rather than wait for something that "
         "will never land"
     )
-    assert snapshot.result == "unknown handle", (
-        "the marker is what distinguishes 'never existed' from 'nothing to say'"
-    )
-    assert snapshot.caller_id is None, (
-        "an unissued handle has no owning turn"
-    )
+    assert (
+        snapshot.result == "unknown handle"
+    ), "the marker is what distinguishes 'never existed' from 'nothing to say'"
+    assert snapshot.caller_id is None, "an unissued handle has no owning turn"
     # `timeout` is deliberately not asserted here: zero is a plausible
     # placeholder, but it is a sentinel nothing else depends on, and pinning it
     # would fail on a change with no behavioural consequence.
@@ -1122,16 +1122,14 @@ async def test_collect_of_a_handle_still_in_flight_reads_running_without_waiting
     snapshot = await registry.collect(handle)
 
     assert snapshot.state is TaskState.RUNNING, "collect reports, it never waits"
-    assert snapshot.result == "", (
-        "a running call has nothing to hand back"
-    )
+    assert snapshot.result == "", "a running call has nothing to hand back"
     assert snapshot.timeout == LONG_CEILING_MS, (
         "a running record still carries the ceiling, so the model can be told "
         "how long it has"
     )
-    assert registry.pending_notifications() == [], (
-        "an unfinished task has nothing to announce"
-    )
+    assert (
+        registry.pending_notifications() == []
+    ), "an unfinished task has nothing to announce"
     release.set()
     await _settled(registry, handle)
 
@@ -1146,12 +1144,12 @@ async def test_a_second_collect_answers_collected_with_an_empty_result():
     second = await registry.collect(handle)
 
     assert first.state is TaskState.DONE, "the first caller gets the outcome"
-    assert first.result == WORK_RESULT, (
-        "and hands back the rendered value the callee returned"
-    )
-    assert second.state is TaskState.COLLECTED, (
-        "'ask again and you will get nothing' is the contract for a spent handle"
-    )
+    assert (
+        first.result == WORK_RESULT
+    ), "and hands back the rendered value the callee returned"
+    assert (
+        second.state is TaskState.COLLECTED
+    ), "'ask again and you will get nothing' is the contract for a spent handle"
     assert second.result == "", "the stored text is handed over exactly once"
 
 
@@ -1191,9 +1189,10 @@ async def test_two_concurrent_collects_do_not_both_observe_the_result():
         "exactly one of two simultaneous collects may observe the stored result, "
         f"got {[(snap.state, snap.result) for snap in (first, second)]!r}"
     )
-    assert {first.state, second.state} == {TaskState.DONE, TaskState.COLLECTED}, (
-        "one caller gets the outcome and the other the spent form"
-    )
+    assert {first.state, second.state} == {
+        TaskState.DONE,
+        TaskState.COLLECTED,
+    }, "one caller gets the outcome and the other the spent form"
 
 
 @pytest.mark.asyncio
@@ -1203,12 +1202,12 @@ async def test_collect_of_an_unknown_handle_reads_the_same_however_often_it_is_a
 
     reads = [(await registry.collect("bg_404")) for _ in range(3)]
 
-    assert all(read.state is TaskState.RUNNING for read in reads), (
-        "the state must not drift between repeated asks"
-    )
-    assert all(read.result == "unknown handle" for read in reads), (
-        "nor may the marker change"
-    )
+    assert all(
+        read.state is TaskState.RUNNING for read in reads
+    ), "the state must not drift between repeated asks"
+    assert all(
+        read.result == "unknown handle" for read in reads
+    ), "nor may the marker change"
 
 
 @pytest.mark.parametrize(
@@ -1230,15 +1229,15 @@ async def test_collect_of_a_handle_it_could_never_have_issued_reads_unknown(hand
     snapshot = await registry.collect(handle)
 
     assert snapshot.handle == handle, "the handle asked about is echoed back verbatim"
-    assert snapshot.state is TaskState.RUNNING, (
-        "an unissued handle reads RUNNING so the model re-issues the call"
-    )
-    assert snapshot.result == "unknown handle", (
-        "an unissued handle must read as 'nothing to report', never as an error"
-    )
-    assert registry.pending_notifications() == [], (
-        "asking about a handle must not register it"
-    )
+    assert (
+        snapshot.state is TaskState.RUNNING
+    ), "an unissued handle reads RUNNING so the model re-issues the call"
+    assert (
+        snapshot.result == "unknown handle"
+    ), "an unissued handle must read as 'nothing to report', never as an error"
+    assert (
+        registry.pending_notifications() == []
+    ), "asking about a handle must not register it"
 
 
 @pytest.mark.asyncio
@@ -1246,9 +1245,9 @@ async def test_collecting_a_result_takes_it_off_the_notification_list():
     """A collected task has already told the model, so announcing it is noise."""
     registry, handle, _ = _settled_registry(caller_id=AGENT_ID)
     await _settled(registry, handle)
-    assert _handles(registry.pending_notifications()) == [handle], (
-        "and stays owed until something else changes it"
-    )
+    assert _handles(registry.pending_notifications()) == [
+        handle
+    ], "and stays owed until something else changes it"
 
     await registry.collect(handle)
 
@@ -1273,9 +1272,9 @@ async def test_pending_notifications_is_empty_while_the_task_is_running():
     handle = registry.launch(slow_work, caller_id=AGENT_ID, timeout=LONG_CEILING_MS)
     await asyncio.sleep(0)
 
-    assert registry.pending_notifications() == [], (
-        "an in-flight task must not appear in the notification list"
-    )
+    assert (
+        registry.pending_notifications() == []
+    ), "an in-flight task must not appear in the notification list"
     registry.cancel_all()
     await _drain_loop()
 
@@ -1306,15 +1305,15 @@ async def test_pending_notifications_hands_back_copies_not_the_stored_record():
     one consumer's formatting edit become another consumer's answer.
     """
     registry, handle, _ = _settled_registry()
-    record = (await _settled(registry, handle))
+    record = await _settled(registry, handle)
 
     record.result = "tampered with by a caller"
     record.state = TaskState.RUNNING
 
     fresh = registry.pending_notifications()[0]
-    assert fresh.result == WORK_RESULT, (
-        "the registry's own record must be untouched by edits to the copy"
-    )
+    assert (
+        fresh.result == WORK_RESULT
+    ), "the registry's own record must be untouched by edits to the copy"
     assert fresh.state is TaskState.DONE, "nor may its state be edited from outside"
 
 
@@ -1327,15 +1326,15 @@ async def test_mark_delivered_clears_the_result_and_leaves_the_state_done():
     registry.mark_delivered(handle)
     snapshot = await registry.collect(handle)
 
-    assert snapshot.state is TaskState.DONE, (
-        "delivery does not consume the outcome; the model can still collect it"
-    )
-    assert snapshot.result == "", (
-        "the text has been read out, and keeping it would only pin memory"
-    )
-    assert registry.pending_notifications() == [], (
-        "a delivered handle is filtered out of the notification list"
-    )
+    assert (
+        snapshot.state is TaskState.DONE
+    ), "delivery does not consume the outcome; the model can still collect it"
+    assert (
+        snapshot.result == ""
+    ), "the text has been read out, and keeping it would only pin memory"
+    assert (
+        registry.pending_notifications() == []
+    ), "a delivered handle is filtered out of the notification list"
 
 
 @pytest.mark.asyncio
@@ -1353,10 +1352,12 @@ async def test_mark_delivered_is_idempotent_and_tolerates_an_unissued_handle():
     await registry.collect(handle)
     registry.mark_delivered(handle)
 
-    assert registry.pending_notifications() == [], (
-        "marking an unknown handle is a no-op, not a registry of its own"
-    )
-    assert (await registry.collect(handle)).state is TaskState.COLLECTED, (
+    assert (
+        registry.pending_notifications() == []
+    ), "marking an unknown handle is a no-op, not a registry of its own"
+    assert (
+        await registry.collect(handle)
+    ).state is TaskState.COLLECTED, (
         "delivering after the result was spent must not resurrect it"
     )
 
@@ -1394,12 +1395,12 @@ async def test_cancel_all_records_a_running_task_as_cancelled_before_it_returns(
         "the state is written synchronously because the CancelledError is only "
         "scheduled by the time cancel_all returns"
     )
-    assert snapshot.result == "cancelled before it finished", (
-        "the model must be told the work was stopped, not left blank"
-    )
-    assert snapshot.state is not TaskState.DONE, (
-        "a cancelled task is not a success, whatever it was about to return"
-    )
+    assert (
+        snapshot.result == "cancelled before it finished"
+    ), "the model must be told the work was stopped, not left blank"
+    assert (
+        snapshot.state is not TaskState.DONE
+    ), "a cancelled task is not a success, whatever it was about to return"
     await _drain_loop()
 
 
@@ -1412,12 +1413,12 @@ async def test_cancel_all_leaves_a_finished_task_untouched():
     registry.cancel_all()
     snapshot = await registry.collect(handle)
 
-    assert snapshot.state is TaskState.FAILED, (
-        "a terminal task must be left exactly as it was settled"
-    )
-    assert snapshot.result == "Error: RuntimeError: boom", (
-        "the recorded failure text survives the cancellation sweep"
-    )
+    assert (
+        snapshot.state is TaskState.FAILED
+    ), "a terminal task must be left exactly as it was settled"
+    assert (
+        snapshot.result == "Error: RuntimeError: boom"
+    ), "the recorded failure text survives the cancellation sweep"
 
 
 def test_cancel_all_on_an_empty_registry_changes_nothing():
@@ -1434,9 +1435,7 @@ def test_cancel_all_on_an_empty_registry_changes_nothing():
         "cancel_all must stay synchronous; a coroutine return would be "
         f"unawaited at every teardown call site (got {returned!r})"
     )
-    assert registry.pending_notifications() == [], (
-        "a fresh registry owes nothing"
-    )
+    assert registry.pending_notifications() == [], "a fresh registry owes nothing"
 
 
 # --- the delivery gate -----------------------------------------------------
@@ -1458,9 +1457,9 @@ def test_the_deliverable_states_are_every_agent_state_except_running():
     """The module docstring says no such test exists; this is it."""
     from mitocode.core.agent.agent_state import AgentState
 
-    assert set(DELIVERABLE_STATE_VALUES) == {
-        state.value for state in AgentState
-    } - {AgentState.RUNNING.value}, (
+    assert set(DELIVERABLE_STATE_VALUES) == {state.value for state in AgentState} - {
+        AgentState.RUNNING.value
+    }, (
         "DELIVERABLE_STATE_VALUES must name every state this build recognises "
         "as safe; a value left off the list is a notification that never lands"
     )
@@ -1488,16 +1487,17 @@ def test_park_reason_delivers_into_every_recognised_non_running_state(state):
 
 def test_park_reason_reads_a_state_off_an_enum_like_member():
     """A real session carries an enum member, not a bare string."""
-    assert park_reason(_FakeSession(SimpleNamespace(value="finished"))) is None, (
-        "an enum member must resolve through its .value, like a real session"
-    )
+    assert (
+        park_reason(_FakeSession(SimpleNamespace(value="finished"))) is None
+    ), "an enum member must resolve through its .value, like a real session"
 
 
 def test_park_reason_parks_a_running_caller_with_the_value_it_saw():
     """The ordinary case, and the reason the whole deferral exists."""
-    assert park_reason(_FakeSession("running")) == (PARKED_RUNNING, "running"), (
-        "the raw value read off the session is handed back for the drift log"
-    )
+    assert park_reason(_FakeSession("running")) == (
+        PARKED_RUNNING,
+        "running",
+    ), "the raw value read off the session is handed back for the drift log"
 
 
 @pytest.mark.parametrize(
@@ -1516,9 +1516,9 @@ def test_park_reason_parks_an_unrecognised_value_and_hands_it_back(value):
     """
     reason, seen = park_reason(_FakeSession(value))
 
-    assert reason == PARKED_UNKNOWN_STATE, (
-        f"the gate must not normalise {value!r} into a deliverable state"
-    )
+    assert (
+        reason == PARKED_UNKNOWN_STATE
+    ), f"the gate must not normalise {value!r} into a deliverable state"
     assert seen == value, (
         "the value is echoed verbatim for the drift log; trimming or folding "
         f"case would make the log disagree with the enum (got {seen!r})"
@@ -1527,9 +1527,10 @@ def test_park_reason_parks_an_unrecognised_value_and_hands_it_back(value):
 
 def test_park_reason_parks_a_missing_session_with_no_value_to_report():
     """A session mid-teardown is expected, so nothing is handed back to log."""
-    assert park_reason(None) == (PARKED_NO_SESSION, ""), (
-        "a missing session is its own park reason, with no value to report"
-    )
+    assert park_reason(None) == (
+        PARKED_NO_SESSION,
+        "",
+    ), "a missing session is its own park reason, with no value to report"
 
 
 @pytest.mark.parametrize(
@@ -1572,9 +1573,9 @@ async def test_a_running_caller_is_parked_without_a_log_line():
         "parking a busy caller is expected on every completion; a log line for "
         f"it would drown out the one park that is an anomaly, got {lines!r}"
     )
-    assert _handles(registry.pending_notifications()) == [handle], (
-        "parked, not dropped: the next dispatch retries"
-    )
+    assert _handles(registry.pending_notifications()) == [
+        handle
+    ], "parked, not dropped: the next dispatch retries"
 
 
 @pytest.mark.asyncio
@@ -1586,12 +1587,10 @@ async def test_a_caller_that_was_running_receives_its_notification_once_it_goes_
     ctx = _context(orchestrator)
     await _settled(registry, handle)
 
-    assert await registry.dispatch_pending(ctx) == [], (
-        "a mid-turn caller is never delivered into"
-    )
-    assert orchestrator.sent == [], (
-        "so no message may reach the session at all"
-    )
+    assert (
+        await registry.dispatch_pending(ctx) == []
+    ), "a mid-turn caller is never delivered into"
+    assert orchestrator.sent == [], "so no message may reach the session at all"
 
     session.state = "idle"
 
@@ -1599,9 +1598,9 @@ async def test_a_caller_that_was_running_receives_its_notification_once_it_goes_
         "a caller that finished after the launch must still be delivered to on "
         "the next dispatch"
     )
-    assert orchestrator.sent == [(AGENT_ID, EXPECTED_NOTIFICATION)], (
-        "the waiting notification arrives once the caller is idle"
-    )
+    assert orchestrator.sent == [
+        (AGENT_ID, EXPECTED_NOTIFICATION)
+    ], "the waiting notification arrives once the caller is idle"
 
 
 @pytest.mark.asyncio
@@ -1618,12 +1617,12 @@ async def test_a_caller_that_starts_running_is_never_delivered_into():
         "delivering into a caller that has begun a turn makes send_message "
         "cancel it, discarding whatever it was in the middle of doing"
     )
-    assert orchestrator.sent == [], (
-        "and nothing is sent while the caller is still mid-turn"
-    )
-    assert _handles(registry.pending_notifications()) == [handle], (
-        "the notification is parked rather than lost"
-    )
+    assert (
+        orchestrator.sent == []
+    ), "and nothing is sent while the caller is still mid-turn"
+    assert _handles(registry.pending_notifications()) == [
+        handle
+    ], "the notification is parked rather than lost"
 
 
 # --- the drift log ---------------------------------------------------------
@@ -1648,9 +1647,9 @@ async def test_an_unrecognised_state_is_logged_naming_the_handle_and_the_value()
     assert delivered == [], "an unidentifiable state must never be delivered into"
     assert handle in logged, "the log line must name the handle that was parked"
     assert "orbiting" in logged, "the log line must show the value it could not read"
-    assert orchestrator.sent == [], (
-        "a caller that begins a turn wins over the notification"
-    )
+    assert (
+        orchestrator.sent == []
+    ), "a caller that begins a turn wins over the notification"
 
 
 @pytest.mark.asyncio
@@ -1700,16 +1699,16 @@ async def test_an_unrecognised_state_containing_a_newline_stays_on_one_log_line(
         loguru_logger.remove(sink)
 
     matches = [line for line in lines if "renamed" in line]
-    assert len(matches) == 1, (
-        f"the forged value must stay inside the one record, got {lines!r}"
-    )
+    assert (
+        len(matches) == 1
+    ), f"the forged value must stay inside the one record, got {lines!r}"
     assert matches[0].count("\n") == 1, (
         "loguru terminates each record with a single newline, so more than one "
         f"means the payload carried its own: {matches[0]!r}"
     )
-    assert "idle\\nAgentState" in matches[0], (
-        "the value must be shown through repr so the newline is escaped"
-    )
+    assert (
+        "idle\\nAgentState" in matches[0]
+    ), "the value must be shown through repr so the newline is escaped"
     assert forged not in matches[0], "the raw value must never reach the log line"
 
 
@@ -1757,9 +1756,7 @@ async def test_a_session_with_no_usable_state_is_logged_as_missing():
         loguru_logger.remove(sink)
     logged = "\n".join(lines)
 
-    assert handle in logged, (
-        "the line must name the handle it parked"
-    )
+    assert handle in logged, "the line must name the handle it parked"
     assert "missing" in logged.lower(), (
         "a state that could not be read at all must be called out as missing; "
         "an empty value would read as a state literally named ''"
@@ -1779,9 +1776,7 @@ async def test_dispatch_delivers_the_notification_text_the_model_is_meant_to_see
 
     delivered = await registry.dispatch_pending(ctx)
 
-    assert delivered == [handle], (
-        "the idle caller is the one whose handle is reported"
-    )
+    assert delivered == [handle], "the idle caller is the one whose handle is reported"
     assert orchestrator.sent == [(AGENT_ID, EXPECTED_NOTIFICATION)], (
         "the notification names the handle, the state and the result, in that "
         "order, so the model can act on it"
@@ -1824,18 +1819,14 @@ async def test_a_task_launched_with_no_caller_is_never_notified():
 
     delivered = await registry.dispatch_pending(ctx)
 
-    assert delivered == [], (
-        "a failing send delivers nothing"
-    )
-    assert orchestrator.sent == [], (
-        "and sends nothing at all"
-    )
-    assert orchestrator.attempts == 0, (
-        "a caller-less handle must not even be looked up in the orchestrator"
-    )
-    assert _handles(registry.pending_notifications()) == [handle], (
-        "the unowned handle stays owed rather than being quietly filed away"
-    )
+    assert delivered == [], "a failing send delivers nothing"
+    assert orchestrator.sent == [], "and sends nothing at all"
+    assert (
+        orchestrator.attempts == 0
+    ), "a caller-less handle must not even be looked up in the orchestrator"
+    assert _handles(registry.pending_notifications()) == [
+        handle
+    ], "the unowned handle stays owed rather than being quietly filed away"
 
 
 @pytest.mark.asyncio
@@ -1859,27 +1850,27 @@ async def test_dispatch_delivers_only_the_eligible_handles_in_a_mixed_pending_se
     deliverable = registry.launch(work, caller_id=AGENT_ID, timeout=LONG_CEILING_MS)
     unowned = registry.launch(work, caller_id=None, timeout=LONG_CEILING_MS)
     busy = registry.launch(work, caller_id=BUSY_AGENT_ID, timeout=LONG_CEILING_MS)
-    confused = registry.launch(work, caller_id=CONFUSED_AGENT_ID, timeout=LONG_CEILING_MS)
+    confused = registry.launch(
+        work, caller_id=CONFUSED_AGENT_ID, timeout=LONG_CEILING_MS
+    )
     removed = registry.launch(work, caller_id=GONE_AGENT_ID, timeout=LONG_CEILING_MS)
     for handle in (deliverable, unowned, busy, confused, removed):
         await _settled(registry, handle)
 
     delivered = await registry.dispatch_pending(ctx)
 
-    assert delivered == [deliverable], (
-        f"only the idle caller's notification may go out, got {delivered!r}"
-    )
-    assert [agent_id for agent_id, _ in orchestrator.sent] == [AGENT_ID], (
-        "only the one eligible caller is messaged"
-    )
+    assert delivered == [
+        deliverable
+    ], f"only the idle caller's notification may go out, got {delivered!r}"
+    assert [agent_id for agent_id, _ in orchestrator.sent] == [
+        AGENT_ID
+    ], "only the one eligible caller is messaged"
     assert set(_handles(registry.pending_notifications())) == {
         unowned,
         busy,
         confused,
         removed,
-    }, (
-        "every parked handle stays owed; parking must never be a silent drop"
-    )
+    }, "every parked handle stays owed; parking must never be a silent drop"
 
 
 @pytest.mark.asyncio
@@ -1891,12 +1882,10 @@ async def test_a_context_with_no_orchestrator_delivers_nothing():
 
     delivered = await registry.dispatch_pending(ctx)
 
-    assert delivered == [], (
-        "a context with no orchestrator cannot deliver anything"
-    )
-    assert _handles(registry.pending_notifications()) == [handle], (
-        "and must leave the handle owed for a later, wired dispatch"
-    )
+    assert delivered == [], "a context with no orchestrator cannot deliver anything"
+    assert _handles(registry.pending_notifications()) == [
+        handle
+    ], "and must leave the handle owed for a later, wired dispatch"
 
 
 @pytest.mark.asyncio
@@ -1911,12 +1900,10 @@ async def test_a_missing_context_delivers_nothing():
 
     delivered = await registry.dispatch_pending(None)
 
-    assert delivered == [], (
-        "no orchestrator means no delivery"
-    )
-    assert _handles(registry.pending_notifications()) == [handle], (
-        "and the handle stays owed"
-    )
+    assert delivered == [], "no orchestrator means no delivery"
+    assert _handles(registry.pending_notifications()) == [
+        handle
+    ], "and the handle stays owed"
 
 
 @pytest.mark.asyncio
@@ -1933,10 +1920,12 @@ async def test_each_handle_is_delivered_exactly_once_however_many_dispatches_run
         "only the first dispatch may report the handle; the rest find nothing "
         f"owed, which is a normal outcome and not an error (got {runs!r})"
     )
-    assert orchestrator.sent == [(AGENT_ID, EXPECTED_NOTIFICATION)], (
-        "the retry delivers the notification the failed send owed"
-    )
-    assert orchestrator.attempts == 1, "the caller must hear about the work exactly once"
+    assert orchestrator.sent == [
+        (AGENT_ID, EXPECTED_NOTIFICATION)
+    ], "the retry delivers the notification the failed send owed"
+    assert (
+        orchestrator.attempts == 1
+    ), "the caller must hear about the work exactly once"
 
 
 @pytest.mark.asyncio
@@ -1967,12 +1956,12 @@ async def test_two_overlapping_dispatches_cannot_both_deliver_one_handle():
         assert orchestrator.attempts == 1, "the second dispatch must not send at all"
 
         gate.set()
-        assert await in_flight == [handle], (
-            "the release lets the interrupted send complete and report its handle"
-        )
-        assert orchestrator.sent == [(AGENT_ID, EXPECTED_NOTIFICATION)], (
-            "and the caller hears about the work exactly once"
-        )
+        assert await in_flight == [
+            handle
+        ], "the release lets the interrupted send complete and report its handle"
+        assert orchestrator.sent == [
+            (AGENT_ID, EXPECTED_NOTIFICATION)
+        ], "and the caller hears about the work exactly once"
     finally:
         # Unconditional: without it, an assertion above that fires before the
         # release leaves a dispatch suspended on a gate nothing will ever open,
@@ -2007,18 +1996,18 @@ async def test_a_dispatch_cancelled_mid_send_leaves_the_handle_pending_again():
         await in_flight
 
     assert orchestrator.sent == [], "a cancelled send must not have delivered"
-    assert _handles(registry.pending_notifications()) == [handle], (
-        "the claim must be released, or the notification is lost forever"
-    )
+    assert _handles(registry.pending_notifications()) == [
+        handle
+    ], "the claim must be released, or the notification is lost forever"
 
     gate.set()
 
-    assert await registry.dispatch_pending(ctx) == [handle], (
-        "the interrupted delivery must be retried, not abandoned"
-    )
-    assert orchestrator.sent == [(AGENT_ID, EXPECTED_NOTIFICATION)], (
-        "each handle must reach its own caller, once"
-    )
+    assert await registry.dispatch_pending(ctx) == [
+        handle
+    ], "the interrupted delivery must be retried, not abandoned"
+    assert orchestrator.sent == [
+        (AGENT_ID, EXPECTED_NOTIFICATION)
+    ], "each handle must reach its own caller, once"
     assert orchestrator.attempts == 2, "the send must be attempted again"
 
 
@@ -2035,19 +2024,19 @@ async def test_a_failed_send_is_retried_and_delivers_on_a_later_dispatch():
     first = await registry.dispatch_pending(ctx)
 
     assert first == [], "a raised send is not a delivered handle"
-    assert _handles(registry.pending_notifications()) == [handle], (
-        "the claim must be released so the notification is retried"
-    )
+    assert _handles(registry.pending_notifications()) == [
+        handle
+    ], "the claim must be released so the notification is retried"
 
-    assert await registry.dispatch_pending(ctx) == [handle], (
-        "the retried dispatch reports the handle it delivered"
-    )
-    assert orchestrator.sent == [(AGENT_ID, EXPECTED_NOTIFICATION)], (
-        "and the caller finally hears about the work"
-    )
-    assert orchestrator.attempts == 2, (
-        "an interrupted send must be attempted again, not assumed sent"
-    )
+    assert await registry.dispatch_pending(ctx) == [
+        handle
+    ], "the retried dispatch reports the handle it delivered"
+    assert orchestrator.sent == [
+        (AGENT_ID, EXPECTED_NOTIFICATION)
+    ], "and the caller finally hears about the work"
+    assert (
+        orchestrator.attempts == 2
+    ), "an interrupted send must be attempted again, not assumed sent"
 
 
 @pytest.mark.asyncio
@@ -2062,23 +2051,23 @@ async def test_a_send_that_always_fails_is_attempted_five_times_then_retired():
     await _settled(registry, handle)
 
     for _ in range(EXPECTED_RETRY_CAP + 4):
-        assert await registry.dispatch_pending(ctx) == [], (
-            "a failing send must never be reported as delivered"
-        )
+        assert (
+            await registry.dispatch_pending(ctx) == []
+        ), "a failing send must never be reported as delivered"
 
-    assert orchestrator.attempts == EXPECTED_RETRY_CAP, (
-        "delivery must stop at the cap, not keep retrying on every dispatch"
-    )
-    assert registry.pending_notifications() == [], (
-        "the handle is retired from notification, not from the registry"
-    )
+    assert (
+        orchestrator.attempts == EXPECTED_RETRY_CAP
+    ), "delivery must stop at the cap, not keep retrying on every dispatch"
+    assert (
+        registry.pending_notifications() == []
+    ), "the handle is retired from notification, not from the registry"
 
     for _ in range(3):
         await registry.dispatch_pending(ctx)
 
-    assert orchestrator.attempts == EXPECTED_RETRY_CAP, (
-        "a retired handle must not be attempted again on later dispatches"
-    )
+    assert (
+        orchestrator.attempts == EXPECTED_RETRY_CAP
+    ), "a retired handle must not be attempted again on later dispatches"
 
 
 @pytest.mark.asyncio
@@ -2097,9 +2086,9 @@ async def test_a_retired_handle_is_still_collectable():
     snapshot = await registry.collect(handle)
 
     assert snapshot.state is TaskState.DONE, "the outcome survives the retirement"
-    assert snapshot.result == WORK_RESULT, (
-        "an agent still holding the handle must be able to collect what it asked for"
-    )
+    assert (
+        snapshot.result == WORK_RESULT
+    ), "an agent still holding the handle must be able to collect what it asked for"
 
 
 @pytest.mark.asyncio
@@ -2164,6 +2153,6 @@ async def test_calling_dispatch_pending_without_awaiting_delivers_nothing():
     )
     unawaited.close()
     assert orchestrator.sent == [], "closing the coroutine delivers nothing either"
-    assert _handles(registry.pending_notifications()) == [handle], (
-        "the handle stays owed, which is exactly the invisible stall"
-    )
+    assert _handles(registry.pending_notifications()) == [
+        handle
+    ], "the handle stays owed, which is exactly the invisible stall"

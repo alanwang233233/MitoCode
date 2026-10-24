@@ -575,8 +575,7 @@ async def query_agent(agent_id: int) -> str:
     name = getattr(session, "name", "") or "<unnamed>"
     description = getattr(session, "description", "") or ""
     lines = [
-        f"Agent {agent_id} ({name}) "
-        f"[{_state_text(getattr(session, 'state', ''))}]"
+        f"Agent {agent_id} ({name}) " f"[{_state_text(getattr(session, 'state', ''))}]"
     ]
     lines.append(
         f"description: {description}" if description else "description: (none)"
