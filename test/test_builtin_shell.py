@@ -795,10 +795,15 @@ async def test_bash_timeout_message_carries_output_printed_before_the_kill(
     await _kill_matching(TIMED_OUTPUT_SLEEP)
 
 
-@pytest.mark.parametrize("timeout_ms", [0, -1])
+@pytest.mark.parametrize("timeout_ms", [0, -1, -0.5])
 @pytest.mark.asyncio
 async def test_bash_non_positive_timeout_uses_default(root, workspace, timeout_ms):
-    """A timeout of zero or less falls back to the default (120 000 ms)."""
+    """A timeout of zero or less falls back to the default (120 000 ms).
+
+    ``-0.5`` exercises the float branch of ``_resolve_timeout``: a negative
+    float is finite, so it reaches the ``value <= 0`` fallback rather than
+    the non-finite refusal.
+    """
     approver = _RecordingApprover(ApprovalDecision.ALLOW)
     _install(workspace, approver)
     command = "echo quick"
@@ -929,24 +934,3 @@ async def test_bash_rejects_non_number_timeout(root, workspace):
     assert (
         "number" in result.lower() or "numeric" in result.lower()
     ), f"the error must mention the number requirement, got {result!r}"
-
-
-@pytest.mark.asyncio
-async def test_bash_non_positive_timeout_uses_default(root, workspace):
-    """A zero or negative timeout should fall back to the default (5 minutes)."""
-    approver = _RecordingApprover(ApprovalDecision.ALLOW)
-    _install(workspace, approver)
-
-    # timeout=0 should use default and complete the quick command
-    result = await bash("echo quick", timeout=0)
-
-    assert (
-        result == "quick\n"
-    ), f"timeout=0 should use default and allow the command to run, got {result!r}"
-
-    # negative timeout should also use default
-    result = await bash("echo quick-neg", timeout=-1)
-
-    assert (
-        result == "quick-neg\n"
-    ), f"timeout=-1 should use default and allow the command to run, got {result!r}"
