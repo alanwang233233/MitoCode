@@ -232,9 +232,15 @@ def tui() -> None:
 
 @app.command()
 def cli() -> None:
-    """Placeholder for the interactive CLI chat mode."""
-    console.print(translate("cli.not_implemented", name="cli"))
-    raise typer.Exit(code=1)
+    """Start the interactive CLI chat mode."""
+    # Imported at call time so `mitocode tui` never pays for prompt_toolkit.
+    from mitocode.cli.bootstrap import run as run_cli  # pylint: disable=import-outside-toplevel
+
+    try:
+        run_cli()
+    except MitoCodeBaseError as exc:
+        console.print(translate("cli.cli.launch_error", error=exc), style="bold red")
+        raise typer.Exit(code=1) from exc
 
 
 @app.command()

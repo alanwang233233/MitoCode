@@ -267,12 +267,31 @@ def test_tui_grace_wait_happens_before_launch(
     assert slept == [3, "run"]
 
 
-def test_cli_placeholder_reports_not_implemented():
-    """`cli` is a placeholder that says so and exits non-zero."""
+def test_cli_command_invokes_bootstrap(monkeypatch):
+    """`cli` delegates to cli.bootstrap.run and exits zero."""
+    from mitocode.cli import bootstrap
+
+    called = []
+    monkeypatch.setattr(bootstrap, "run", lambda: called.append(True))
+    result = runner.invoke(cli.app, ["cli"])
+
+    assert result.exit_code == 0
+    assert called == [True]
+
+
+def test_cli_command_reports_launch_error(monkeypatch):
+    """`cli` localizes a MitoCodeBaseError from bootstrap and exits 1."""
+    from mitocode.cli import bootstrap
+    from mitocode.core.exception.mitocode_exception import MitoCodeBaseError
+
+    def boom():
+        raise MitoCodeBaseError("boom")
+
+    monkeypatch.setattr(bootstrap, "run", boom)
     result = runner.invoke(cli.app, ["cli"])
 
     assert result.exit_code == 1
-    assert "'cli' is not implemented yet." in result.output
+    assert "Failed to launch the CLI: boom" in result.output
 
 
 def test_webui_placeholder_reports_not_implemented():
