@@ -245,6 +245,14 @@ def _write_sync(path: Path, display: str, content: str) -> str:
     ("read the file and use Edit") that a fifo, socket or device cannot
     follow, and writing through one would block or misbehave.
 
+    The refusal is not carried by the pre-checks alone.  They ran in an
+    earlier instant, and a concurrent writer can create the target after
+    they pass; the create itself is therefore exclusive (`open(path, "x")`,
+    O_EXCL at the OS level), and a file that appears in between is refused
+    with the same already-exists sentence rather than silently truncated.
+    Two concurrent writes thus end one-won, one-refused, whatever the
+    interleaving.
+
     Args:
         path: The resolved file to create.
         display: The path as the model spelled it, for messages.
@@ -282,7 +290,19 @@ def _write_sync(path: Path, display: str, content: str) -> str:
         )
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        with open(path, "x", encoding="utf-8") as handle:
+            handle.write(content)
+    except FileExistsError:
+        # The pre-checks above passed an instant ago; a concurrent writer
+        # created the target in between.  The exclusive create is the real
+        # no-overwrite guarantee -- refuse with the same sentence the
+        # pre-check would have produced, never a truncated file.
+        return (
+            f"Error: write refused: {display} already exists. Write never "
+            f"overwrites: read the file and use Edit to change it, because "
+            f"replacing a whole file to make one change destroys the rest "
+            f"without a trace."
+        )
     except OSError as exc:
         return f"Error: write failed on {display}: {exc}"
     return f"Wrote {len(content)} characters to {display}."

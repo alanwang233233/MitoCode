@@ -696,6 +696,33 @@ async def test_write_refuses_to_clobber_and_names_edit(root, workspace, spy):
 
 
 @pytest.mark.asyncio
+async def test_concurrent_writes_end_one_won_one_refused(root, workspace, spy):
+    """Whatever the interleaving, the file is created exactly once.
+
+    The pre-checks are an instant old; the exclusive create is the guarantee.
+    Five writers started together must produce one success and four refusals
+    -- never two successes, never a truncated or spliced file.
+    """
+    _install(workspace, spy)
+
+    outcomes = await asyncio.gather(
+        *(write("race.txt", f"writer {n}") for n in range(5))
+    )
+
+    successes = [o for o in outcomes if o.startswith("Wrote")]
+    refusals = [o for o in outcomes if "already exists" in o]
+    assert (
+        len(successes) == 1
+    ), f"exactly one writer may win the exclusive create: {outcomes!r}"
+    assert (
+        len(refusals) == 4
+    ), f"every loser must be refused with the clobber sentence: {outcomes!r}"
+    assert (root / "race.txt").read_text(encoding="utf-8") in {
+        f"writer {n}" for n in range(5)
+    }, "the file must hold one writer's content intact"
+
+
+@pytest.mark.asyncio
 async def test_write_empty_content_creates_an_empty_file(root, workspace, spy):
     """Empty content is legitimate and produces a 0-byte file."""
     _install(workspace, spy)
