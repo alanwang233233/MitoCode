@@ -797,25 +797,19 @@ async def test_bash_timeout_message_carries_output_printed_before_the_kill(
 
 @pytest.mark.parametrize("timeout_ms", [0, -1])
 @pytest.mark.asyncio
-async def test_bash_non_positive_timeout_expires_immediately(
+async def test_bash_non_positive_timeout_uses_default(
     root, workspace, timeout_ms
 ):
-    """A timeout of zero or less expires immediately and still kills cleanly."""
+    """A timeout of zero or less falls back to the default (120 000 ms)."""
     approver = _RecordingApprover(ApprovalDecision.ALLOW)
     _install(workspace, approver)
-    command = EXPIRED_SLEEP
+    command = "echo quick"
 
     result = await bash(command, timeout=timeout_ms)
 
-    expected = (
-        f"Error: bash timed out after {timeout_ms} ms: {command}. "
-        "The process group was killed."
+    assert result == "quick\n", (
+        f"timeout={timeout_ms} should use default and allow the command to run, got {result!r}"
     )
-    assert result == expected, (
-        f"a {timeout_ms} ms timeout must expire immediately with no output "
-        f"section (sleep prints nothing); got {result!r}"
-    )
-    await _kill_matching(EXPIRED_SLEEP)
 
 
 # --- bash: cancellation kills the process group --------------------------------
@@ -866,3 +860,95 @@ async def test_cancelled_bash_kills_the_process_group_and_propagates(root, works
         )
     finally:
         await _kill_matching(CANCELLED_SLEEP)
+
+
+# --- bash: timeout clamping (P2-2 fix) -------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bash_rejects_infinite_timeout(root, workspace):
+    """An infinite timeout (1e400 -> inf) must be rejected, not hang forever."""
+    approver = _RecordingApprover(ApprovalDecision.ALLOW)
+    _install(workspace, approver)
+
+    result = await bash("sleep 1", timeout=1e400)
+
+    assert result.startswith("Error:"), (
+        f"an infinite timeout must be rejected with an Error message, got {result!r}"
+    )
+    assert "infinite" in result.lower() or "finite" in result.lower(), (
+        f"the error must mention the infinite/finite issue, got {result!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bash_clamps_timeout_above_one_hour(root, workspace):
+    """A timeout above 1 hour must be clamped, not passed as-is to wait_for."""
+    approver = _RecordingApprover(ApprovalDecision.ALLOW)
+    _install(workspace, approver)
+
+    # 10 million ms = ~2.7 hours > 1 hour cap
+    result = await bash("sleep 1", timeout=10_000_000)
+
+    # Should clamp and run, not hang or pass raw 10M ms to wait_for
+    # The command should complete quickly (sleep 1 finishes before 1 hour cap)
+    assert not result.startswith("Error: bash timed out after 10000000 ms"), (
+        f"timeout above cap must be clamped, not passed raw to wait_for; got {result!r}"
+    )
+    # Should succeed since sleep 1 finishes well within 1 hour cap
+    assert result == "" or result == "\n", (
+        f"clamped timeout should allow sleep 1 to complete; got {result!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bash_rejects_boolean_timeout(root, workspace):
+    """A boolean timeout (True/False) must be rejected, not treated as 1/0."""
+    approver = _RecordingApprover(ApprovalDecision.ALLOW)
+    _install(workspace, approver)
+
+    result = await bash("echo hi", timeout=True)  # type: ignore[arg-type]
+
+    assert result.startswith("Error:"), (
+        f"a boolean timeout must be rejected with an Error message, got {result!r}"
+    )
+    assert "boolean" in result.lower(), (
+        f"the error must mention the boolean type issue, got {result!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bash_rejects_non_number_timeout(root, workspace):
+    """A non-numeric timeout (string, list, etc.) must be rejected."""
+    approver = _RecordingApprover(ApprovalDecision.ALLOW)
+    _install(workspace, approver)
+
+    result = await bash("echo hi", timeout="not-a-number")  # type: ignore[arg-type]
+
+    assert result.startswith("Error:"), (
+        f"a non-numeric timeout must be rejected with an Error message, got {result!r}"
+    )
+    assert "number" in result.lower() or "numeric" in result.lower(), (
+        f"the error must mention the number requirement, got {result!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bash_non_positive_timeout_uses_default(root, workspace):
+    """A zero or negative timeout should fall back to the default (5 minutes)."""
+    approver = _RecordingApprover(ApprovalDecision.ALLOW)
+    _install(workspace, approver)
+
+    # timeout=0 should use default and complete the quick command
+    result = await bash("echo quick", timeout=0)
+
+    assert result == "quick\n", (
+        f"timeout=0 should use default and allow the command to run, got {result!r}"
+    )
+
+    # negative timeout should also use default
+    result = await bash("echo quick-neg", timeout=-1)
+
+    assert result == "quick-neg\n", (
+        f"timeout=-1 should use default and allow the command to run, got {result!r}"
+    )

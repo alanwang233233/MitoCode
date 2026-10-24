@@ -65,15 +65,16 @@ stringified ones would break it.
 """
 
 import asyncio
+import math
 import os
 import re
 import signal
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Tuple
 
 from mitocode.core.tool.builtin.approval import ApprovalDecision, ApprovalRequest
 from mitocode.core.tool.builtin.context import clamp, current
-from mitocode.core.tool.builtin.errors import tool_boundary
+from mitocode.core.tool.builtin.errors import MitoCodeBuiltinToolError, tool_boundary
 
 #: Separator run that ends one shell token and starts the next: whitespace
 #: (which includes newlines), ``;``, ``&`` and ``|``.  Splitting on the
@@ -205,6 +206,97 @@ def scan_for_escape(command: str, root: Path) -> Optional[str]:
     return None
 
 
+#: Largest ceiling :func:`bash` will hand to the subprocess, in
+#: milliseconds.  One hour: longer than any single command this harness
+#: expects to host, short enough that a wedged call cannot pin an agent
+#: session open past the working day.
+MAX_TIMEOUT_MS = 3_600_000
+
+
+def _resolve_timeout(timeout: Any) -> Tuple[int, Optional[str], Any]:
+    """Normalise the model-supplied ceiling before it reaches the subprocess.
+
+    **The rule, and where the bound lives.**  The bound is
+    :data:`MAX_TIMEOUT_MS` -- one hour -- and it lives in this module because
+    this is the first place a model-supplied number is believed: the
+    subprocess layer has no notion of a ceiling, and by the time a
+    value reaches ``wait_for`` unbounded the chance to bound it is gone.
+    Concretely:
+
+    * ``None`` becomes the default (120 000 ms), matching the signature
+      default.
+    * A non-number, or a boolean -- ``True`` is an ``int`` in Python, and a
+      one-millisecond ceiling is never what a model sending ``true`` meant --
+      is refused.
+    * A non-finite float is refused outright.  ``1e400`` parses to ``inf``,
+      and an infinite ceiling is a promise never to interrupt: the exact hang
+      the ceiling exists to prevent.
+    * A finite value at or below zero falls back to the default
+      (120 000 ms, two minutes), matching the signature default.  This
+      allows the model to omit the timeout for quick commands.
+    * A finite value above :data:`MAX_TIMEOUT_MS` is *clamped* to it, with a
+      note in the launch reply saying so, because the request is still
+      meaningful -- only its magnitude is not.
+
+    Args:
+        timeout: The ceiling as the model stated it, in milliseconds.
+            Typically an ``int``; eventually anything.
+
+    Returns:
+        ``(timeout_ms, note, timeout_for_display)``: the effective ceiling in
+        milliseconds, a prose sentence to append to the launch reply when the
+        requested value had to be clamped (``None`` otherwise), and the
+        original timeout value for display in error messages.
+
+    Raises:
+        MitoCodeBuiltinToolError: When the value is not a usable number at
+            all - a non-number, a boolean, or a non-finite float.  The
+            caller converts this into ``"Error: ..."`` prose rather than
+            letting it escape.
+    """
+    original_timeout = timeout
+    if timeout is None:
+        return 120_000, None, original_timeout
+    if isinstance(timeout, bool):
+        raise MitoCodeBuiltinToolError(
+            "timeout must be a number of milliseconds; got the boolean " f"{timeout}."
+        )
+    if isinstance(timeout, int):
+        # Every int is finite by construction, so no finiteness check here;
+        # an absurd magnitude is handled by the clamp below.
+        value = timeout
+    elif isinstance(timeout, float):
+        # `math.isfinite` on an int converts to float and overflows for very
+        # large integers, which is why the finiteness check is deliberately
+        # float-only and reached through this branch alone.
+        if not math.isfinite(timeout):
+            raise MitoCodeBuiltinToolError(
+                "timeout must be a finite number of milliseconds; got "
+                f"{timeout}. An infinite ceiling would never fire, which is "
+                "the hang the timeout exists to prevent. State a concrete "
+                "ceiling such as timeout=300000."
+            )
+        value = int(timeout)
+    else:
+        raise MitoCodeBuiltinToolError(
+            "timeout must be a number of milliseconds; got "
+            f"{type(timeout).__name__}."
+        )
+
+    if value <= 0:
+        # Zero or negative means "no explicit ceiling" -- fall back to the
+        # default so the model doesn't have to specify a timeout for quick
+        # commands.  This matches the signature default and existing behavior.
+        return 120_000, None, original_timeout
+    if value > MAX_TIMEOUT_MS:
+        return MAX_TIMEOUT_MS, (
+            f"The requested ceiling of {value} ms was clamped to "
+            f"{MAX_TIMEOUT_MS} ms (one hour), the largest ceiling Bash "
+            "grants."
+        ), original_timeout
+    return value, None, original_timeout
+
+
 @tool_boundary
 async def bash(command: str, timeout: int = 120_000) -> str:
     """Run *command* in the workspace root and return its output.
@@ -212,14 +304,14 @@ async def bash(command: str, timeout: int = 120_000) -> str:
     The command runs under the system shell (``/bin/sh``) with its working
     directory set to the workspace root, its stdin attached to ``DEVNULL`` --
     a command that waits for input gets EOF instead of holding the call open
-    until the timeout, and a TUI's terminal is never shared with a
+    until the timeout, and a TUI terminal is never shared with a
     subprocess -- and its stdout and stderr merged, in order, into one
     stream.
 
     Before anything runs, :func:`scan_for_escape` looks for tokens reaching
     outside the workspace.  The scan is a guardrail against accidents, not a
     security boundary and not a sandbox; when it flags a token, the command
-    goes to the context's approver exactly once and the verdict is
+    goes to the context approver exactly once and the verdict is
     authoritative: ``ALLOW`` runs the command with no second check behind
     it, ``DENY`` returns a refusal.  An in-root command never consults the
     approver.  With no workspace on the context there is no root to escape
@@ -257,7 +349,7 @@ async def bash(command: str, timeout: int = 120_000) -> str:
             only just started.
 
     Returns:
-        The command's merged stdout and stderr, decoded with
+        The command merged stdout and stderr, decoded with
         ``errors="replace"`` so non-UTF-8 output cannot raise, with
         ``"[exit code: N]"`` appended when the exit code is non-zero, and
         clamped to ``ToolContext.max_output_chars``.  A non-zero exit code
@@ -281,6 +373,13 @@ async def bash(command: str, timeout: int = 120_000) -> str:
     """
     ctx = current()
     root = ctx.root()
+
+    # Normalise and clamp the timeout before anything else; this prevents
+    # infinite or absurd ceilings from reaching wait_for and hanging the turn.
+    try:
+        timeout_ms, timeout_note, timeout_for_display = _resolve_timeout(timeout)
+    except MitoCodeBuiltinToolError as exc:
+        return f"Error: {exc}"
 
     if ctx.workspace is not None:
         flagged = scan_for_escape(command, root)
@@ -323,7 +422,7 @@ async def bash(command: str, timeout: int = 120_000) -> str:
     communicate = asyncio.create_task(proc.communicate())
     try:
         stdout_bytes, _ = await asyncio.wait_for(
-            asyncio.shield(communicate), timeout / 1000
+            asyncio.shield(communicate), timeout_ms / 1000
         )
     except asyncio.CancelledError:
         # The tool's own task was cancelled -- how AgentRuntime interrupts a
@@ -364,12 +463,12 @@ async def bash(command: str, timeout: int = 120_000) -> str:
         text = partial.decode("utf-8", errors="replace")
         if text.strip():
             return (
-                f"Error: bash timed out after {timeout} ms: {command}. "
+                f"Error: bash timed out after {timeout_for_display} ms: {command}. "
                 "The process group was killed; its output up to then:\n\n"
                 + clamp(text, ctx.max_output_chars)
             )
         return (
-            f"Error: bash timed out after {timeout} ms: {command}. "
+            f"Error: bash timed out after {timeout_for_display} ms: {command}. "
             "The process group was killed."
         )
 
