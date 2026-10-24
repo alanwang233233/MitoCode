@@ -181,3 +181,6 @@ wheels/
 #  you could uncomment the following to ignore the entire vscode folder
 /AGENTS.md
 docs/superpowers
+# macOS metadata and local scratch files
+.DS_Store
+bubble_sort.py

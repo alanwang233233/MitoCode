@@ -40,6 +40,16 @@ class MitoCodeWorkspaceDumpError(MitoCodeWorkspaceError):
     """Raised when persisting the workspace configuration fails."""
 
 
+class MitoCodeWorkspacePathError(MitoCodeWorkspaceError, builtins.ValueError):
+    """Raised when a path argument resolves outside the workspace root.
+
+    Dual-inherits ``ValueError``: a path rejected for being out of bounds is
+    genuinely a bad argument, and ``test_workspace.py`` already asserts
+    ``pytest.raises(ValueError)`` against the private alias of the method that
+    raises it.  The ``"Path traversal detected"`` prefix is part of that match.
+    """
+
+
 class MitoCodeWorkspaceTooOldError(MitoCodeWorkspaceError):
     """Raised when the workspace version is older than supported and must be migrated."""
 
