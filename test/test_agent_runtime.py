@@ -7,6 +7,7 @@ _invoke_tool / _invoke_on_end 的协程与线程分发规则、run() 主循环�
 协作式取消（启动前/流中）以及无 finish_reason 时的回环行为。
 """
 
+import asyncio
 import os
 import sys
 import threading
@@ -486,6 +487,7 @@ class TestRunSingleToolLoop:
             {"event": "system.finished.tool_calls"},
             {
                 "event": "agent.tool_call.execution",
+                "id": CALL_ID_PRIMARY,
                 "name": TOOL_NAME_WEATHER,
                 "args": EXPECTED_WEATHER_PARAMS,
             },
@@ -969,3 +971,87 @@ class TestRunCancellation:
         assert all(
             e["event"] != "system.finished.standard" for e in events
         ), "取消路径不应产出标准结束事件"
+
+
+# ──────────────────────────────────────────────
+# run(): execution id 与取消时悬空工具调用修补
+# ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_tool_call_leaves_valid_context():
+    """工具执行中途取消 → 每个已发起调用都补合成结果，历史保持合法."""
+    started = asyncio.Event()
+
+    async def slow_tool(x: str) -> str:
+        started.set()
+        await asyncio.sleep(10)
+        return x
+
+    session = AgentSession(
+        provider=_ScriptedProvider(
+            [
+                [
+                    _Chunk(
+                        tool_calls=[
+                            _ToolCallChunk(0, "call_a", "slow", '{"x":"a"}'),
+                            _ToolCallChunk(1, "call_b", "slow", '{"x":"b"}'),
+                        ],
+                        finish_reason="tool_calls",
+                    )
+                ]
+            ]
+        ),
+        tools_map={"slow": slow_tool},
+    )
+    session.append_user_prompt("go")
+
+    async def consume():
+        async for _ in AgentRuntime.run(session):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(started.wait(), timeout=2)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    context = session.build_standard_context()
+    call_ids = {
+        call["id"]
+        for message in context
+        if message.get("role") == "assistant" and message.get("tool_calls")
+        for call in message["tool_calls"]
+    }
+    result_ids = {
+        message["tool_call_id"] for message in context if message.get("role") == "tool"
+    }
+    assert call_ids == result_ids == {"call_a", "call_b"}
+    synthetic = [m for m in session.messages if getattr(m, "role", "") == "tool"]
+    assert all(m.content == "Error: interrupted by user." for m in synthetic)
+
+
+@pytest.mark.asyncio
+async def test_execution_event_carries_call_id():
+    """execution 事件携带 tool call id，与对应 result 的 id 对齐."""
+
+    async def echo(x: str) -> str:
+        return x
+
+    session = AgentSession(
+        provider=_ScriptedProvider(
+            [
+                [
+                    _Chunk(
+                        tool_calls=[_ToolCallChunk(0, "call_x", "echo", '{"x":"ok"}')],
+                        finish_reason="tool_calls",
+                    )
+                ],
+                [_Chunk(content="done", finish_reason="stop")],
+            ]
+        ),
+        tools_map={"echo": echo},
+    )
+    session.append_user_prompt("go")
+    events = [e async for e in AgentRuntime.run(session)]
+    execution = [e for e in events if e["event"] == "agent.tool_call.execution"]
+    assert execution[0]["id"] == "call_x"
