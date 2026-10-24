@@ -289,11 +289,15 @@ def _resolve_timeout(timeout: Any) -> Tuple[int, Optional[str], Any]:
         # commands.  This matches the signature default and existing behavior.
         return 120_000, None, original_timeout
     if value > MAX_TIMEOUT_MS:
-        return MAX_TIMEOUT_MS, (
-            f"The requested ceiling of {value} ms was clamped to "
-            f"{MAX_TIMEOUT_MS} ms (one hour), the largest ceiling Bash "
-            "grants."
-        ), original_timeout
+        return (
+            MAX_TIMEOUT_MS,
+            (
+                f"The requested ceiling of {value} ms was clamped to "
+                f"{MAX_TIMEOUT_MS} ms (one hour), the largest ceiling Bash "
+                "grants."
+            ),
+            original_timeout,
+        )
     return value, None, original_timeout
 
 

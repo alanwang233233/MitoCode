@@ -309,9 +309,9 @@ def test_background_defaults_to_a_fresh_registry_and_keeps_an_explicit_one():
 
     first = ToolContext()
     second = ToolContext()
-    assert first.background is not second.background, (
-        "the registry is built per context, so one cannot hand state to another"
-    )
+    assert (
+        first.background is not second.background
+    ), "the registry is built per context, so one cannot hand state to another"
 
     sentinel = object()
     assert ToolContext(background=sentinel).background is sentinel, (
@@ -467,9 +467,9 @@ async def test_tool_boundary_renders_even_when_the_exception_str_raises():
 
     result = await hostile()
 
-    assert result.startswith("Error: _ExplosiveStr:"), (
-        "an exception with a broken __str__ must still reach the model as prose"
-    )
+    assert result.startswith(
+        "Error: _ExplosiveStr:"
+    ), "an exception with a broken __str__ must still reach the model as prose"
 
 
 @pytest.mark.asyncio
@@ -515,9 +515,9 @@ async def test_tool_boundary_logs_nothing_when_the_tool_succeeds():
     with _captured_logs() as lines:
         assert await fine() == "all good"
 
-    assert not [line for line in lines if "fine" in line], (
-        f"a successful call must not log the tool name, got {lines!r}"
-    )
+    assert not [
+        line for line in lines if "fine" in line
+    ], f"a successful call must not log the tool name, got {lines!r}"
 
 
 @pytest.mark.asyncio
@@ -559,9 +559,9 @@ def test_tool_boundary_preserves_the_metadata_the_registry_reads():
         "file_path": str,
         "return": str,
     }, "the schema is derived from these annotations, not from the wrapper's"
-    assert inspect.iscoroutinefunction(sample), (
-        "the registry awaits the registered callable"
-    )
+    assert inspect.iscoroutinefunction(
+        sample
+    ), "the registry awaits the registered callable"
 
 
 @pytest.mark.asyncio
@@ -595,9 +595,10 @@ async def test_a_boundary_wrapped_tool_registers_under_its_declared_name_and_sch
     assert spec.agent_doc == "Read a file for the agent."
     assert spec.func is read, "dispatch must go through the boundary, not the bare body"
     schema = spec.parameters_schema
-    assert list(schema["properties"]) == ["file_path", "limit"], (
-        "the schema must be derived from the real signature"
-    )
+    assert list(schema["properties"]) == [
+        "file_path",
+        "limit",
+    ], "the schema must be derived from the real signature"
     assert schema["required"] == ["file_path"], "a defaulted parameter is optional"
     assert schema["properties"]["limit"]["default"] == 10
     assert await read("a.txt") == "a.txt", "the registered callable must still run"
@@ -620,9 +621,9 @@ async def test_tool_boundary_reports_a_non_coroutine_body_as_an_error_string():
 
     result = await not_a_coroutine()
 
-    assert result.startswith("Error: TypeError: "), (
-        f"a non-awaitable body must render as an error line, got {result!r}"
-    )
+    assert result.startswith(
+        "Error: TypeError: "
+    ), f"a non-awaitable body must render as an error line, got {result!r}"
     assert "await" in result, f"the TypeError must name the await, got {result!r}"
 
 
@@ -652,9 +653,9 @@ def test_clamp_of_a_negative_budget_behaves_exactly_like_a_zero_budget():
 
     text = "abcdefghij"
 
-    assert clamp(text, -5) == clamp(text, 0), (
-        "a negative budget must be clamped to zero, exactly"
-    )
+    assert clamp(text, -5) == clamp(
+        text, 0
+    ), "a negative budget must be clamped to zero, exactly"
     assert clamp(text, -5) == TRUNCATION_MARKER.format(dropped=10)
 
 
@@ -669,9 +670,9 @@ def test_clamp_one_character_over_the_budget_drops_exactly_one():
     result = clamp("abcdefghij", 9)
 
     assert result == "abcd" + TRUNCATION_MARKER.format(dropped=1) + "fghij"
-    assert len(result) == 9 + len(TRUNCATION_MARKER.format(dropped=1)), (
-        "the marker sits on top of the budget rather than inside it"
-    )
+    assert len(result) == 9 + len(
+        TRUNCATION_MARKER.format(dropped=1)
+    ), "the marker sits on top of the budget rather than inside it"
 
 
 @pytest.mark.parametrize(
@@ -693,12 +694,12 @@ def test_clamp_budgets_code_points_and_not_bytes(character):
 
     result = clamp(text, 4)
 
-    assert result == character * 2 + TRUNCATION_MARKER.format(dropped=6) + character * 2, (
-        "head and tail must each keep limit // 2 characters"
-    )
-    assert len(result.encode("utf-8")) > len(result), (
-        "the result is longer in bytes than in code points, so this cannot be a byte budget"
-    )
+    assert (
+        result == character * 2 + TRUNCATION_MARKER.format(dropped=6) + character * 2
+    ), "head and tail must each keep limit // 2 characters"
+    assert len(result.encode("utf-8")) > len(
+        result
+    ), "the result is longer in bytes than in code points, so this cannot be a byte budget"
 
 
 def test_clamp_can_cut_between_a_base_character_and_its_combining_mark():
@@ -721,9 +722,9 @@ def test_clamp_can_cut_between_a_base_character_and_its_combining_mark():
     result = clamp(text, 5)
 
     tail = "\u0301" + base  # the cut lands between a base and its accent
-    assert result == base + TRUNCATION_MARKER.format(dropped=15) + tail, (
-        "the tail begins with an orphaned combining mark, which is the caveat"
-    )
+    assert (
+        result == base + TRUNCATION_MARKER.format(dropped=15) + tail
+    ), "the tail begins with an orphaned combining mark, which is the caveat"
 
 
 @pytest.mark.parametrize("limit", [1, 2, 3, 4, 5, 6, 7, 8, 9, 100, 101])
@@ -743,12 +744,12 @@ def test_clamp_splits_the_budget_with_the_odd_character_going_to_the_tail(limit)
 
     assert head + tail == limit, "the split must consume the whole budget"
     assert result.startswith(text[:head]), f"limit {limit}: head must be {head} chars"
-    assert result.endswith(text[len(text) - tail :]), (
-        f"limit {limit}: tail must be {tail} chars"
-    )
-    assert TRUNCATION_MARKER.format(dropped=500 - limit) in result, (
-        f"limit {limit}: the marker must survive the split"
-    )
+    assert result.endswith(
+        text[len(text) - tail :]
+    ), f"limit {limit}: tail must be {tail} chars"
+    assert (
+        TRUNCATION_MARKER.format(dropped=500 - limit) in result
+    ), f"limit {limit}: the marker must survive the split"
 
 
 def test_the_default_output_budget_is_the_one_clamp_is_given():
@@ -761,9 +762,9 @@ def test_the_default_output_budget_is_the_one_clamp_is_given():
     budget = ToolContext().max_output_chars
     on_budget = "x" * budget
 
-    assert clamp(on_budget, budget) == on_budget, (
-        "a result exactly on budget is not clamped"
-    )
+    assert (
+        clamp(on_budget, budget) == on_budget
+    ), "a result exactly on budget is not clamped"
     over_budget = clamp(on_budget + "x", budget)
     assert "truncated" in over_budget, "one character over the budget is clamped"
     assert len(over_budget) > budget, "the marker is added on top of the budget"
@@ -809,9 +810,9 @@ def test_root_resolves_a_relative_workspace_path_against_the_cwd(tmp_path, monke
 
     root = ToolContext(workspace=workspace).root()
 
-    assert root == (tmp_path / "src" / "pkg").resolve(), (
-        "a relative workspace path must be anchored to the cwd"
-    )
+    assert (
+        root == (tmp_path / "src" / "pkg").resolve()
+    ), "a relative workspace path must be anchored to the cwd"
     assert root.is_absolute(), "root() must never return a relative path"
 
 
@@ -835,7 +836,9 @@ def test_root_of_a_symlinked_cwd_is_the_physical_directory(tmp_path, monkeypatch
 
     assert root == physical.resolve(), "the physical directory, not the symlink to it"
     assert root == Path.cwd().resolve(), "root() must agree with the resolved cwd"
-    assert not root.is_symlink(), "root() must not hand back a path containing a symlink"
+    assert (
+        not root.is_symlink()
+    ), "root() must not hand back a path containing a symlink"
 
 
 def test_root_accepts_any_object_exposing_a_path(tmp_path):
@@ -905,9 +908,9 @@ def test_current_agent_context_reports_every_other_id_verbatim(agent_id):
 
     current_agent_id.set(agent_id)
 
-    assert current_agent_context()[0] == agent_id, (
-        f"agent {agent_id} must be reported as itself"
-    )
+    assert (
+        current_agent_context()[0] == agent_id
+    ), f"agent {agent_id} must be reported as itself"
 
 
 @pytest.mark.asyncio
@@ -929,9 +932,9 @@ async def test_the_agent_id_is_isolated_between_concurrent_turns():
     first, second = await asyncio.gather(sub_agent(3), sub_agent(4))
 
     assert (first, second) == (3, 4), "each task must read back only its own id"
-    assert current_agent_context()[0] is None, (
-        "the parent turn still has no agent of its own"
-    )
+    assert (
+        current_agent_context()[0] is None
+    ), "the parent turn still has no agent of its own"
 
 
 @pytest.mark.asyncio
@@ -955,12 +958,12 @@ async def test_the_registered_context_is_process_wide_while_the_agent_id_is_not(
 
     inherited_context, inherited_agent_id = await asyncio.create_task(sub_agent())
 
-    assert inherited_context is True, (
-        "the registered context is process-wide by design, so a sub-agent shares the root"
-    )
-    assert inherited_agent_id is None, (
-        "the agent id is task-local, so the sub-agent sees no agent of its own"
-    )
+    assert (
+        inherited_context is True
+    ), "the registered context is process-wide by design, so a sub-agent shares the root"
+    assert (
+        inherited_agent_id is None
+    ), "the agent id is task-local, so the sub-agent sees no agent of its own"
 
 
 def test_current_agent_context_arms_the_registered_context_together_with_the_id():
@@ -977,9 +980,9 @@ def test_current_agent_context_arms_the_registered_context_together_with_the_id(
     agent_id, returned_context = current_agent_context()
 
     assert agent_id is None, "no agent is running, so only the sentinel is reported"
-    assert returned_context is context, (
-        "the context must be the registered one, not a lazily created default"
-    )
+    assert (
+        returned_context is context
+    ), "the context must be the registered one, not a lazily created default"
 
 
 # --- global state hygiene ---
@@ -1000,9 +1003,9 @@ def test_a_registered_context_is_visible_to_unrelated_callers():
     set_current(context)
 
     assert current() is context, "the registration must be visible module-wide"
-    assert current_agent_context()[1] is context, (
-        "the agent tools read the same global, so they inherit it too"
-    )
+    assert (
+        current_agent_context()[1] is context
+    ), "the agent tools read the same global, so they inherit it too"
 
 
 def test_the_module_state_is_reset_between_tests():
@@ -1017,7 +1020,9 @@ def test_the_module_state_is_reset_between_tests():
     two others with it.
     """
 
-    assert context_module._CURRENT is None, "a previous test leaked its context"  # pylint: disable=protected-access
-    assert current_agent_id.get() == UNKNOWN_AGENT_ID, (
-        "a previous test leaked its agent id"
-    )
+    assert (
+        context_module._CURRENT is None
+    ), "a previous test leaked its context"  # pylint: disable=protected-access
+    assert (
+        current_agent_id.get() == UNKNOWN_AGENT_ID
+    ), "a previous test leaked its agent id"

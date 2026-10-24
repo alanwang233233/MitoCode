@@ -16,15 +16,22 @@ from mitocode.core.tool.builtin.context import current_agent_context
 
 
 def _chunk(**kw):
-    return SimpleNamespace(choices=[SimpleNamespace(
-        delta=SimpleNamespace(content=kw.get("content"), tool_calls=kw.get("tool_calls")),
-        finish_reason=kw.get("finish_reason"),
-    )])
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(
+                    content=kw.get("content"), tool_calls=kw.get("tool_calls")
+                ),
+                finish_reason=kw.get("finish_reason"),
+            )
+        ]
+    )
 
 
 def _tool_chunk(index=0, call_id="c1", name="peek", arguments=""):
     return SimpleNamespace(
-        index=index, id=call_id,
+        index=index,
+        id=call_id,
         function=SimpleNamespace(name=name, arguments=arguments),
     )
 
@@ -65,17 +72,31 @@ async def test_tool_execution_sees_the_calling_agent_id():
         seen["agent_id"] = current_agent_context()[0]
         return "ok"
 
-    provider = _Provider([
-        [_chunk(tool_calls=[_tool_chunk(arguments="")], finish_reason="tool_calls")],
-        [_chunk(content="done", finish_reason="stop")],
-    ])
+    provider = _Provider(
+        [
+            [
+                _chunk(
+                    tool_calls=[_tool_chunk(arguments="")], finish_reason="tool_calls"
+                )
+            ],
+            [_chunk(content="done", finish_reason="stop")],
+        ]
+    )
     session = AgentSession(
         agent_id=7,
         name="worker",
         provider=provider,
         tools_map={"peek": peek},
-        tool_schemas=[{"type": "function", "function": {"name": "peek",
-                         "description": "d", "parameters": {"type": "object", "properties": {}}}}],
+        tool_schemas=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "peek",
+                    "description": "d",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
     )
     async for _ in AgentRuntime.run(session):
         pass

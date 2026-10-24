@@ -17,7 +17,9 @@ from mitocode.core.tool.builtin.approval import (
     DenyAll,
 )
 
-REQUEST = ApprovalRequest(action="bash", detail="cat /etc/passwd", reason="outside root")
+REQUEST = ApprovalRequest(
+    action="bash", detail="cat /etc/passwd", reason="outside root"
+)
 
 
 @pytest.mark.asyncio
@@ -56,15 +58,16 @@ def test_deny_all_satisfies_approver_protocol():
 
 def test_approver_rejects_object_without_request_method():
     """A missing ``request`` is the one disqualifier the structural check applies."""
+
     class UnrelatedApprover:
         """Structurally wrong: the decision method is not named ``request``."""
 
         async def decide(self, req):  # noqa: ARG002
             return ApprovalDecision.ALLOW
 
-    assert not isinstance(object(), Approver), (
-        "a bare object was accepted as an Approver"
-    )
+    assert not isinstance(
+        object(), Approver
+    ), "a bare object was accepted as an Approver"
     assert not isinstance(UnrelatedApprover(), Approver), (
         "an object whose decision method is named `decide` was accepted as an "
         "Approver; the protocol's required surface is exactly `request`"
@@ -73,14 +76,15 @@ def test_approver_rejects_object_without_request_method():
 
 def test_approver_rejects_request_attribute_set_to_none():
     """``request = None`` counts as absent, so a half-built approver is rejected."""
+
     class NullRequestApprover:
         """A placeholder approver whose method was never implemented."""
 
         request = None
 
-    assert not isinstance(NullRequestApprover(), Approver), (
-        "an object whose `request` is None was accepted as an Approver"
-    )
+    assert not isinstance(
+        NullRequestApprover(), Approver
+    ), "an object whose `request` is None was accepted as an Approver"
 
 
 def test_approver_isinstance_ignores_signature_and_asyncness():
@@ -91,6 +95,7 @@ def test_approver_isinstance_ignores_signature_and_asyncness():
     The protocol docstring only promises "a cheap sanity check", so this pins the
     limit rather than asserting signature validation that never happens.
     """
+
     class SyncApprover:
         """Wrong: ``request`` is synchronous, so ``await`` would fail at the call site."""
 
@@ -158,9 +163,10 @@ def test_issubclass_against_approver_does_not_raise():
 
 def test_decision_has_exactly_allow_and_deny_members():
     """The verdict vocabulary is exactly two members, so no policy can widen it."""
-    assert set(ApprovalDecision.__members__) == {"ALLOW", "DENY"}, (
-        f"unexpected verdict vocabulary: {sorted(ApprovalDecision.__members__)}"
-    )
+    assert set(ApprovalDecision.__members__) == {
+        "ALLOW",
+        "DENY",
+    }, f"unexpected verdict vocabulary: {sorted(ApprovalDecision.__members__)}"
 
 
 def test_decision_values_are_the_allow_and_deny_wire_strings():
@@ -177,12 +183,12 @@ def test_decision_values_are_the_allow_and_deny_wire_strings():
 
 def test_decision_is_looked_up_from_its_wire_value():
     """A decision reconstructed from a stored string resolves to the same member."""
-    assert ApprovalDecision("allow") is ApprovalDecision.ALLOW, (
-        'lookup of "allow" did not resolve to the ALLOW member'
-    )
-    assert ApprovalDecision("deny") is ApprovalDecision.DENY, (
-        'lookup of "deny" did not resolve to the DENY member'
-    )
+    assert (
+        ApprovalDecision("allow") is ApprovalDecision.ALLOW
+    ), 'lookup of "allow" did not resolve to the ALLOW member'
+    assert (
+        ApprovalDecision("deny") is ApprovalDecision.DENY
+    ), 'lookup of "deny" did not resolve to the DENY member'
 
 
 def test_decision_rejects_an_unknown_wire_value():
@@ -196,9 +202,9 @@ def test_decision_rejects_an_unknown_wire_value():
 
 def test_request_is_a_dataclass_with_fields_in_declared_order():
     """The field order is action, detail, reason -- the order a dialog reads."""
-    assert dataclasses.is_dataclass(ApprovalRequest), (
-        "ApprovalRequest is not a dataclass; a plain class would not compare by value"
-    )
+    assert dataclasses.is_dataclass(
+        ApprovalRequest
+    ), "ApprovalRequest is not a dataclass; a plain class would not compare by value"
     assert tuple(f.name for f in dataclasses.fields(ApprovalRequest)) == (
         "action",
         "detail",
@@ -233,7 +239,9 @@ def test_request_positional_construction_follows_field_order():
 
 def test_request_equality_compares_all_three_fields():
     """Two identically populated requests are equal; a differing field is not."""
-    same = ApprovalRequest(action="bash", detail="cat /etc/passwd", reason="outside root")
+    same = ApprovalRequest(
+        action="bash", detail="cat /etc/passwd", reason="outside root"
+    )
     other_reason = ApprovalRequest(
         action="bash", detail="cat /etc/passwd", reason="symlink escape"
     )
@@ -250,17 +258,19 @@ def test_request_equality_compares_all_three_fields():
 
 def test_request_is_mutable_so_a_dialog_can_annotate_it():
     """Not frozen: a dialog normalises the request before showing it."""
-    built = ApprovalRequest(action="bash", detail="echo " + "a" * 500, reason="outside root")
+    built = ApprovalRequest(
+        action="bash", detail="echo " + "a" * 500, reason="outside root"
+    )
 
     built.detail = built.detail[:80] + " ..."
     built.reason = "command escapes the workspace root"
 
-    assert built.detail.endswith(" ..."), (
-        f"normalising .detail did not stick: {built.detail[-20:]!r}"
-    )
-    assert built.reason == "command escapes the workspace root", (
-        f"annotating .reason did not stick: {built.reason!r}"
-    )
+    assert built.detail.endswith(
+        " ..."
+    ), f"normalising .detail did not stick: {built.detail[-20:]!r}"
+    assert (
+        built.reason == "command escapes the workspace root"
+    ), f"annotating .reason did not stick: {built.reason!r}"
 
 
 def test_request_stores_an_unknown_action_verbatim():
@@ -292,12 +302,12 @@ def test_custom_approver_satisfies_the_protocol_without_inheriting():
     """A third implementation needs no base class to be wired in."""
     custom = RecordingApprover(ApprovalDecision.ALLOW)
 
-    assert isinstance(custom, Approver), (
-        "a custom duck-typed approver was rejected by the protocol check"
-    )
-    assert not isinstance(custom, (AlwaysAllow, DenyAll)), (
-        "the custom approver must remain a third distinct implementation"
-    )
+    assert isinstance(
+        custom, Approver
+    ), "a custom duck-typed approver was rejected by the protocol check"
+    assert not isinstance(
+        custom, (AlwaysAllow, DenyAll)
+    ), "the custom approver must remain a third distinct implementation"
 
 
 @pytest.mark.asyncio
@@ -307,9 +317,9 @@ async def test_custom_approver_answers_through_the_same_call_shape():
 
     verdict = await custom.request(REQUEST)
 
-    assert verdict is ApprovalDecision.ALLOW, (
-        f"custom approver returned {verdict!r} instead of its configured verdict"
-    )
+    assert (
+        verdict is ApprovalDecision.ALLOW
+    ), f"custom approver returned {verdict!r} instead of its configured verdict"
 
 
 @pytest.mark.asyncio
@@ -319,6 +329,6 @@ async def test_custom_approver_receives_the_request_instance():
 
     await custom.request(REQUEST)
 
-    assert custom.seen == [REQUEST], (
-        f"approver saw {custom.seen!r}, expected the exact request instance"
-    )
+    assert custom.seen == [
+        REQUEST
+    ], f"approver saw {custom.seen!r}, expected the exact request instance"
