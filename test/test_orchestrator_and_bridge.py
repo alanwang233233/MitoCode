@@ -198,7 +198,12 @@ def test_event_bridge_tool_call_delta():
         {"event": "agent.tool_call.delta", "id": "call_1", "delta": '{"path":'},
         agent_id=1,
     )
-    assert result == {"type": "tool_call", "agent_id": 1, "content": '{"path":'}
+    assert result == {
+        "type": "tool_call",
+        "agent_id": 1,
+        "id": "call_1",
+        "content": '{"path":',
+    }
 
 
 def test_event_bridge_tool_call_result():
@@ -215,18 +220,76 @@ def test_event_bridge_tool_call_result():
     assert result == {
         "type": "tool_result",
         "agent_id": 1,
+        "id": "call_1",
         "result": "done",
         "success": True,
     }
 
 
+def test_event_bridge_tool_start_carries_args_and_display():
+    manager = ToolManager()
+    manager.register(
+        lambda **kw: "",
+        name="Read",
+        human_doc="read",
+        display_action="file.read",
+        display_param="file_path",
+    )
+    bridge = EventBridge(manager)
+    result = bridge.adapt(
+        {
+            "event": "agent.tool_call.execution",
+            "id": "call_1",
+            "name": "Read",
+            "args": {"file_path": "a.py"},
+        },
+        agent_id=2,
+    )
+    assert result == {
+        "type": "tool_start",
+        "agent_id": 2,
+        "id": "call_1",
+        "name": "Read",
+        "args": {"file_path": "a.py"},
+        "action": "file.read",
+        "description": "read",
+        "display_param": "file_path",
+    }
+
+
+def test_event_bridge_forwards_turn_end_and_cancel():
+    bridge = EventBridge()
+    assert bridge.adapt(
+        {"event": "system.finished.standard", "reason": "stop"}, agent_id=3
+    ) == {"type": "turn_end", "agent_id": 3, "reason": "stop"}
+    assert bridge.adapt({"event": "system.cancelled"}, agent_id=3) == {
+        "type": "turn_cancelled",
+        "agent_id": 3,
+    }
+
+
+def test_event_bridge_header_and_delta_and_result_keep_call_id():
+    bridge = EventBridge()
+    header = bridge.adapt(
+        {"event": "agent.tool_call.header", "id": "c1", "name": "Read"}, 1
+    )
+    assert header["id"] == "c1" and header["name"] == "Read"
+    delta = bridge.adapt(
+        {"event": "agent.tool_call.delta", "id": "c1", "delta": "{"}, 1
+    )
+    assert delta["id"] == "c1"
+    result = bridge.adapt(
+        {
+            "event": "agent.tool_call.result",
+            "id": "c1",
+            "success": True,
+            "result": "ok",
+        },
+        1,
+    )
+    assert result["id"] == "c1"
+
+
 def test_event_bridge_skips_internal():
     bridge = EventBridge()
-    assert bridge.adapt({"event": "system.cancelled"}, agent_id=1) is None
-    assert (
-        bridge.adapt(
-            {"event": "system.finished.standard", "reason": "stop"}, agent_id=1
-        )
-        is None
-    )
     assert bridge.adapt({"event": "system.finished.tool_calls"}, agent_id=1) is None
