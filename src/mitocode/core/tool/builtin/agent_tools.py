@@ -59,6 +59,11 @@ up through ``get_session`` and refuses a spawn whose parent is already at
 ``ToolContext.max_sub_agent_depth``.  The walk keeps the ids it has visited,
 so a malformed chain — a cycle, which nothing in this repository prevents and
 which would otherwise spin forever — terminates instead of hanging the turn.
+The cap alone is not enough, because ``parent_id`` is model-visible: a deep
+agent could name a shallow ancestor and keep forking from there.  So a spawn
+under an explicit parent is additionally confined to the caller's own subtree
+(:func:`_within_caller_subtree`), which walks the same chain with the same
+cycle guard and answers whether it lands on the caller.
 
 **A name is always something the tree can render.**  ``AgentNode`` draws
 whatever ``name`` holds, so an empty one is a blank node in the TUI with
@@ -223,6 +228,58 @@ def depth_of(ctx: ToolContext, agent_id: Optional[int]) -> int:
         seen.add(parent_id)
         walking = parent_id
         depth += 1
+
+
+def _within_caller_subtree(orchestrator: Any, caller_id: int, agent_id: int) -> bool:
+    """Report whether *agent_id* is *caller_id* or one of its descendants.
+
+    The spawn-depth cap only means something if a deep agent cannot simply
+    name a shallow ancestor as its parent and keep forking from there.  This
+    walk is that second half of the rule: it climbs from *agent_id* through
+    the parent chain and answers whether the chain lands on *caller_id* —
+    which includes *agent_id* being the caller itself, the case an omitted
+    ``parent_id`` resolves to anyway.
+
+    The walk is bounded by the set of ids it has already visited, exactly as
+    :func:`depth_of` is: nothing in the orchestrator prevents a cycle in the
+    parent links, and an unguarded walk would spin inside a single tool call.
+    A cycle stops the walk, is logged, and answers False — an unprovable
+    parent is a refused parent.
+
+    Args:
+        orchestrator: The duck-typed handle exposing ``get_session``.
+        caller_id: The agent whose turn is making the spawn.  Never ``None``:
+            the caller filters the decision before this function is reached.
+        agent_id: The requested parent to check.
+
+    Returns:
+        True when the climb from *agent_id* reaches *caller_id*, False when
+        the chain ends at a root, an unknown session, or a cycle first.
+    """
+    seen = {agent_id}
+    walking = agent_id
+    while True:
+        if walking == caller_id:
+            return True
+        session = orchestrator.get_session(walking)
+        if session is None:
+            return False
+        parent_id = getattr(session, "parent_id", None)
+        if parent_id is None:
+            return False
+        if parent_id in seen:
+            logger.error(
+                "Agent {} declares parent {}, which is already in its own "
+                "ancestor chain {}; the parent chain is malformed and the "
+                "subtree check for {} is answered as False.",
+                walking,
+                parent_id,
+                sorted(seen),
+                caller_id,
+            )
+            return False
+        seen.add(parent_id)
+        walking = parent_id
 
 
 def _derive_name(description: Any, agent_id: Optional[int]) -> str:
@@ -423,7 +480,12 @@ async def spawn_agent(
             message.
         parent_id: The agent this one belongs under.  ``None`` means the agent
             whose turn is running this call, and — with no agent turn running
-            at all — no parent, so the new agent is a root.
+            at all — no parent, so the new agent is a root.  An **explicit**
+            parent must be the caller itself or inside the caller's subtree;
+            anything else is refused, because a deep agent naming a shallow
+            ancestor would step around the depth cap.  With no agent turn
+            running there is no subtree to check against, so the explicit
+            parent is honoured as given.
 
     Returns:
         The new agent's id and name in one sentence.  Every failure is an
@@ -439,22 +501,22 @@ async def spawn_agent(
     if parent_id is None:
         parent_id = caller_id
 
-    depth = depth_of(ctx, parent_id)
-    if depth >= ctx.max_sub_agent_depth:
-        return (
-            f"Error: refusing to spawn a sub-agent under agent {parent_id}. That "
-            f"agent is already at nesting depth {depth}, and the limit is "
-            f"{ctx.max_sub_agent_depth} nested Agent calls, so this would be "
-            f"depth {depth + 1}. Do the work in this agent, or send it to an "
-            f"existing agent instead of starting a deeper one."
-        )
-
     if parent_id is not None:
         parent = orchestrator.get_session(parent_id)
         if parent is None:
             return (
                 f"Error: no agent with id {parent_id}, so nothing can be "
                 f"spawned under it. ListAgent shows the agents that exist."
+            )
+        if caller_id is not None and not _within_caller_subtree(
+            orchestrator, caller_id, parent_id
+        ):
+            return (
+                f"Error: agent {parent_id} is not you (agent {caller_id}) and "
+                f"not inside your subtree, so you cannot spawn under it — "
+                f"spawning under a shallower ancestor would step around the "
+                f"nesting depth cap. Omit parent_id to spawn under yourself, "
+                f"or name yourself or one of your descendants."
             )
         # Inherited, not re-created: a user who picked a model for this
         # conversation picked it for the delegated work too.  `None` here would
@@ -465,6 +527,16 @@ async def spawn_agent(
         # `None` is what tells `create_session` to use its own default. Building
         # a provider here would hard-code a model this context never chose.
         provider = None
+
+    depth = depth_of(ctx, parent_id)
+    if depth >= ctx.max_sub_agent_depth:
+        return (
+            f"Error: refusing to spawn a sub-agent under agent {parent_id}. That "
+            f"agent is already at nesting depth {depth}, and the limit is "
+            f"{ctx.max_sub_agent_depth} nested Agent calls, so this would be "
+            f"depth {depth + 1}. Do the work in this agent, or send it to an "
+            f"existing agent instead of starting a deeper one."
+        )
 
     session = await orchestrator.create_session(
         name=_derive_name(description, None),

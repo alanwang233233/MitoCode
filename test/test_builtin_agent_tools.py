@@ -622,6 +622,116 @@ async def test_spawn_agent_at_the_depth_cap_refuses_and_names_the_numbers():
     assert orch.sent == [], "a refused spawn must not send anything"
 
 
+@pytest.mark.asyncio
+async def test_spawn_agent_refuses_a_parent_outside_the_callers_subtree():
+    """A deep agent cannot walk around the depth cap by naming a shallow parent.
+
+    The caller at depth 1 names its own sibling branch as the parent.  The
+    sibling exists, so the unknown-parent check passes; the subtree walk from
+    it never lands on the caller, and the spawn is refused in prose with
+    nothing created or sent.
+    """
+    orch = _Orchestrator(
+        sessions={
+            1: _Session(1, parent_id=None),
+            2: _Session(2, parent_id=1),
+            7: _Session(7, parent_id=1),
+        }
+    )
+    _make_ctx(orch)
+    current_agent_id.set(7)
+
+    result = await agent_tools.spawn_agent("Climb", "go", parent_id=2)
+
+    assert result.startswith(
+        "Error: agent 2 is not you (agent 7)"
+    ), f"the refusal names the requested parent and the caller: {result!r}"
+    assert "depth cap" in result, f"the refusal says why the rule exists: {result!r}"
+    assert (
+        "Omit parent_id" in result
+    ), f"the refusal names the allowed alternative: {result!r}"
+    assert orch.created == [], "an out-of-subtree spawn must not create anything"
+    assert orch.sent == [], "an out-of-subtree spawn must not send anything"
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_allows_a_parent_inside_the_callers_subtree():
+    """Spawning under one of your own descendants still works."""
+    orch = _Orchestrator(
+        sessions={
+            7: _Session(7, parent_id=None),
+            8: _Session(8, parent_id=7),
+        }
+    )
+    _make_ctx(orch)
+    current_agent_id.set(7)
+
+    result = await agent_tools.spawn_agent("Grandchild", "go", parent_id=8)
+
+    assert result == _created_sentence(
+        100, "Grandchild", " under agent 8"
+    ), "a parent inside the caller's subtree is honoured"
+    assert (
+        orch.created[0]["parent_id"] == 8
+    ), "the requested in-subtree parent reaches create_session"
+    assert orch.sent == [(100, "go")], "the prompt is delivered as usual"
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_allows_an_explicit_parent_equal_to_the_caller():
+    """Naming yourself explicitly is the same as omitting parent_id."""
+    orch = _Orchestrator(sessions={7: _Session(7, parent_id=None)})
+    _make_ctx(orch)
+    current_agent_id.set(7)
+
+    result = await agent_tools.spawn_agent("Self child", "go", parent_id=7)
+
+    assert result == _created_sentence(
+        100, "Self child", " under agent 7"
+    ), "the caller itself is trivially inside its own subtree"
+    assert (
+        orch.created[0]["parent_id"] == 7
+    ), "the explicit self-parent reaches create_session"
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_without_a_caller_honours_an_explicit_parent():
+    """No agent turn means no subtree to check against; the parent is honoured.
+
+    The REPL/test path has no caller, so there is no privilege boundary to
+    enforce — the unknown-parent check still applies, as ever.
+    """
+    orch = _Orchestrator(sessions={5: _Session(5, parent_id=None)})
+    _make_ctx(orch)
+
+    result = await agent_tools.spawn_agent("Loose child", "go", parent_id=5)
+
+    assert result == _created_sentence(
+        100, "Loose child", " under agent 5"
+    ), "with no calling agent, an explicit parent is honoured as before"
+    assert (
+        orch.created[0]["parent_id"] == 5
+    ), "the explicit parent reaches create_session unchanged"
+
+
+@pytest.mark.parametrize("cycle_len", [1, 2])
+def test_subtree_walk_terminates_on_a_cyclic_chain(cycle_len):
+    """A cycle above the named parent ends the walk in False, not a hang.
+
+    The walk is the same unawaited ``while`` loop as :func:`depth_of`'s, so a
+    regression would block the event loop itself; the daemon-thread deadline
+    turns that into a failed assertion instead of a frozen suite.
+    """
+    orch = _Orchestrator(sessions=_cycle_sessions(cycle_len))
+
+    reachable = _finish_within(lambda: agent_tools._within_caller_subtree(orch, 7, 1))
+
+    assert reachable is False, (
+        f"a caller outside a {cycle_len}-cycle is never reached by the walk; "
+        "the visited-set guard must terminate it and answer False"
+    )
+
+
 @pytest.mark.parametrize("cycle_len", [1, 2, 3])
 def test_spawn_agent_cyclic_parent_chain_terminates(cycle_len):
     """Spawning under a cyclic chain terminates and completes the spawn."""

@@ -207,7 +207,9 @@ _BUILTIN_TOOLS: Tuple[Tuple[str, Callable[..., Any], str, str, str, str], ...] =
         "on it later with QueryAgent rather than re-sending the task. The "
         "first line of description becomes the agent's label in the agent "
         "tree, and the whole description is kept for QueryAgent to report. "
-        "parent_id defaults to the agent whose turn is making this call. "
+        "parent_id defaults to the agent whose turn is making this call; an "
+        "explicit parent_id must be you yourself or inside your subtree, and "
+        "anything else is refused. "
         "Nesting is capped at a fixed depth, and a spawn past the cap is "
         "refused with the depth named.",
         "agent.create",
