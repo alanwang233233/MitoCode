@@ -1032,9 +1032,12 @@ def test_nul_byte_in_the_source_is_wrapped_and_not_echoed_raw():
         parse_call('Bash("a\x00b")')
 
     message = str(excinfo.value)
-    assert isinstance(excinfo.value.__cause__, ValueError), (
-        f"CPython rejects a NUL in the source with ValueError, got "
-        f"{type(excinfo.value.__cause__).__name__}"
+    # CPython < 3.12 raises ValueError for a NUL in the source; 3.12+ raises
+    # SyntaxError ("source code string cannot contain null bytes").  Either
+    # way the failure is wrapped, and either type is in _PARSE_FAILURES.
+    assert isinstance(excinfo.value.__cause__, (ValueError, SyntaxError)), (
+        f"CPython rejects a NUL in the source with ValueError or SyntaxError, "
+        f"got {type(excinfo.value.__cause__).__name__}"
     )
     assert "\x00" not in message, "a raw NUL in a message breaks the TUI renderer"
     assert (

@@ -76,9 +76,11 @@ _MAX_NAME = 60
 _MAX_NAMES = 8
 
 #: Failures :func:`ast.parse` can raise on hostile input.  ``SyntaxError``
-#: covers malformed text; ``ValueError`` covers a NUL byte in the source,
-#: which CPython rejects before parsing; the rest bound pathological
-#: nesting, which is a property of untrusted input rather than a bug.
+#: covers malformed text and, on Python 3.12+, a NUL byte in the source
+#: ("source code string cannot contain null bytes"); ``ValueError`` covers
+#: the same NUL byte on 3.10-3.11, where CPython rejects it before parsing
+#: with a different type.  The rest bound pathological nesting, which is a
+#: property of untrusted input rather than a bug.
 _PARSE_FAILURES = (
     SyntaxError,
     ValueError,
