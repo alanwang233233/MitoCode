@@ -1038,11 +1038,11 @@ async def test_a_return_value_whose_str_raises_is_recorded_as_done_not_failed():
     """A hostile ``__str__`` must not turn a success into a failure.
 
     The work completed, so the record must read ``DONE``; the rendering guard
-    keeps the crash inside ``_render``.  Note the returned text is the message of
-    the exception ``__str__`` raised, which is what ``safe_exception_message``
-    yields — the ``_render`` docstring calls it "a placeholder naming the type",
-    and the two descriptions disagree.  The behaviour is pinned as implemented so
-    a change to either the code or its description is a visible edit.
+    keeps the crash inside ``_render``.  The rendered text is a placeholder
+    naming the value's type and the exception type ``str`` raised — and
+    nothing else: the exception's own message stays out of the record, so an
+    internal rendering failure is never presented to the model as tool
+    output.
     """
     registry = BackgroundRegistry()
     handle = registry.launch(
@@ -1053,9 +1053,11 @@ async def test_a_return_value_whose_str_raises_is_recorded_as_done_not_failed():
     assert (
         record.state is TaskState.DONE
     ), "the work completed; a value that cannot be rendered is not a failure"
-    assert record.result == "__str__ exploded", (
-        "the guard returns safe_exception_message(exc), which for a renderable "
-        "message is that message rather than a name for its type"
+    assert record.result == (
+        "<unrenderable _ExplosiveStr: str() raised RuntimeError>"
+    ), (
+        "the placeholder names both types and carries no exception message — "
+        "the model must never see an internal rendering error as tool output"
     )
 
 

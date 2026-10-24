@@ -887,9 +887,12 @@ def _seconds(timeout_ms: int) -> float:
 def _render(value: Any) -> str:
     """Return ``str(value)``, or a placeholder when that raises.
 
-    Delegates to :func:`~mitocode.core.tool.builtin.errors.safe_exception_message`
-    for the failure case so this package has exactly one guarded ``str``
-    rather than two that can drift.
+    The placeholder names the value's type and the exception type ``str``
+    raised, and nothing else: the exception's own message is *not* included,
+    because that message comes from a rendering failure and handing it to the
+    model would present an internal error as if the tool had produced it.
+    Only the type names are safe to surface -- they identify the failure in a
+    log without smuggling its text into the transcript.
 
     Args:
         value: Whatever the detached coroutine returned.  Built-in tools return
@@ -897,11 +900,15 @@ def _render(value: Any) -> str:
             tool that returns something with a hostile ``__str__``.
 
     Returns:
-        The rendered value, or a placeholder naming the type that raised.
+        The rendered value, or ``"<unrenderable <ValueType>: str() raised
+        <ErrorType>>"`` when rendering failed.
     """
     if isinstance(value, str):
         return value
     try:
         return str(value)
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        return safe_exception_message(exc)
+        return (
+            f"<unrenderable {type(value).__name__}: "
+            f"str() raised {type(exc).__name__}>"
+        )
