@@ -321,9 +321,17 @@ def _edit_sync(  # pylint: disable=too-many-return-statements
     because it never rescans what it has produced.
 
     A ``stat`` refuses any target that is not a regular file before the
-    read, for the same reason Read refuses one: ``read_text`` on a named
-    pipe would block this worker thread forever, and Edit would then be
-    waiting to rewrite a file no replacement could describe.
+    read, for the same reason Read refuses one: reading a named pipe would
+    block this worker thread forever, and Edit would then be waiting to
+    rewrite a file no replacement could describe.
+
+    Line endings are preserved.  The read and the write both run with
+    ``newline=""``, so no newline translation happens in either direction:
+    a one-string edit on a CRLF file rewrites the replaced span only, and
+    an ``old_string`` containing ``\r\n`` matches what the file actually
+    holds.  The default universal-newline mode instead turns every CRLF in
+    the file into ``\n`` and writes the whole file back silently
+    re-line-ended.
 
     Every outcome is prose.  No match suggests the nearest lines via
     :func:`difflib.get_close_matches`; more than one match reports the count
@@ -365,7 +373,8 @@ def _edit_sync(  # pylint: disable=too-many-return-statements
             f"rewrites regular files."
         )
     try:
-        text = path.read_text(encoding="utf-8")
+        with open(path, encoding="utf-8", newline="") as handle:
+            text = handle.read()
     except FileNotFoundError:
         return f"Error: edit failed: {display} does not exist."
     except UnicodeDecodeError:
@@ -403,7 +412,8 @@ def _edit_sync(  # pylint: disable=too-many-return-statements
     # docstring for why the loop is the bug this line prevents.
     new_text = text.replace(old_string, new_string)
     try:
-        path.write_text(new_text, encoding="utf-8")
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(new_text)
     except OSError as exc:
         return f"Error: edit failed on {display}: {exc}"
     plural = "" if count == 1 else "s"

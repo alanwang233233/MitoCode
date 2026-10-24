@@ -814,6 +814,51 @@ async def test_write_refuses_a_directory_target(root, workspace, spy):
 
 
 @pytest.mark.asyncio
+async def test_edit_preserves_crlf_line_endings_outside_the_replacement(
+    root, workspace, spy
+):
+    """A CRLF file keeps its line endings; only the replaced span changes.
+
+    Reading with the default universal-newline mode would turn every CRLF
+    in the file into ``\\n`` and write the whole file back silently
+    re-line-ended; ``newline=""`` on both ends keeps every byte outside the
+    replaced text exactly as it was.
+    """
+    _install(workspace, spy)
+    _make(root, "win.txt", "first\r\nsecond\r\nthird\r\n")
+
+    result = await edit("win.txt", "second", "SECOND")
+
+    assert result.startswith(
+        "Replaced 1 occurrence"
+    ), f"the edit must succeed as usual, got {result!r}"
+    assert (root / "win.txt").read_bytes() == (
+        b"first\r\nSECOND\r\nthird\r\n"
+    ), "the untouched lines must keep their CRLF endings byte-for-byte"
+
+
+@pytest.mark.asyncio
+async def test_edit_matches_an_old_string_that_carries_crlf(root, workspace, spy):
+    """``old_string`` containing ``\\r\\n`` matches what a CRLF file holds.
+
+    Under universal newlines the file's CRLF became LF on read, so such an
+    ``old_string`` could never match; with ``newline=""`` the text seen by
+    the replacement is the bytes on disk.
+    """
+    _install(workspace, spy)
+    _make(root, "win.txt", "keep\r\ndrop\r\nkeep\r\n")
+
+    result = await edit("win.txt", "drop\r\n", "kept\r\n")
+
+    assert result.startswith(
+        "Replaced 1 occurrence"
+    ), f"the CRLF old_string must match, got {result!r}"
+    assert (root / "win.txt").read_bytes() == (
+        b"keep\r\nkept\r\nkeep\r\n"
+    ), "the replacement must land exactly where the CRLF match was"
+
+
+@pytest.mark.asyncio
 async def test_edit_replaces_one_occurrence_and_reports_the_line_movement(
     root, workspace, spy
 ):
