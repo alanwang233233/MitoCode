@@ -213,7 +213,7 @@ def scan_for_escape(command: str, root: Path) -> Optional[str]:
 MAX_TIMEOUT_MS = 3_600_000
 
 
-def _resolve_timeout(timeout: Any) -> Tuple[int, Optional[str], Any]:
+def _resolve_timeout(timeout: Any) -> Tuple[int, Optional[str]]:
     """Normalise the model-supplied ceiling before it reaches the subprocess.
 
     **The rule, and where the bound lives.**  The bound is
@@ -232,10 +232,9 @@ def _resolve_timeout(timeout: Any) -> Tuple[int, Optional[str], Any]:
       and an infinite ceiling is a promise never to interrupt: the exact hang
       the ceiling exists to prevent.
     * A finite value at or below zero falls back to the default
-      (120 000 ms, two minutes), matching the signature default.  This
-      allows the model to omit the timeout for quick commands.
+      (120 000 ms, two minutes), matching the signature default.
     * A finite value above :data:`MAX_TIMEOUT_MS` is *clamped* to it, with a
-      note in the launch reply saying so, because the request is still
+      note in the tool's reply saying so, because the request is still
       meaningful -- only its magnitude is not.
 
     Args:
@@ -243,10 +242,9 @@ def _resolve_timeout(timeout: Any) -> Tuple[int, Optional[str], Any]:
             Typically an ``int``; eventually anything.
 
     Returns:
-        ``(timeout_ms, note, timeout_for_display)``: the effective ceiling in
-        milliseconds, a prose sentence to append to the launch reply when the
-        requested value had to be clamped (``None`` otherwise), and the
-        original timeout value for display in error messages.
+        ``(timeout_ms, note)``: the effective ceiling in milliseconds, and a
+        prose sentence to append to the tool's reply when the requested value
+        had to be clamped (``None`` otherwise).
 
     Raises:
         MitoCodeBuiltinToolError: When the value is not a usable number at
@@ -254,9 +252,8 @@ def _resolve_timeout(timeout: Any) -> Tuple[int, Optional[str], Any]:
             caller converts this into ``"Error: ..."`` prose rather than
             letting it escape.
     """
-    original_timeout = timeout
     if timeout is None:
-        return 120_000, None, original_timeout
+        return 120_000, None
     if isinstance(timeout, bool):
         raise MitoCodeBuiltinToolError(
             "timeout must be a number of milliseconds; got the boolean " f"{timeout}."
@@ -286,8 +283,8 @@ def _resolve_timeout(timeout: Any) -> Tuple[int, Optional[str], Any]:
     if value <= 0:
         # Zero or negative means "no explicit ceiling" -- fall back to the
         # default so the model doesn't have to specify a timeout for quick
-        # commands.  This matches the signature default and existing behavior.
-        return 120_000, None, original_timeout
+        # commands.  This matches the signature default.
+        return 120_000, None
     if value > MAX_TIMEOUT_MS:
         return (
             MAX_TIMEOUT_MS,
@@ -296,9 +293,23 @@ def _resolve_timeout(timeout: Any) -> Tuple[int, Optional[str], Any]:
                 f"{MAX_TIMEOUT_MS} ms (one hour), the largest ceiling Bash "
                 "grants."
             ),
-            original_timeout,
         )
-    return value, None, original_timeout
+    return value, None
+
+
+def _with_note(text: str, note: Optional[str]) -> str:
+    """Append *note* to a reply on its own paragraph, when there is one.
+
+    Args:
+        text: The reply the tool is about to return.
+        note: The clamp note from :func:`_resolve_timeout`, or ``None`` when
+            the ceiling the model asked for is the ceiling in force.
+
+    Returns:
+        *text* unchanged when *note* is ``None``; otherwise *text* followed
+        by a blank line and *note*.
+    """
+    return f"{text}\n\n{note}" if note is not None else text
 
 
 @tool_boundary
@@ -349,8 +360,9 @@ async def bash(command: str, timeout: int = 120_000) -> str:
             and the approver sit in front of it.
         timeout: The subprocess timeout, in **milliseconds**.  The command
             is killed as a process group when it exceeds this.  A value of
-            zero or less expires immediately, killing a command that has
-            only just started.
+            zero or less falls back to the default, and a value above one
+            hour (:data:`MAX_TIMEOUT_MS`) is clamped to it -- the reply
+            carries a note saying so when that happens.
 
     Returns:
         The command merged stdout and stderr, decoded with
@@ -360,20 +372,26 @@ async def bash(command: str, timeout: int = 120_000) -> str:
         is reported as data and deliberately does **not** begin with
         ``"Error: "`` -- the tool call succeeded; the command failed.
 
+        When the requested ceiling was clamped, a note naming the requested
+        and the effective values is appended to the reply -- on the success
+        path and on the timeout path alike -- because a ceiling silently
+        rewritten is a promise the model does not know was downsized.
+
         A refused escape or a timeout is a failure of the tool and begins
         with ``"Error: "``: the refusal names the command, the workspace
         root and the token that was flagged; the timeout message says
-        ``"timed out"`` and names the command, and normally includes
-        whatever the command managed to print before it was killed --
-        normally, because collecting that output is bounded by a wait
-        (``_REAP_WAIT_SECONDS``) and when the bound expires -- a
-        grandchild that escaped the killed group into a session of its own
-        still holding the output pipe -- the printed output is dropped and
-        the message carries no output section at all.  The kill itself has
-        always happened by then either way.  Never raises for anything
-        unexpected -- that is rendered by ``tool_boundary`` -- and never
-        swallows a cancellation: the one deliberate escape is
-        ``CancelledError``, re-raised after the group kill (above).
+        ``"timed out"`` with the **effective** ceiling and names the
+        command, and normally includes whatever the command managed to
+        print before it was killed -- normally, because collecting that
+        output is bounded by a wait (``_REAP_WAIT_SECONDS``) and when the
+        bound expires -- a grandchild that escaped the killed group into a
+        session of its own still holding the output pipe -- the printed
+        output is dropped and the message carries no output section at
+        all.  The kill itself has always happened by then either way.
+        Never raises for anything unexpected -- that is rendered by
+        ``tool_boundary`` -- and never swallows a cancellation: the one
+        deliberate escape is ``CancelledError``, re-raised after the group
+        kill (above).
     """
     ctx = current()
     root = ctx.root()
@@ -381,7 +399,7 @@ async def bash(command: str, timeout: int = 120_000) -> str:
     # Normalise and clamp the timeout before anything else; this prevents
     # infinite or absurd ceilings from reaching wait_for and hanging the turn.
     try:
-        timeout_ms, timeout_note, timeout_for_display = _resolve_timeout(timeout)
+        timeout_ms, timeout_note = _resolve_timeout(timeout)
     except MitoCodeBuiltinToolError as exc:
         return f"Error: {exc}"
 
@@ -466,14 +484,16 @@ async def bash(command: str, timeout: int = 120_000) -> str:
             pass
         text = partial.decode("utf-8", errors="replace")
         if text.strip():
-            return (
-                f"Error: bash timed out after {timeout_for_display} ms: {command}. "
+            return _with_note(
+                f"Error: bash timed out after {timeout_ms} ms: {command}. "
                 "The process group was killed; its output up to then:\n\n"
-                + clamp(text, ctx.max_output_chars)
+                + clamp(text, ctx.max_output_chars),
+                timeout_note,
             )
-        return (
-            f"Error: bash timed out after {timeout_for_display} ms: {command}. "
-            "The process group was killed."
+        return _with_note(
+            f"Error: bash timed out after {timeout_ms} ms: {command}. "
+            "The process group was killed.",
+            timeout_note,
         )
 
     text = stdout_bytes.decode("utf-8", errors="replace")
@@ -485,4 +505,4 @@ async def bash(command: str, timeout: int = 120_000) -> str:
         # child's own trailing newline is dropped so the marker sits one
         # blank line under the last line of output, not two.
         text = text.rstrip("\n") + f"\n\n[exit code: {returncode}]"
-    return clamp(text, ctx.max_output_chars)
+    return _with_note(clamp(text, ctx.max_output_chars), timeout_note)

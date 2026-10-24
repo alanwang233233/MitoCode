@@ -886,22 +886,54 @@ async def test_bash_rejects_infinite_timeout(root, workspace):
 
 @pytest.mark.asyncio
 async def test_bash_clamps_timeout_above_one_hour(root, workspace):
-    """A timeout above 1 hour must be clamped, not passed as-is to wait_for."""
+    """A timeout above 1 hour must be clamped, with a note saying so."""
     approver = _RecordingApprover(ApprovalDecision.ALLOW)
     _install(workspace, approver)
 
     # 10 million ms = ~2.7 hours > 1 hour cap
     result = await bash("sleep 1", timeout=10_000_000)
 
-    # Should clamp and run, not hang or pass raw 10M ms to wait_for
-    # The command should complete quickly (sleep 1 finishes before 1 hour cap)
+    # The command completes (sleep 1 finishes well within the one hour cap),
+    # and the reply carries the clamp note naming both values -- the model
+    # must never have its ceiling silently rewritten.
     assert not result.startswith(
-        "Error: bash timed out after 10000000 ms"
-    ), f"timeout above cap must be clamped, not passed raw to wait_for; got {result!r}"
-    # Should succeed since sleep 1 finishes well within 1 hour cap
+        "Error:"
+    ), f"the clamped ceiling must let sleep 1 finish; got {result!r}"
     assert (
-        result == "" or result == "\n"
-    ), f"clamped timeout should allow sleep 1 to complete; got {result!r}"
+        "clamped to 3600000 ms" in result
+    ), f"the reply must carry the clamp note, got {result!r}"
+    assert (
+        "10000000 ms" in result
+    ), f"the note must name the requested ceiling, got {result!r}"
+
+
+@pytest.mark.asyncio
+async def test_bash_timeout_message_reports_the_effective_ceiling(
+    root, workspace, monkeypatch
+):
+    """A message fired by a clamped ceiling names the ceiling, not the request.
+
+    ``MAX_TIMEOUT_MS`` is patched down so both the clamp and the expiry fit
+    in test time: 1 000 000 ms is clamped to 50 ms, and ``sleep 1`` then
+    outlives the effective ceiling.  The message must say ``50 ms`` -- the
+    ceiling actually in force -- and carry the note naming the requested
+    value, never the raw request as the ceiling that fired.
+    """
+    approver = _RecordingApprover(ApprovalDecision.ALLOW)
+    _install(workspace, approver)
+    monkeypatch.setattr("mitocode.core.tool.builtin.shell_tools.MAX_TIMEOUT_MS", 50)
+
+    result = await bash("sleep 1", timeout=1_000_000)
+
+    assert result.startswith(
+        "Error: bash timed out after 50 ms"
+    ), f"the message must name the effective ceiling, got {result!r}"
+    assert (
+        "clamped to 50 ms" in result
+    ), f"the reply must carry the clamp note, got {result!r}"
+    assert (
+        "1000000" in result
+    ), f"the note must name the requested ceiling, got {result!r}"
 
 
 @pytest.mark.asyncio
