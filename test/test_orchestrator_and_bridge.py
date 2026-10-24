@@ -223,7 +223,11 @@ def test_event_bridge_tool_call_result():
 def test_event_bridge_tool_execution():
     bridge = EventBridge()
     result = bridge.adapt(
-        {"event": "agent.tool_call.execution", "name": "Bash", "args": {"command": "ls"}},
+        {
+            "event": "agent.tool_call.execution",
+            "name": "Bash",
+            "args": {"command": "ls"},
+        },
         agent_id=2,
     )
     assert result == {

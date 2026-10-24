@@ -1,5 +1,4 @@
-"""Typer-based command line entry point for MitoCode.
-"""
+"""Typer-based command line entry point for MitoCode."""
 
 from __future__ import annotations
 
@@ -234,7 +233,9 @@ def tui() -> None:
 def cli() -> None:
     """Start the interactive CLI chat mode."""
     # Imported at call time so `mitocode tui` never pays for prompt_toolkit.
-    from mitocode.cli.bootstrap import run as run_cli  # pylint: disable=import-outside-toplevel
+    from mitocode.cli.bootstrap import (
+        run as run_cli,
+    )  # pylint: disable=import-outside-toplevel
 
     try:
         run_cli()
