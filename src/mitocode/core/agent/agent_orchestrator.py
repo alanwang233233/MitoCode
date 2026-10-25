@@ -2,7 +2,11 @@
 
 import asyncio
 import copy
+import re
+import traceback
 from typing import Dict, List
+
+from loguru import logger as loguru_logger
 
 from .agent_runtime import AgentRuntime
 from .agent_session import AgentSession
@@ -11,6 +15,12 @@ from ..bridge.event_adapter import EventBridge
 from ..chat_provider.sample_chat_provider import SampleChatProvider
 from ..chat_provider.scenario_provider import ScenarioProvider
 from ..tool.tool_manager import ToolManager
+
+logger = loguru_logger.bind(name=__name__)
+
+# Matches the shape of an OpenAI-style secret key. Only the value is replaced;
+# surrounding words are preserved so the message stays diagnostically useful.
+_API_KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]+")
 
 
 class AgentOrchestrator:
@@ -31,7 +41,17 @@ class AgentOrchestrator:
         self,
         tool_manager: ToolManager | None = None,
         default_provider: SampleChatProvider | ScenarioProvider | None = None,
+        system_prompt: str = "",
     ):
+        """Create an orchestrator.
+
+        Args:
+            tool_manager: Optional registry every new session snapshots.
+            default_provider: Provider used by sessions that do not pass one.
+            system_prompt: Role instructions seeded into every session this
+                orchestrator creates, including child agents. An explicit
+                ``system_prompt`` passed to :meth:`create_session` wins.
+        """
         self._sessions: Dict[int, AgentSession] = {}
         self._tasks: Dict[int, asyncio.Task | None] = {}
         self._counter: int = 0
@@ -39,8 +59,29 @@ class AgentOrchestrator:
         self._default_provider: SampleChatProvider | ScenarioProvider | None = (
             default_provider
         )
+        self._system_prompt: str = system_prompt or ""
         self._bridge = EventBridge(tool_manager)
         self.event_queue: asyncio.Queue = asyncio.Queue()
+
+    # ------------------------------------------------------------------
+    # Error reporting
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def redact_api_keys(message: str) -> str:
+        """Replace OpenAI-style ``sk-`` secrets in ``message`` with ``sk-***``.
+
+        The replacement is best-effort: it targets the literal ``sk-`` prefix
+        followed by key-shaped characters, which covers the API keys this
+        project reads from the environment without touching ordinary prose.
+
+        Args:
+            message: Raw text, typically an exception message.
+
+        Returns:
+            The text with every matched secret replaced by ``sk-***``.
+        """
+        return _API_KEY_PATTERN.sub("sk-***", message)
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -66,7 +107,9 @@ class AgentOrchestrator:
                 default_provider if not given.
             description: Optional description shown in the tree.
             parent_id: If set, the new session becomes a child of this node.
-            **session_kwargs: Forwarded to :class:`AgentSession`.
+            **session_kwargs: Forwarded to :class:`AgentSession`. The
+                orchestrator's ``system_prompt`` is used unless the caller
+                passes one explicitly.
 
         Returns:
             The newly created, already registered :class:`AgentSession`.
@@ -90,6 +133,8 @@ class AgentOrchestrator:
 
         agent_id = self._counter
         self._counter += 1
+
+        session_kwargs.setdefault("system_prompt", self._system_prompt)
 
         session = AgentSession(
             agent_id=agent_id,
@@ -264,7 +309,25 @@ class AgentOrchestrator:
         except asyncio.CancelledError:
             session.state = AgentState.CANCELLED
             raise
-        except Exception:  # pylint: disable=broad-exception-caught
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # Provider failures stay inside the run loop on purpose: the TUI
+            # relies on the task completing quietly and the tree showing the
+            # error state. The log keeps the traceback, the event carries only
+            # the redacted message so a key can never reach a pane or a log sink.
+            logger.error(
+                f"Agent {agent_id} run failed\n"
+                f"{self.redact_api_keys(traceback.format_exc())}"
+            )
+            await self.event_queue.put(
+                (
+                    agent_id,
+                    {
+                        "type": "error",
+                        "agent_id": agent_id,
+                        "message": self.redact_api_keys(str(exc)),
+                    },
+                )
+            )
             session.state = AgentState.ERROR
         finally:
             if self._tasks.get(agent_id) is asyncio.current_task():

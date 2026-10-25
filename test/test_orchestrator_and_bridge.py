@@ -293,3 +293,63 @@ def test_event_bridge_header_and_delta_and_result_keep_call_id():
 def test_event_bridge_skips_internal():
     bridge = EventBridge()
     assert bridge.adapt({"event": "system.finished.tool_calls"}, agent_id=1) is None
+
+
+class _BoomProvider(EchoProvider):
+    """Provider that raises an unexpected exception carrying a fake API key."""
+
+    async def chat(self, tools=None, messages=None, **kwargs):
+        raise RuntimeError("boom sk-abc123")
+
+
+@pytest.mark.asyncio
+async def test_run_session_emits_error_event_and_redacts_key():
+    orchestrator = AgentOrchestrator(default_provider=_BoomProvider())
+    agent_id = await orchestrator.create_agent(name="boom")
+    task = await orchestrator.send_message(agent_id, "hi")
+    await task
+    events = []
+    while not orchestrator.event_queue.empty():
+        events.append(orchestrator.event_queue.get_nowait())
+    errors = [e for _, e in events if e.get("type") == "error"]
+    assert errors and errors[0]["agent_id"] == agent_id
+    assert "sk-abc123" not in errors[0]["message"]
+    assert "sk-***" in errors[0]["message"]
+    assert orchestrator.get_session(agent_id).state is AgentState.ERROR
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_reaches_every_session():
+    orchestrator = AgentOrchestrator(
+        default_provider=EchoProvider(), system_prompt="SYS"
+    )
+    parent = await orchestrator.create_agent(name="p")
+    child = await orchestrator.create_agent(name="c", parent_id=parent)
+    for agent_id in (parent, child):
+        first = orchestrator.get_session(agent_id).build_standard_context()[0]
+        assert first == {"role": "system", "content": "SYS"}
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_is_empty_by_default_and_overridable():
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    session = await orchestrator.create_session(name="no prompt")
+    assert session.system_prompt == ""
+    assert session.build_standard_context() == []
+
+    overridden = await orchestrator.create_session(
+        name="override", system_prompt="OTHER"
+    )
+    assert overridden.build_standard_context()[0] == {
+        "role": "system",
+        "content": "OTHER",
+    }
+
+
+@pytest.mark.asyncio
+async def test_redact_api_keys_leaves_other_text_intact():
+    assert (
+        AgentOrchestrator.redact_api_keys("bad sk-a1_B-2 and sk-zzz! done")
+        == "bad sk-*** and sk-***! done"
+    )
+    assert AgentOrchestrator.redact_api_keys("no secrets here") == "no secrets here"
