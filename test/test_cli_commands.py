@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mitocode import APP_VERSION
 from mitocode.cli.args import CliArgs
-from mitocode.cli.commands import COMMANDS, CommandResult, dispatch
+from mitocode.cli.commands import COMMANDS, Command, CommandResult, dispatch
 from mitocode.cli.state import CliState, CommandContext
 from mitocode.cli.theme import MITOCODE_THEME
 from mitocode.cli.ui import CliUI
@@ -336,6 +336,22 @@ async def test_exit_and_quit_request_exit(tmp_path):
 
     assert (await dispatch("/exit", ctx)).exit_requested is True
     assert (await dispatch("/quit", ctx)).exit_requested is True
+
+
+@pytest.mark.asyncio
+async def test_handler_failure_is_contained_by_dispatch(tmp_path, monkeypatch):
+    ctx, buffer = _ctx(tmp_path)
+
+    async def _boom(context, args):
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(COMMANDS, "boom", Command("boom", "/boom", "Explode.", _boom))
+
+    result = await dispatch("/boom", ctx)
+
+    assert isinstance(result, CommandResult)
+    assert result.exit_requested is False
+    assert "Command failed: boom" in buffer.getvalue()
 
 
 @pytest.mark.asyncio

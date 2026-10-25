@@ -30,6 +30,8 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 from rich.table import Table
 from rich.text import Text
 
+from loguru import logger as loguru_logger
+
 from mitocode.cli.state import CommandContext
 
 if TYPE_CHECKING:
@@ -45,6 +47,9 @@ MAX_AGENT_MESSAGE_CHARS = 2000
 
 UNKNOWN_COMMAND_TEMPLATE = "Unknown command /{name} · /help"
 """Line printed for a slash command that is not registered."""
+
+COMMAND_FAILED_TEMPLATE = "Command failed: {error}"
+"""Line printed when a registered handler raises unexpectedly."""
 
 
 @dataclass(frozen=True)
@@ -116,7 +121,9 @@ async def dispatch(line: str, ctx: CommandContext) -> Optional[CommandResult]:
     Returns:
         ``None`` when the line is ordinary prompt text; otherwise a
         :class:`CommandResult`.  Unknown commands return a default result
-        (no exit) after printing one error line.
+        (no exit) after printing one error line.  A registered handler that
+        raises is logged and reported the same way, so no command failure can
+        escape the REPL.
     """
     stripped = line.strip()
     if not stripped.startswith("/"):
@@ -133,7 +140,14 @@ async def dispatch(line: str, ctx: CommandContext) -> Optional[CommandResult]:
         ctx.ui.error(UNKNOWN_COMMAND_TEMPLATE.format(name=name))
         return CommandResult()
 
-    result = await entry.handler(ctx, parts[1:])
+    try:
+        result = await entry.handler(ctx, parts[1:])
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        # Deliberately ``Exception``: KeyboardInterrupt and asyncio's
+        # CancelledError are shutdown signals, not command failures.
+        loguru_logger.exception("Slash command /{} failed", name)
+        ctx.ui.error(COMMAND_FAILED_TEMPLATE.format(error=exc))
+        return CommandResult()
     return result if result is not None else CommandResult()
 
 
