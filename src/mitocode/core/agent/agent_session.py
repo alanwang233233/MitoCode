@@ -103,9 +103,15 @@ class AgentSession:
     converts the history into provider-compatible dicts via
     :meth:`build_standard_context`.
 
+    A non-empty ``system_prompt`` is seeded as the first message block, so it
+    precedes every user and assistant turn in the context.  Managed tools are
+    snapshotted at construction time; call :meth:`refresh_tools` to pick up
+    tools registered afterwards (for example by an MCP refresh).
+
     Attributes:
         provider: The chat provider used by the runtime.
         messages: Ordered internal message blocks forming the context.
+        system_prompt: The role instructions seeded as the first message.
         tools_map: Merged name-to-callable mapping available to this agent.
         tool_schemas: OpenAI-compatible tool schemas for ``chat`` requests.
         state: Current lifecycle state (idle/running/finished/...).
@@ -122,7 +128,7 @@ class AgentSession:
         Args:
             **settings: Settings accepted by :class:`AgentSession`, e.g.
                 ``provider``, ``tools_map``, ``tool_schemas``,
-                ``tool_manager``, ``on_end``.
+                ``tool_manager``, ``on_end``, ``system_prompt``.
 
         Returns:
             AgentSession: A freshly constructed session instance.
@@ -131,13 +137,21 @@ class AgentSession:
 
     def __init__(self, **settings):
         provider: _SampleChatProvider = settings.get("provider", None)
-        user_tools_map = settings.get("tools_map", {})
-        user_tool_schemas = settings.get("tool_schemas", [])
+        # The user-supplied collections are kept intact so that
+        # :meth:`refresh_tools` can rebuild the merged view without losing
+        # them: only the managed half of the merge is allowed to change.
+        self._user_tools_map: Dict[str, Callable] = dict(
+            settings.get("tools_map") or {}
+        )
+        self._user_tool_schemas: List[Dict[str, Any]] = list(
+            settings.get("tool_schemas") or []
+        )
         tool_manager = settings.get("tool_manager", None)
         self.agent_id: int = settings.get("agent_id", -1)
         self.name: str = settings.get("name", "")
         self.description: str = settings.get("description", "")
         self.parent_id: int | None = settings.get("parent_id", None)
+        self.system_prompt: str = settings.get("system_prompt", "") or ""
         self.sub_agent_ids: List[int] = []
         self.state: AgentState = AgentState.DEFAULT
 
@@ -148,33 +162,70 @@ class AgentSession:
         if tool_manager is not None and not isinstance(tool_manager, ToolManager):
             raise TypeError("tool_manager must be an instance of ToolManager.")
 
-        if tool_manager:
-            managed_map = tool_manager.tools_map()
-            managed_schemas = tool_manager.tool_schemas("agent")
-            tools_map = {**managed_map, **user_tools_map}
-
-            merged = {
-                s["function"]["name"]: s
-                for s in managed_schemas
-                if "function" in s and "name" in s["function"]
-            }
-            for schema in user_tool_schemas:
-                name = schema.get("function", {}).get("name")
-                if name:
-                    merged[name] = schema
-                else:
-                    merged[id(schema)] = schema
-            tool_schemas = list(merged.values())
-        else:
-            tools_map = user_tools_map
-            tool_schemas = user_tool_schemas
+        tools_map, tool_schemas = self._merge_tools(tool_manager)
 
         self.provider = provider
         self.messages: List[_MessageBlock] = []
+        # The prompt goes first and before any user message, so every later
+        # turn sees the same role instructions.
+        if self.system_prompt:
+            self.messages.append(_PlainTextMessageBlock("system", self.system_prompt))
         self.tools_map: Dict[str, Callable] = tools_map
         self.tool_schemas = tool_schemas
         self.tool_manager: ToolManager | None = tool_manager
         self._cancel_event = asyncio.Event()
+
+    def _merge_tools(
+        self, tool_manager: ToolManager | None
+    ) -> tuple[Dict[str, Callable], List[Dict[str, Any]]]:
+        """Merge managed and user-supplied tools and schemas.
+
+        User entries win on a name collision, for both the callable mapping and
+        the schema list.  Managed schemas missing a ``function``/``name`` pair
+        are skipped; user schemas without a name are kept by object identity so
+        a caller that passes one does not silently lose it.  Without a manager
+        the user collections are copied as-is.
+
+        Args:
+            tool_manager: The registry to snapshot, or ``None`` when the
+                session only uses user-supplied tools.
+
+        Returns:
+            A ``(tools_map, tool_schemas)`` tuple suitable for assigning to the
+            session attributes.
+        """
+        if not tool_manager:
+            return dict(self._user_tools_map), list(self._user_tool_schemas)
+
+        tools_map = {**tool_manager.tools_map(), **self._user_tools_map}
+
+        merged = {
+            s["function"]["name"]: s
+            for s in tool_manager.tool_schemas("agent")
+            if "function" in s and "name" in s["function"]
+        }
+        for schema in self._user_tool_schemas:
+            name = schema.get("function", {}).get("name")
+            if name:
+                merged[name] = schema
+            else:
+                merged[id(schema)] = schema
+        return tools_map, list(merged.values())
+
+    def refresh_tools(self) -> None:
+        """Re-snapshot managed tools while keeping user-supplied ones.
+
+        Rebuilds :attr:`tools_map` and :attr:`tool_schemas` from the session's
+        :class:`ToolManager`, which is what makes tools registered after the
+        session was constructed (e.g. by an MCP refresh) visible to it.  The
+        merged result is identical in shape to the one built at construction
+        time, including user tools overriding managed ones of the same name.
+
+        Nothing else changes: the message history, provider, cancellation
+        state, lifecycle state and tree fields are left untouched, so a refresh
+        is safe in the middle of an idle session.
+        """
+        self.tools_map, self.tool_schemas = self._merge_tools(self.tool_manager)
 
     def get_tool_docs_for_human(self) -> Dict[str, str]:
         """Return human-readable documentation for all managed tools."""
