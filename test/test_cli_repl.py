@@ -257,6 +257,7 @@ class RecordingUI:
         self.agent_count = 1
         self.events = self.stream.events
         self.thinking_starts = 0
+        self.thinking_stops = 0
 
     async def read_prompt(self):
         """Return the next scripted answer.
@@ -335,7 +336,8 @@ class RecordingUI:
         self.thinking_starts += 1
 
     def stop_thinking(self):
-        """Satisfy the spinner contract without rendering anything."""
+        """Record that the thinking spinner was stopped."""
+        self.thinking_stops += 1
 
     def pause_live(self):
         """Satisfy the approval contract without rendering anything."""
@@ -779,3 +781,91 @@ async def test_external_cancellation_is_not_swallowed(tmp_path):
         assert len(ui.finish_lines) == 1
     finally:
         await _stop(pump_task)
+
+
+@pytest.mark.asyncio
+async def test_send_message_returning_none_stops_the_spinner(tmp_path, monkeypatch):
+    """A vanished agent still stops thinking and prints one summary."""
+    ui = RecordingUI(answers=[])
+    state, repl, _, pump_task, _ = await _setup(tmp_path, ui, [_text_turn("unused")])
+
+    async def _send_nothing(agent_id, message):
+        """Stand in for an orchestrator whose session disappeared.
+
+        Args:
+            agent_id: Ignored agent id.
+            message: Ignored user message.
+
+        Returns:
+            ``None``, as ``send_message`` does for a missing session.
+        """
+        del agent_id, message
+        return None
+
+    monkeypatch.setattr(state.orchestrator, "send_message", _send_nothing)
+    try:
+        await asyncio.wait_for(repl.run_turn("hello"), timeout=5)
+    finally:
+        await _stop(pump_task)
+
+    assert any("does not exist" in line for line in ui.errors)
+    assert ui.thinking_starts == 1
+    assert ui.thinking_stops == 1
+    assert len(ui.finish_lines) == 1
+
+
+@pytest.mark.asyncio
+async def test_failing_turn_does_not_escape_the_loop(tmp_path, monkeypatch):
+    """A turn that raises is reported and the prompt comes back."""
+    ui = RecordingUI(answers=["boom", EOFError()])
+    _, repl, _, pump_task, _ = await _setup(tmp_path, ui, [_text_turn("unused")])
+
+    async def _explode(text):
+        """Raise the failure the loop must contain.
+
+        Args:
+            text: Ignored user message.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        del text
+        raise RuntimeError("turn exploded")
+
+    monkeypatch.setattr(repl, "run_turn", _explode)
+    try:
+        code = await asyncio.wait_for(repl.run(), timeout=5)
+    finally:
+        await _stop(pump_task)
+
+    assert code == 0
+    assert any("Turn failed: turn exploded" in line for line in ui.errors)
+
+
+@pytest.mark.asyncio
+async def test_failing_command_does_not_escape_the_loop(tmp_path, monkeypatch):
+    """A raising command handler is reported and the prompt comes back."""
+    ui = RecordingUI(answers=["/help", EOFError()])
+    _, repl, _, pump_task, _ = await _setup(tmp_path, ui, [_text_turn("unused")])
+
+    async def _explode(line, ctx):
+        """Raise the failure the loop must contain.
+
+        Args:
+            line: Ignored command line.
+            ctx: Ignored command context.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        del line, ctx
+        raise RuntimeError("command exploded")
+
+    monkeypatch.setattr(repl_module, "dispatch", _explode)
+    try:
+        code = await asyncio.wait_for(repl.run(), timeout=5)
+    finally:
+        await _stop(pump_task)
+
+    assert code == 0
+    assert any("Command failed: command exploded" in line for line in ui.errors)

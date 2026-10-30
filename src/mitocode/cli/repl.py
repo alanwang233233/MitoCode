@@ -23,8 +23,10 @@ talking without ``/clear``.  ``Ctrl+C`` at the prompt is prompt_toolkit's
 **Input is replayed through one path.**  Optionally the ``--initial-prompt``
 message is submitted first, then every prompt line is either empty (ignored),
 a slash command (:func:`~mitocode.cli.commands.dispatch`) or a user turn.
-A command's failure is never a reason to exit: only ``/exit``, ``/quit``, EOF
-or the double ``Ctrl+C`` end the loop, which returns ``0``.
+A command or turn failure is logged and reported but never ends the process:
+only ``/exit``, ``/quit``, EOF or the double ``Ctrl+C`` stop the loop, which
+returns ``0``.  ``KeyboardInterrupt`` and ``CancelledError`` are not failures
+and keep propagating.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ import asyncio
 import time
 from typing import TYPE_CHECKING, Optional
 
+from loguru import logger as loguru_logger
 from prompt_toolkit.patch_stdout import patch_stdout
 
 from mitocode.cli.commands import dispatch
@@ -135,6 +138,12 @@ class Repl:  # pylint: disable=too-many-instance-attributes
         exit actually stops the loop; an unknown command already printed its
         error and the REPL continues.
 
+        The method is total for ordinary failures: an exception raised by a
+        command handler or by a turn is logged and reported through ``ui.error``
+        instead of escaping :meth:`run`, because a failed request is not a reason
+        to kill the CLI.  ``KeyboardInterrupt`` and ``CancelledError`` are
+        ``BaseException`` and deliberately keep propagating.
+
         Args:
             line: Raw text submitted at the prompt.
         """
@@ -143,11 +152,20 @@ class Repl:  # pylint: disable=too-many-instance-attributes
             return
         if text.startswith("/"):
             ctx = CommandContext(self.state, self.ui, self.approver)
-            result = await dispatch(text, ctx)
+            try:
+                result = await dispatch(text, ctx)
+            except Exception as exc:  # pylint: disable=broad-except
+                loguru_logger.exception("Slash command failed")
+                self.ui.error(f"Command failed: {exc}")
+                return
             if result is not None and result.exit_requested:
                 self._shutdown.set()
             return
-        await self.run_turn(text)
+        try:
+            await self.run_turn(text)
+        except Exception as exc:  # pylint: disable=broad-except
+            loguru_logger.exception("Turn failed")
+            self.ui.error(f"Turn failed: {exc}")
 
     def _note_ctrl_c(self) -> bool:
         """Record an interrupt at the prompt and decide whether to exit.
@@ -176,8 +194,9 @@ class Repl:  # pylint: disable=too-many-instance-attributes
         the loop stays usable.  A cancellation of *this* coroutine, however, is
         a shutdown request and is re-raised after the summary.
 
-        The method always ends by waiting for the pump to drain and printing
-        exactly one ``ui.finish_turn`` summary, whatever happened to the turn.
+        The method always ends by stopping the thinking spinner, waiting for
+        the pump to drain and printing exactly one ``ui.finish_turn`` summary,
+        whatever happened to the turn.
 
         Args:
             text: User message to append to the main session.
@@ -216,6 +235,7 @@ class Repl:  # pylint: disable=too-many-instance-attributes
                     raise
         finally:
             self._active_turn = None
+            self.ui.stop_thinking()
             await self.pump.wait_idle()
             tokens = max(0, self.state.estimate_tokens() - tokens_before)
             tool_calls = max(0, self.state.tool_call_count - calls_before)
