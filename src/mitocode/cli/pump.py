@@ -51,6 +51,26 @@ ToolCall = Tuple[str, Mapping[str, Any]]
 """The call name and its arguments, remembered until the result arrives."""
 
 
+def _describe(payload: Any) -> str:
+    """Return a log-safe description of a queue item or event.
+
+    Logging must never raise, and it must never print a payload's contents: an
+    event can carry model output. A mapping is described by its ``type`` key; any
+    other object only by its class name, so ``None``, a string or a list cannot
+    break the log call that is supposed to contain a failure.
+
+    Args:
+        payload: Anything taken off the queue or out of an event.
+
+    Returns:
+        The event's ``type`` value as text, ``"<missing>"`` for a mapping
+        without one, or ``"<ClassName>"`` for a non-mapping payload.
+    """
+    if isinstance(payload, Mapping):
+        return str(payload.get("type", "<missing>"))
+    return f"<{type(payload).__name__}>"
+
+
 class EventPump:
     """Render orchestrator events into the CLI until cancelled.
 
@@ -102,30 +122,62 @@ class EventPump:
         """Consume events until the task is cancelled.
 
         The loop never returns on its own: the queue is a live stream of turns.
-        A handler that raises is logged and skipped so a single malformed event
-        cannot take the whole CLI down with it.
+        It is total: no payload -- ``None``, a string, a list, an object without
+        ``.get``, a bare non-pair item or a handler that raises -- can escape it.
+        Anything unusable is logged with a type-safe description and skipped, so
+        a malformed event cannot kill the pump and park every later
+        :meth:`wait_idle` caller forever.
 
         Raises:
             asyncio.CancelledError: When the owning application cancels the
                 task at shutdown.
         """
         while True:
-            agent_id, event = await self._queue.get()
-            # Count the event before any other suspension point: a concurrent
+            item = await self._queue.get()
+            # Count the item before any other suspension point: a concurrent
             # ``wait_idle`` must never see an empty queue and a zero count while
             # this item is still in flight.
             self._pending += 1
             try:
-                self._handle(agent_id, event)
+                self._consume(item)
             except Exception:  # pylint: disable=broad-except
-                # ``CancelledError`` is a ``BaseException``, so shutdown still
-                # propagates; only a broken handler is swallowed here.
+                # Belt and braces: ``_consume`` already contains its own
+                # failures, and ``CancelledError`` is a ``BaseException`` so
+                # shutdown still propagates. Never touch the payload here.
                 loguru_logger.exception(
-                    "CLI event pump could not render event type {!r}",
-                    event.get("type"),
+                    "CLI event pump failed while consuming a {!r} queue item",
+                    type(item).__name__,
                 )
             finally:
                 await self._settle()
+
+    def _consume(self, item: Any) -> None:
+        """Unpack one queue item and render its event, containing failures.
+
+        Args:
+            item: A ``(agent_id, event)`` pair as written by the orchestrator.
+                A queue that is written to by foreign code may also contain
+                something else, which is logged and dropped.
+
+        Raises:
+            asyncio.CancelledError: When the pump is cancelled mid-event.
+        """
+        try:
+            agent_id, event = item
+        except (TypeError, ValueError):
+            loguru_logger.warning(
+                "CLI event pump dropped a malformed queue item {}",
+                _describe(item),
+            )
+            return
+
+        try:
+            self._handle(agent_id, event)
+        except Exception:  # pylint: disable=broad-except
+            loguru_logger.exception(
+                "CLI event pump could not render event type {}",
+                _describe(event),
+            )
 
     async def wait_idle(self) -> None:
         """Wait until every queued event has been rendered.
@@ -157,14 +209,29 @@ class EventPump:
     # Dispatch table
     # ------------------------------------------------------------------
 
-    def _handle(self, agent_id: int, event: Dict[str, Any]) -> None:
-        """Route one event to its handler, ignoring unknown types.
+    def _handle(self, agent_id: int, event: Any) -> None:
+        """Route one event to its handler, ignoring anything unusable.
+
+        A non-mapping payload is logged and dropped rather than handed to a
+        handler: the queue is filled by the orchestrator, but the pump is the
+        component that must stay alive when the contract is broken.
 
         Args:
             agent_id: Id of the agent that produced the event; ``-1`` for tree
                 snapshots.
             event: Adapted event dict from the orchestrator's event bridge.
+                Any other object is refused.
+
+        Raises:
+            asyncio.CancelledError: When the pump is cancelled mid-event.
         """
+        if not isinstance(event, Mapping):
+            loguru_logger.warning(
+                "CLI event pump ignored a non-mapping event {}",
+                _describe(event),
+            )
+            return
+
         event_type = event.get("type")
         if event_type == "sync":
             self._handle_sync(event)
@@ -185,7 +252,7 @@ class EventPump:
     # Handlers
     # ------------------------------------------------------------------
 
-    def _handle_sync(self, event: Dict[str, Any]) -> None:
+    def _handle_sync(self, event: Mapping[str, Any]) -> None:
         """Replace the agent table from a tree snapshot without printing.
 
         ``/agents`` reads :attr:`CliState.agents` and the prompt toolbar shows
@@ -198,7 +265,7 @@ class EventPump:
         self._state.agents = list(agents) if isinstance(agents, (list, tuple)) else []
         self._ui.agent_count = len(self._state.agents)
 
-    def _handle_token(self, agent_id: int, event: Dict[str, Any]) -> None:
+    def _handle_token(self, agent_id: int, event: Mapping[str, Any]) -> None:
         """Stream main-agent prose; drop a background agent's prose.
 
         Args:
@@ -213,7 +280,7 @@ class EventPump:
         self._state.total_chars += len(content)
         self._ui.stream.feed(content)
 
-    def _handle_tool_start(self, agent_id: int, event: Dict[str, Any]) -> None:
+    def _handle_tool_start(self, agent_id: int, event: Mapping[str, Any]) -> None:
         """Render a tool header and remember the call's arguments.
 
         The arguments are recorded before rendering because the result handler
@@ -240,7 +307,7 @@ class EventPump:
         else:
             self._ui.begin_tool(call, self._prefix(agent_id))
 
-    def _handle_tool_result(self, agent_id: int, event: Dict[str, Any]) -> None:
+    def _handle_tool_result(self, agent_id: int, event: Mapping[str, Any]) -> None:
         """Render a tool result, matched to its call by agent and call id.
 
         A failure -- a falsy ``success`` or an ``Error:``-prefixed body -- is
@@ -299,7 +366,7 @@ class EventPump:
             return
         self._ui.note(f"{self._prefix(agent_id)}cancelled")
 
-    def _handle_error(self, agent_id: int, event: Dict[str, Any]) -> None:
+    def _handle_error(self, agent_id: int, event: Mapping[str, Any]) -> None:
         """Report a failed agent run.
 
         The message was already scrubbed of credentials by the orchestrator;

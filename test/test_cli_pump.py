@@ -20,6 +20,7 @@ from rich.text import Text
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from mitocode.cli import pump as pump_module
 from mitocode.cli.pump import EventPump
 
 
@@ -663,4 +664,66 @@ async def test_a_broken_handler_is_logged_and_the_pump_keeps_running(tmp_path):
 
     assert any("could not render" in line for line in logged)
     assert ui.stream.feeds == ["still alive\n"]
+    await _stop(task)
+
+
+@pytest.mark.asyncio
+async def test_non_mapping_events_are_dropped_instead_of_killing_the_pump(tmp_path):
+    """``None``, a string or a bare item is logged, skipped, and the pump lives."""
+    queue: asyncio.Queue = asyncio.Queue()
+    ui = _RecordingUI()
+    state = _state(tmp_path)
+    pump = EventPump(queue, ui, state)
+    logged = []
+    sink = loguru_logger.add(logged.append, level="WARNING")
+    try:
+        task = asyncio.create_task(pump.run())
+        queue.put_nowait((0, None))
+        queue.put_nowait((0, "boom"))
+        queue.put_nowait((0, ["not", "an", "event"]))
+        queue.put_nowait("not a pair")
+        queue.put_nowait((0, {"type": "token", "content": "survived\n"}))
+
+        await asyncio.wait_for(pump.wait_idle(), timeout=2)
+    finally:
+        loguru_logger.remove(sink)
+
+    assert ui.stream.feeds == ["survived\n"]
+    assert not task.done()
+    assert any("<NoneType>" in line for line in logged)
+    assert any("<str>" in line for line in logged)
+    assert any("<list>" in line for line in logged)
+    assert any("malformed queue item" in line for line in logged)
+    await _stop(task)
+
+
+@pytest.mark.asyncio
+async def test_the_pump_survives_a_failure_log_that_itself_fails(tmp_path, monkeypatch):
+    """The last-resort catch keeps ``run()`` total even when logging breaks."""
+
+    def _explode(payload):
+        raise RuntimeError("cannot describe payload")
+
+    monkeypatch.setattr(pump_module, "_describe", _explode)
+    queue: asyncio.Queue = asyncio.Queue()
+    ui = _RecordingUI()
+    state = _state(tmp_path)
+    pump = EventPump(queue, ui, state)
+    logged = []
+    sink = loguru_logger.add(logged.append, level="ERROR")
+    try:
+        task = asyncio.create_task(pump.run())
+        # The handler raises on the non-mapping payload, then the handler's own
+        # except raises while trying to describe it: only ``run``'s backstop
+        # stands between that and a dead pump.
+        queue.put_nowait((0, "boom"))
+        queue.put_nowait((0, {"type": "token", "content": "still\n"}))
+
+        await asyncio.wait_for(pump.wait_idle(), timeout=2)
+    finally:
+        loguru_logger.remove(sink)
+
+    assert any("failed while consuming a 'tuple' queue item" in line for line in logged)
+    assert ui.stream.feeds == ["still\n"]
+    assert not task.done()
     await _stop(task)
