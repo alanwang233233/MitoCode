@@ -115,7 +115,7 @@ class Repl:  # pylint: disable=too-many-instance-attributes
         """
         initial = (self.state.args.initial_prompt or "").strip()
 
-        with patch_stdout():
+        with patch_stdout(raw=True):
             if initial:
                 await self.run_turn(initial)
             while not self._shutdown.is_set():

@@ -457,13 +457,19 @@ async def _setup(tmp_path, ui, turns, *, initial_prompt=None, tools=None):
 
 
 @contextmanager
-def _recording_patch_stdout():
-    """Stand-in for ``prompt_toolkit.patch_stdout`` that records its use."""
+def _recording_patch_stdout(**kwargs):
+    """Stand-in for ``prompt_toolkit.patch_stdout`` that records its use.
+
+    Args:
+        **kwargs: Keyword arguments the REPL passed to ``patch_stdout``.
+    """
     _recording_patch_stdout.calls += 1
+    _recording_patch_stdout.kwargs = kwargs
     yield
 
 
 _recording_patch_stdout.calls = 0
+_recording_patch_stdout.kwargs = {}
 
 
 @pytest.mark.asyncio
@@ -689,6 +695,27 @@ async def test_run_is_wrapped_in_patch_stdout(tmp_path, monkeypatch):
         await _stop(pump_task)
 
     assert _recording_patch_stdout.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_run_requests_raw_patch_stdout(tmp_path, monkeypatch):
+    """``raw=True`` keeps Rich's ANSI styling intact above the prompt.
+
+    ``StdoutProxy(raw=False)`` strips VT100 sequences, which corrupted the
+    transcript with literal ``ESC[...`` fragments; the REPL must opt out.
+    """
+    ui = RecordingUI(answers=[EOFError()])
+    _, repl, _, pump_task, _ = await _setup(tmp_path, ui, [_text_turn("unused")])
+    _recording_patch_stdout.calls = 0
+    _recording_patch_stdout.kwargs = {}
+    monkeypatch.setattr(repl_module, "patch_stdout", _recording_patch_stdout)
+    try:
+        await asyncio.wait_for(repl.run(), timeout=5)
+    finally:
+        await _stop(pump_task)
+
+    assert _recording_patch_stdout.calls == 1
+    assert _recording_patch_stdout.kwargs.get("raw") is True
 
 
 @pytest.mark.asyncio
