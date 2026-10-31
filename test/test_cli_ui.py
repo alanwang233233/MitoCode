@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 from prompt_toolkit import PromptSession
+from prompt_toolkit.buffer import Buffer
 from rich.console import Console
 from rich.text import Text
 
@@ -243,7 +244,7 @@ class _FakeBuffer:
 
     Attributes:
         text: Current buffer contents.
-        accepted: Whether ``validate_and_accept`` was called.
+        accepted: Whether ``validate_and_handle`` was called.
         deleted: Number of characters removed by the last deletion.
     """
 
@@ -274,7 +275,7 @@ class _FakeBuffer:
         """
         self.text += text
 
-    def validate_and_accept(self):
+    def validate_and_handle(self):
         """Record that the line was submitted."""
         self.accepted = True
 
@@ -344,6 +345,23 @@ def test_enter_binding_continues_after_backslash_and_accepts_otherwise():
     enter(_FakeEvent(submitted))
     assert submitted.accepted is True
     assert submitted.text == "hello"
+
+
+def test_enter_binding_submits_a_real_prompt_toolkit_buffer():
+    """Enter must reach the accept handler of a real ``Buffer``.
+
+    A fake buffer cannot catch a mistyped prompt_toolkit method name, so this
+    regression test drives the Enter binding with a genuine
+    ``prompt_toolkit.buffer.Buffer`` wrapped in a minimal event.
+    """
+    ui, _ = _ui()
+    accepted = []
+    real_buffer = Buffer(accept_handler=lambda buf: accepted.append(buf.text))
+    real_buffer.text = "ship it"
+
+    _binding_handler(ui._prompt_key_bindings(), ("c-m",))(_FakeEvent(real_buffer))
+
+    assert accepted == ["ship it"]
 
 
 def test_alt_enter_and_ctrl_j_insert_newlines_and_ctrl_l_clears():

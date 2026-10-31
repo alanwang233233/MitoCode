@@ -651,7 +651,7 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
                 buffer.delete_before_cursor(1)
                 buffer.insert_text("\n")
                 return
-            buffer.validate_and_accept()
+            buffer.validate_and_handle()
 
         @bindings.add("escape", "enter")
         @bindings.add("c-j")
