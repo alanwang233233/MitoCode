@@ -31,6 +31,11 @@ def test_defaults():
     assert args.initial_prompt is None
 
 
+def test_repr_hides_api_key():
+    args = parse_args(["--api-key", "super-secret"])
+    assert "super-secret" not in repr(args)
+
+
 def test_default_optional_fields_are_unset():
     args = parse_args([])
     assert args.model is None

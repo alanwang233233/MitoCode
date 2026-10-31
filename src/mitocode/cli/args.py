@@ -46,7 +46,7 @@ class CliArgs:  # pylint: disable=too-many-instance-attributes
 
     workspace: Path = field(default_factory=Path.cwd)
     model: Optional[str] = None
-    api_key: Optional[str] = None
+    api_key: Optional[str] = field(default=None, repr=False)
     base_url: Optional[str] = None
     timeout: Optional[float] = None
     permission_mode: str = "ask"
