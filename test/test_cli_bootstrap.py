@@ -366,3 +366,38 @@ async def test_provider_failure_becomes_config_error_with_scrubbed_key(
     assert "super-secret" not in message
     assert "***" in message
     assert not any(order == "mcp.start" for order in ORDERS)
+
+
+@pytest.mark.asyncio
+async def test_session_failure_after_mcp_start_stops_the_manager(tmp_path, monkeypatch):
+    """A failure after ``mcp.start()`` must not orphan the MCP servers.
+
+    ``create_session`` is the last startup step and the first one that can fail
+    while a live manager exists; the manager reference is otherwise lost with
+    the exception.
+    """
+    ORDERS.clear()
+
+    class _ExplodingOrchestrator(_FakeOrchestrator):
+        """Orchestrator whose first session cannot be created."""
+
+        async def create_session(self, **kwargs):
+            ORDERS.append("create_session")
+            raise RuntimeError("session creation failed")
+
+    _patch(monkeypatch)
+    monkeypatch.setattr(bootstrap_module, "AgentOrchestrator", _ExplodingOrchestrator)
+    _write_mcp(tmp_path, '{"mcpServers":{"s":{"command":"echo"}}}')
+    ui = _ui()
+
+    with pytest.raises(RuntimeError, match="session creation failed"):
+        await bootstrap(
+            _args(workspace=tmp_path, model="m", api_key="k"),
+            ui,
+            CliApprover(ui),
+        )
+
+    assert ORDERS.count("mcp.stop") == 1
+    assert ORDERS.index("mcp.start") < ORDERS.index("mcp.stop")
+    assert ORDERS.index("create_session") < ORDERS.index("mcp.stop")
+    assert _FakeMcp.instances[-1].config is not None

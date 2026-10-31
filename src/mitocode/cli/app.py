@@ -22,7 +22,10 @@ Teardown lives in ``finally`` and is equally ordered: the pump task is
 cancelled and awaited first, because it renders into the UI and MCP shutdown
 may log, then ``mcp.stop()`` runs under :func:`asyncio.shield` so a second
 ``Ctrl+C`` cannot leave a subprocess behind.  MCP shutdown failures are logged
-and never change the exit code.
+and never change the exit code.  The ``try`` starts as soon as
+:func:`bootstrap` returns, so a banner, state, pump, REPL or task-creation
+failure still stops MCP; bootstrap itself rolls back a manager it had already
+started.
 
 Errors surface once: configuration and application errors print a red panel and
 return ``1``, a ``KeyboardInterrupt`` during startup returns ``130``, and an
@@ -209,39 +212,44 @@ async def _amain(args: CliArgs, log_path: Any, console: Console) -> int:
     ui = CliUI(console, verbose=args.verbose)
     approver = CliApprover(ui, ApprovalPolicy(args.permission_mode))
     boot = await bootstrap(args, ui, approver)
-    ui.show_banner(_banner_info(boot))
 
-    state = CliState(
-        args=args,
-        workspace=boot.resolution.workspace,
-        tool_manager=boot.tool_manager,
-        provider=boot.provider,
-        orchestrator=boot.orchestrator,
-        mcp_manager=boot.mcp_manager,
-        tool_context=boot.tool_context,
-        ui=ui,
-        approver=approver,
-        workspace_initialized=boot.resolution.initialized,
-        log_path=log_path,
-        main_id=boot.main_session.agent_id,
-        mcp_error=boot.mcp_error,
-        verbose=args.verbose,
-    )
-    pump = EventPump(boot.orchestrator.event_queue, ui, state)
-    repl = Repl(state, ui, pump, approver)
-    pump_task = asyncio.create_task(pump.run())
-    _install_sigint_handler(asyncio.get_running_loop(), repl)
-
+    pump_task: Optional[asyncio.Task[None]] = None
+    state: Optional[CliState] = None
     try:
+        ui.show_banner(_banner_info(boot))
+
+        state = CliState(
+            args=args,
+            workspace=boot.resolution.workspace,
+            tool_manager=boot.tool_manager,
+            provider=boot.provider,
+            orchestrator=boot.orchestrator,
+            mcp_manager=boot.mcp_manager,
+            tool_context=boot.tool_context,
+            ui=ui,
+            approver=approver,
+            workspace_initialized=boot.resolution.initialized,
+            log_path=log_path,
+            main_id=boot.main_session.agent_id,
+            mcp_error=boot.mcp_error,
+            verbose=args.verbose,
+        )
+        pump = EventPump(boot.orchestrator.event_queue, ui, state)
+        pump_task = asyncio.create_task(pump.run())
+        repl = Repl(state, ui, pump, approver)
+        _install_sigint_handler(asyncio.get_running_loop(), repl)
+
         return await repl.run()
     finally:
-        pump_task.cancel()
-        await asyncio.gather(pump_task, return_exceptions=True)
+        if pump_task is not None:
+            pump_task.cancel()
+            await asyncio.gather(pump_task, return_exceptions=True)
         await _stop_mcp(boot.mcp_manager)
-        ui.note(
-            f"Session ended · {state.turn_count} turns "
-            f"· ~{state.estimate_tokens()} tokens"
-        )
+        if state is not None:
+            ui.note(
+                f"Session ended · {state.turn_count} turns "
+                f"· ~{state.estimate_tokens()} tokens"
+            )
         if args.debug:
             ui.note(f"Log file: {log_path}")
 

@@ -396,16 +396,22 @@ async def bootstrap(args: CliArgs, ui: CliUI, approver: CliApprover) -> Bootstra
         args, resolution.workspace, tool_manager, ui
     )
 
-    orchestrator = AgentOrchestrator(
-        tool_manager=tool_manager,
-        default_provider=provider,
-        system_prompt=build_system_prompt(resolution.workspace.path),
-    )
-    tool_context.attach_orchestrator(orchestrator)
+    try:
+        orchestrator = AgentOrchestrator(
+            tool_manager=tool_manager,
+            default_provider=provider,
+            system_prompt=build_system_prompt(resolution.workspace.path),
+        )
+        tool_context.attach_orchestrator(orchestrator)
 
-    main_session = await orchestrator.create_session(
-        name="Main", description="Interactive session"
-    )
+        main_session = await orchestrator.create_session(
+            name="Main", description="Interactive session"
+        )
+    except BaseException:
+        # MCP is live at this point and its manager would otherwise be lost
+        # with the exception, orphaning every server subprocess it started.
+        await _stop_mcp_after_failure(mcp_manager)
+        raise
     loguru_logger.debug("Main session created with id {}", main_session.agent_id)
 
     return Bootstrapped(
@@ -468,6 +474,25 @@ async def _create_provider(config: ProviderConfig, ui: CliUI) -> ChatProviderOpe
         )
     provider.model_list = model_list
     return provider
+
+
+async def _stop_mcp_after_failure(manager: Optional[McpManager]) -> None:
+    """Stop an MCP manager whose startup owner is about to raise.
+
+    The stop coroutine is shielded because it releases subprocesses, and it is
+    awaited while the caller still holds the exception. A failure here is
+    logged only: the original exception must reach the caller unchanged.
+
+    Args:
+        manager: Live manager started earlier in :func:`bootstrap`, or ``None``
+            when MCP is disabled.
+    """
+    if manager is None:
+        return
+    try:
+        await asyncio.shield(manager.stop())
+    except BaseException:  # pylint: disable=broad-exception-caught
+        loguru_logger.exception("MCP shutdown failed after bootstrap error")
 
 
 async def _start_mcp(

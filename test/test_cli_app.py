@@ -380,3 +380,102 @@ def test_is_interactive_requires_both_streams(monkeypatch):
 
     monkeypatch.setattr(sys, "stdout", SimpleNamespace(isatty=lambda: True))
     assert app_module._is_interactive() is True
+
+
+def test_banner_failure_still_stops_mcp(monkeypatch, tmp_path, capsys):
+    """A post-bootstrap failure must release the MCP servers it started."""
+    stopped = []
+
+    async def fake_stop():
+        stopped.append("stop")
+
+    boot = _boot(tmp_path, stop=fake_stop)
+
+    class ExplodingBannerUI:
+        """UI whose banner rendering fails after bootstrap succeeded."""
+
+        def __init__(self, console, verbose=False):
+            self.console = console
+            self.verbose = verbose
+
+        def show_banner(self, info):
+            raise RuntimeError("banner failed")
+
+    async def fake_bootstrap(args, ui, approver):
+        return boot
+
+    monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
+    monkeypatch.setattr(
+        app_module, "configure_logging", lambda **kw: tmp_path / "cli.log"
+    )
+    monkeypatch.setattr(app_module, "bootstrap", fake_bootstrap)
+    monkeypatch.setattr(app_module, "CliUI", ExplodingBannerUI)
+
+    assert app_module.main([]) == 1
+    assert stopped == ["stop"]
+    assert "banner failed" in capsys.readouterr().err
+
+
+class _RecordingPumpTask:
+    """Awaitable stand-in for the pump task that records cancellation."""
+
+    def __init__(self):
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+
+    def __await__(self):
+        async def _finished():
+            return None
+
+        return _finished().__await__()
+
+
+def test_repl_constructor_failure_cancels_pump_and_stops_mcp(monkeypatch, tmp_path):
+    """A failure while wiring the REPL leaves no task and no live MCP."""
+    stopped = []
+    created = []
+
+    async def fake_stop():
+        stopped.append("stop")
+
+    boot = _boot(tmp_path, stop=fake_stop)
+
+    class FakePump:
+        """Pump that is never started because the REPL cannot be built."""
+
+        def __init__(self, *args):
+            pass
+
+        async def run(self):
+            await asyncio.Event().wait()
+
+    class ExplodingRepl:
+        """REPL whose constructor fails after the pump task exists."""
+
+        def __init__(self, *args):
+            raise RuntimeError("repl wiring failed")
+
+    def fake_create_task(coro):
+        coro.close()
+        task = _RecordingPumpTask()
+        created.append(task)
+        return task
+
+    async def fake_bootstrap(args, ui, approver):
+        return boot
+
+    monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
+    monkeypatch.setattr(
+        app_module, "configure_logging", lambda **kw: tmp_path / "cli.log"
+    )
+    monkeypatch.setattr(app_module, "bootstrap", fake_bootstrap)
+    monkeypatch.setattr(app_module, "EventPump", FakePump)
+    monkeypatch.setattr(app_module, "Repl", ExplodingRepl)
+    monkeypatch.setattr(app_module.asyncio, "create_task", fake_create_task)
+
+    assert app_module.main([]) == 1
+    assert stopped == ["stop"]
+    assert len(created) == 1
+    assert created[0].cancelled
