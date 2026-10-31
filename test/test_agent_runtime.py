@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from mitocode.core.agent.agent_runtime import AgentRuntime
 from mitocode.core.agent.agent_session import AgentSession
 from mitocode.core.chat_provider.sample_chat_provider import _SampleChatProvider
+from mitocode.core.tool.builtin.context import current_agent_id
 
 # ──────────────────────────────────────────────
 # 常量
@@ -1055,3 +1056,369 @@ async def test_execution_event_carries_call_id():
     events = [e async for e in AgentRuntime.run(session)]
     execution = [e for e in events if e["event"] == "agent.tool_call.execution"]
     assert execution[0]["id"] == "call_x"
+
+
+# ──────────────────────────────────────────────
+# run(): 工具执行上下文（current_agent_id）
+# ──────────────────────────────────────────────
+
+
+class TestRunToolExecutionContext:
+    """run() 在调用工具前把当前 agent id 写入上下文变量，供内建工具读取."""
+
+    @pytest.mark.asyncio
+    async def test_run_sets_current_agent_id_visible_inside_tool_body(
+        self, make_session
+    ):
+        """工具体内读到的 current_agent_id 应等于 session.agent_id."""
+        # Arrange
+        previous_agent_id = current_agent_id.get()
+        observed: List[int] = []
+
+        async def probe(x: str) -> str:
+            observed.append(current_agent_id.get())
+            return f"probe:{x}"
+
+        rounds = [
+            [
+                _Chunk(
+                    tool_calls=[
+                        _ToolCallChunk(
+                            0,
+                            call_id=CALL_ID_PRIMARY,
+                            name="probe",
+                            arguments='{"x": "p"}',
+                        )
+                    ],
+                    finish_reason=REASON_TOOL_CALLS,
+                )
+            ],
+            [_Chunk(finish_reason=REASON_STOP)],
+        ]
+        provider = _ScriptedProvider(rounds)
+        session = make_session(provider, tools_map={"probe": probe}, agent_id=7)
+
+        try:
+            # Act
+            events = await _drain_events(AgentRuntime.run(session))
+        finally:
+            current_agent_id.set(previous_agent_id)
+
+        # Assert
+        assert observed == [7], "工具执行时应把 session.agent_id 写入 current_agent_id"
+        results = _events_of_type(events, "agent.tool_call.result")
+        assert results[0]["success"] is True, "上下文变量不改变工具成功路径"
+        assert results[0]["result"] == "probe:p", "工具返回值应原样透出"
+
+
+# ──────────────────────────────────────────────
+# run(): 零参数工具调用
+# ──────────────────────────────────────────────
+
+
+class TestRunZeroArgumentTool:
+    """run() 对完全没有参数分片的工具调用仍以空 kwargs 执行."""
+
+    @pytest.mark.asyncio
+    async def test_run_tool_call_without_argument_chunks_executes_with_no_kwargs(
+        self, make_session
+    ):
+        """无参数分片 → parameter 为空 dict，工具以无关键字参数被调用一次."""
+        # Arrange
+        no_arg_tool = mock.MagicMock(return_value="done")
+        rounds = [
+            [
+                _Chunk(
+                    tool_calls=[_ToolCallChunk(0, call_id="call_noarg", name="noarg")],
+                    finish_reason=REASON_TOOL_CALLS,
+                )
+            ],
+            [_Chunk(finish_reason=REASON_STOP)],
+        ]
+        provider = _ScriptedProvider(rounds)
+        session = make_session(provider, tools_map={"noarg": no_arg_tool})
+
+        # Act
+        events = await _drain_events(AgentRuntime.run(session))
+
+        # Assert
+        executions = _events_of_type(events, "agent.tool_call.execution")
+        assert executions[0]["args"] == {}, "无参数分片时 execution 参数应为空 dict"
+        results = _events_of_type(events, "agent.tool_call.result")
+        assert results[0]["success"] is True, "无参数工具应正常执行成功"
+        assert results[0]["result"] == "done", "返回值应透出"
+        no_arg_tool.assert_called_once_with()
+
+
+# ──────────────────────────────────────────────
+# run(): finish_reason=tool_calls 但无可执行块
+# ──────────────────────────────────────────────
+
+
+class TestRunToolCallsWithoutBlocks:
+    """run() 收到 tool_calls 终态但没有任何已建块时的退化路径."""
+
+    @pytest.mark.asyncio
+    async def test_run_tool_calls_finish_without_named_call_emits_finished_and_loops(
+        self, make_session
+    ):
+        """只有 id 而无 name 的调用 → 不建块、不执行、仍回环并最终 stop."""
+        # Arrange
+        no_arg_tool = mock.MagicMock(return_value="never")
+        rounds = [
+            [
+                _Chunk(
+                    tool_calls=[_ToolCallChunk(0, call_id="call_orphan")],
+                    finish_reason=REASON_TOOL_CALLS,
+                )
+            ],
+            [_Chunk(finish_reason=REASON_STOP)],
+        ]
+        provider = _ScriptedProvider(rounds)
+        session = make_session(provider, tools_map={"ghost": no_arg_tool})
+
+        # Act
+        events = await _drain_events(AgentRuntime.run(session))
+
+        # Assert
+        assert events == [
+            {"event": "system.finished.tool_calls"},
+            {"event": "system.finished.standard", "reason": REASON_STOP},
+        ], "无名调用不应产生 header/execution/result 事件"
+        assert len(provider.calls) == 2, "空工具轮仍应回环一次而不是卡死"
+        assert no_arg_tool.call_count == 0, "无块可执行时不应调用任何工具"
+        tool_blocks = [m for m in session.messages if getattr(m, "role", "") == "tool"]
+        assert tool_blocks == [], "无块可执行时不应写入 tool 结果消息"
+
+
+# ──────────────────────────────────────────────
+# run(): 连续两轮工具调用
+# ──────────────────────────────────────────────
+
+
+class TestRunTwoToolRounds:
+    """run() 连续两轮工具调用：每轮聚合状态独立、两轮结果都留在上下文."""
+
+    @pytest.mark.asyncio
+    async def test_run_two_tool_rounds_keep_both_results_in_context(self, make_session):
+        """第一轮 tool_a、第二轮 tool_b → 两条 tool 消息按轮次顺序保留."""
+        # Arrange
+        tool_a = mock.MagicMock(return_value="A:1")
+        tool_b = mock.MagicMock(return_value="B:2")
+        rounds = [
+            [
+                _Chunk(
+                    tool_calls=[
+                        _ToolCallChunk(
+                            0, call_id="call_1", name="tool_a", arguments='{"n": 1}'
+                        )
+                    ],
+                    finish_reason=REASON_TOOL_CALLS,
+                )
+            ],
+            [
+                _Chunk(
+                    tool_calls=[
+                        _ToolCallChunk(
+                            0, call_id="call_2", name="tool_b", arguments='{"n": 2}'
+                        )
+                    ],
+                    finish_reason=REASON_TOOL_CALLS,
+                )
+            ],
+            [_Chunk(finish_reason=REASON_STOP)],
+        ]
+        provider = _ScriptedProvider(rounds)
+        session = make_session(provider, tools_map={"tool_a": tool_a, "tool_b": tool_b})
+
+        # Act
+        events = await _drain_events(AgentRuntime.run(session))
+
+        # Assert
+        assert len(provider.calls) == 3, "两轮工具后应再请求一次 chat 以收尾"
+        assert (
+            len(_events_of_type(events, "system.finished.tool_calls")) == 2
+        ), "每轮工具结束都应有 finished.tool_calls 信号"
+        headers = [
+            (e["id"], e["name"])
+            for e in _events_of_type(events, "agent.tool_call.header")
+        ]
+        assert headers == [
+            ("call_1", "tool_a"),
+            ("call_2", "tool_b"),
+        ], "第二轮应新建自己的块而非复用第一轮"
+        executions = [
+            (e["name"], e["args"])
+            for e in _events_of_type(events, "agent.tool_call.execution")
+        ]
+        assert executions == [
+            ("tool_a", {"n": 1}),
+            ("tool_b", {"n": 2}),
+        ], "两轮参数不应混入彼此"
+        results = [
+            (e["id"], e["result"])
+            for e in _events_of_type(events, "agent.tool_call.result")
+        ]
+        assert results == [
+            ("call_1", "A:1"),
+            ("call_2", "B:2"),
+        ], "两条结果各自对应自己的 call id"
+        tool_messages = [
+            (m.tool_call_id, m.content)
+            for m in session.messages
+            if getattr(m, "role", "") == "tool"
+        ]
+        assert tool_messages == [
+            ("call_1", "A:1"),
+            ("call_2", "B:2"),
+        ], "两轮工具结果应按轮次顺序留在上下文中"
+
+
+# ──────────────────────────────────────────────
+# run(): 工具内部主动取消
+# ──────────────────────────────────────────────
+
+
+class TestRunToolSelfCancel:
+    """工具执行期间主动 cancel 会话 → 结果保留且下一轮以取消事件终止."""
+
+    @pytest.mark.asyncio
+    async def test_run_tool_cancelling_session_keeps_result_then_emits_cancelled(
+        self, make_session
+    ):
+        """工具调用 session.cancel() → 成功结果保留，随后只产出 system.cancelled."""
+        # Arrange
+        session_holder: Dict[str, AgentSession] = {}
+
+        async def cancel_then_report(x: str) -> str:
+            session_holder["session"].cancel()
+            return f"cancelled-after:{x}"
+
+        rounds = [
+            [
+                _Chunk(
+                    tool_calls=[
+                        _ToolCallChunk(
+                            0,
+                            call_id="call_c",
+                            name="stop_tool",
+                            arguments='{"x": "v"}',
+                        )
+                    ],
+                    finish_reason=REASON_TOOL_CALLS,
+                )
+            ],
+            [_Chunk(content="不应出现"), _Chunk(finish_reason=REASON_STOP)],
+        ]
+        provider = _ScriptedProvider(rounds)
+        session = make_session(provider, tools_map={"stop_tool": cancel_then_report})
+        session_holder["session"] = session
+
+        # Act
+        events = await _drain_events(AgentRuntime.run(session))
+
+        # Assert
+        assert events == [
+            {
+                "event": "agent.tool_call.header",
+                "id": "call_c",
+                "name": "stop_tool",
+            },
+            {
+                "event": "agent.tool_call.delta",
+                "id": "call_c",
+                "delta": '{"x": "v"}',
+            },
+            {"event": "system.finished.tool_calls"},
+            {
+                "event": "agent.tool_call.execution",
+                "id": "call_c",
+                "name": "stop_tool",
+                "args": {"x": "v"},
+            },
+            {
+                "event": "agent.tool_call.result",
+                "id": "call_c",
+                "success": True,
+                "result": "cancelled-after:v",
+            },
+            {"event": "system.cancelled"},
+        ], "取消前的工具结果应保留，且不再请求第二轮 chat"
+        assert len(provider.calls) == 1, "取消后不应回环发起新的 chat"
+        tool_messages = [
+            m for m in session.messages if getattr(m, "role", "") == "tool"
+        ]
+        assert [m.content for m in tool_messages] == [
+            "cancelled-after:v"
+        ], "取消前已完成的结果不应被改写"
+
+
+# ──────────────────────────────────────────────
+# run(): 中断发生在部分工具已完成之后
+# ──────────────────────────────────────────────
+
+
+class TestRunInterruptedAfterCompletedTool:
+    """中断发生在已完成工具之后：已完成结果保留，未完成调用补合成结果."""
+
+    @pytest.mark.asyncio
+    async def test_run_interrupt_after_first_tool_keeps_real_result_and_fills_rest(
+        self,
+    ):
+        """首个工具已成功、第二个执行中被取消 → 上下文只补第二个的合成结果."""
+        # Arrange
+        second_started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def staged(x: str) -> str:
+            if x == "a":
+                return "a1"
+            second_started.set()
+            await release.wait()
+            return "never"
+
+        session = AgentSession(
+            provider=_ScriptedProvider(
+                [
+                    [
+                        _Chunk(
+                            tool_calls=[
+                                _ToolCallChunk(0, "call_a", "staged", '{"x":"a"}'),
+                                _ToolCallChunk(1, "call_b", "staged", '{"x":"b"}'),
+                            ],
+                            finish_reason=REASON_TOOL_CALLS,
+                        )
+                    ]
+                ]
+            ),
+            tools_map={"staged": staged},
+        )
+        session.append_user_prompt(DEFAULT_USER_PROMPT)
+        events: List[Dict[str, Any]] = []
+
+        async def consume():
+            async for event in AgentRuntime.run(session):
+                events.append(event)
+
+        # Act
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(second_started.wait(), timeout=2)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+        # Assert
+        results = _events_of_type(events, "agent.tool_call.result")
+        assert len(results) == 1, "中断前只应有首个工具一条 result 事件"
+        assert results[0]["id"] == "call_a", "保留的 result 应属于首个工具"
+        assert results[0]["success"] is True, "首个工具已成功的事实不应被中断抹掉"
+        assert results[0]["result"] == "a1", "已完成工具的真实结果不应被改写"
+        context = session.build_standard_context()
+        tool_contents = {
+            message["tool_call_id"]: message["content"]
+            for message in context
+            if message.get("role") == "tool"
+        }
+        assert tool_contents == {
+            "call_a": "a1",
+            "call_b": "Error: interrupted by user.",
+        }, "已完成调用保留真实结果，未完成调用补合成结果且各一条"

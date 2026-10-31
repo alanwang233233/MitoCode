@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 import unittest.mock as mock
+from types import SimpleNamespace
 
 import pytest
 
@@ -353,3 +354,247 @@ async def test_redact_api_keys_leaves_other_text_intact():
         == "bad sk-*** and sk-***! done"
     )
     assert AgentOrchestrator.redact_api_keys("no secrets here") == "no secrets here"
+
+
+# ──────────────────────────────────────────────
+# EventBridge: 元数据回退
+# ──────────────────────────────────────────────
+
+
+def test_event_bridge_unknown_tool_with_manager_falls_back_to_tool_name():
+    """ToolManager 存在但工具未注册 → action/description 回退为工具名，display_param 为空."""
+    manager = ToolManager()
+    manager.register(lambda **kw: "", name="known")
+    bridge = EventBridge(manager)
+
+    header = bridge.adapt(
+        {"event": "agent.tool_call.header", "id": "c9", "name": "missing"}, agent_id=4
+    )
+    assert header["action"] == "missing", "未注册工具的 action 应回退为工具名"
+    assert header["description"] == "missing", "未注册工具的 description 应回退为工具名"
+    assert header["additional"] == "", "header 的 additional 字段恒为空串"
+
+    started = bridge.adapt(
+        {
+            "event": "agent.tool_call.execution",
+            "id": "c9",
+            "name": "missing",
+            "args": {},
+        },
+        agent_id=4,
+    )
+    assert started["display_param"] == "", "未注册工具不应暴露 display_param"
+
+
+def test_event_bridge_registered_tool_without_display_metadata_falls_back():
+    """已注册工具但 display_action/human_doc 为空 → action/description 回退为工具名."""
+    manager = ToolManager()
+    manager.register(lambda **kw: "", name="bare")
+    bridge = EventBridge(manager)
+
+    header = bridge.adapt(
+        {"event": "agent.tool_call.header", "id": "c1", "name": "bare"}, agent_id=5
+    )
+    assert header["action"] == "bare", "空 display_action 应回退为工具名"
+    assert header["description"] == "bare", "空 human_doc 应回退为工具名"
+
+    started = bridge.adapt(
+        {"event": "agent.tool_call.execution", "id": "c1", "name": "bare", "args": {}},
+        agent_id=5,
+    )
+    assert started["display_param"] == "", "空 display_param 应为空串"
+
+
+@pytest.mark.parametrize(
+    "event, expected",
+    [
+        pytest.param(
+            {"event": "agent.text"},
+            {"type": "token", "content": ""},
+            id="text-missing-delta",
+        ),
+        pytest.param(
+            {"event": "agent.tool_call.header", "id": "c1"},
+            {
+                "type": "tool_call",
+                "id": "c1",
+                "name": "",
+                "action": "",
+                "description": "",
+                "additional": "",
+            },
+            id="header-missing-name",
+        ),
+        pytest.param(
+            {"event": "agent.tool_call.delta", "id": "c1"},
+            {"type": "tool_call", "id": "c1", "content": ""},
+            id="delta-missing-delta",
+        ),
+        pytest.param(
+            {"event": "agent.tool_call.execution", "id": "c1", "name": "Read"},
+            {
+                "type": "tool_start",
+                "id": "c1",
+                "name": "Read",
+                "args": {},
+                "action": "Read",
+                "description": "Read",
+                "display_param": "",
+            },
+            id="execution-missing-args",
+        ),
+        pytest.param(
+            {"event": "agent.tool_call.result", "id": "c1", "result": "ok"},
+            {"type": "tool_result", "id": "c1", "result": "ok", "success": False},
+            id="result-missing-success",
+        ),
+        pytest.param(
+            {"event": "system.finished.standard"},
+            {"type": "turn_end", "reason": ""},
+            id="turn-end-missing-reason",
+        ),
+    ],
+)
+def test_event_bridge_missing_payload_keys_use_documented_defaults(event, expected):
+    """缺键事件 → 使用文档化默认值而非抛出 KeyError."""
+    bridge = EventBridge()
+
+    result = bridge.adapt(event, agent_id=6)
+
+    assert result == {
+        "agent_id": 6,
+        **expected,
+    }, f"缺键事件 {event} 应回退到文档化默认值"
+    assert result["type"] == expected["type"], "缺键不应改变事件类型映射"
+
+
+# ──────────────────────────────────────────────
+# AgentRuntime → EventBridge 端到端映射
+# ──────────────────────────────────────────────
+
+
+def _delta_chunk(content=None, tool_calls=None, finish_reason=None):
+    """构造一个 OpenAI 风格流式 chunk（choices 单元素，delta 为纯数据）."""
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(content=content, tool_calls=tool_calls),
+                finish_reason=finish_reason,
+            )
+        ]
+    )
+
+
+class _ToolRoundProvider(EchoProvider):
+    """第一轮输出文本+一次工具调用，第二轮输出文本并 stop."""
+
+    def __init__(self):
+        super().__init__()
+        self.chat_count = 0
+
+    async def chat(self, tools=None, messages=None, **kwargs):
+        self.chat_count += 1
+        if self.chat_count == 1:
+            chunks = [
+                _delta_chunk(content="先看"),
+                _delta_chunk(
+                    tool_calls=[
+                        SimpleNamespace(
+                            index=0,
+                            id="call_1",
+                            function=SimpleNamespace(name="probe", arguments=None),
+                        )
+                    ]
+                ),
+                _delta_chunk(
+                    tool_calls=[
+                        SimpleNamespace(
+                            index=0,
+                            id=None,
+                            function=SimpleNamespace(name=None, arguments='{"x": "p"}'),
+                        )
+                    ]
+                ),
+                _delta_chunk(finish_reason="tool_calls"),
+            ]
+        else:
+            chunks = [
+                _delta_chunk(content="完成"),
+                _delta_chunk(finish_reason="stop"),
+            ]
+
+        async def _stream():
+            for chunk in chunks:
+                yield chunk
+
+        return _stream()
+
+
+@pytest.mark.asyncio
+async def test_runtime_events_map_to_tui_types_without_dropping_any():
+    """真实 run() 事件流经 EventBridge → 只有 finished.tool_calls 被丢弃."""
+    manager = ToolManager()
+
+    async def probe(x: str) -> str:
+        return f"probe:{x}"
+
+    manager.register(
+        probe,
+        name="probe",
+        human_doc="probe doc",
+        display_action="probe.run",
+        display_param="x",
+    )
+    provider = _ToolRoundProvider()
+    session = AgentSession(provider=provider, tool_manager=manager, agent_id=3)
+    session.append_user_prompt("go")
+    bridge = EventBridge(manager)
+
+    raw_events = [event async for event in AgentRuntime.run(session)]
+    mapped = [bridge.adapt(event, agent_id=3) for event in raw_events]
+    dropped = [event for event, result in zip(raw_events, mapped) if result is None]
+    forwarded = [result for result in mapped if result is not None]
+
+    assert [event["event"] for event in raw_events] == [
+        "agent.text",
+        "agent.tool_call.header",
+        "agent.tool_call.delta",
+        "system.finished.tool_calls",
+        "agent.tool_call.execution",
+        "agent.tool_call.result",
+        "agent.text",
+        "system.finished.standard",
+    ], "run() 的事件序列是本测试的前置契约"
+    assert dropped == [
+        {"event": "system.finished.tool_calls"}
+    ], "内部信号 finished.tool_calls 是唯一应被 EventBridge 丢弃的事件"
+    assert [result["type"] for result in forwarded] == [
+        "token",
+        "tool_call",
+        "tool_call",
+        "tool_start",
+        "tool_result",
+        "token",
+        "turn_end",
+    ], "每个运行时事件都应映射为 TUI 类型，顺序不变"
+    assert all(
+        result["agent_id"] == 3 for result in forwarded
+    ), "所有映射结果都应携带产生事件的 agent_id"
+    assert forwarded[0]["content"] == "先看", "首个文本增量应转发为 token 内容"
+    started = forwarded[3]
+    assert started["action"] == "probe.run", "tool_start 的 action 取自 ToolManager"
+    assert (
+        started["description"] == "probe doc"
+    ), "tool_start 的 description 取自 human_doc"
+    assert (
+        started["display_param"] == "x"
+    ), "tool_start 的 display_param 取自 ToolManager"
+    assert started["args"] == {"x": "p"}, "tool_start 应携带聚合后的工具参数"
+    finished = forwarded[4]
+    assert finished["success"] is True, "工具成功的 result 事件应映射为 success=True"
+    assert finished["result"] == "probe:p", "tool_result 应携带工具返回值"
+    assert forwarded[6] == {
+        "type": "turn_end",
+        "agent_id": 3,
+        "reason": "stop",
+    }, "标准终止应把 reason 透传到 turn_end"
