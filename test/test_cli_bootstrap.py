@@ -568,3 +568,57 @@ async def test_bootstrap_passes_provider_api_key_for_redaction(tmp_path, monkeyp
     assert result.orchestrator.kw["redact_secrets"] == (
         "k",
     ), "orchestrator 必须拿到字面 key 才能在错误事件与日志中抹除它"
+
+
+@pytest.mark.asyncio
+async def test_unknown_effort_tier_warns_at_startup(tmp_path, monkeypatch):
+    """未知 effort 档位启动时警告一次，且原值进入 provider settings."""
+    ORDERS.clear()
+    _patch(monkeypatch)
+    (tmp_path / ".mitocode").mkdir()
+    ui = _ui()
+
+    result = await bootstrap(
+        _args(workspace=tmp_path, model="my-model", api_key="k", reasoning_effort="ultra"),
+        ui,
+        CliApprover(ui),
+    )
+
+    assert result.provider.settings["reasoning_effort"] == "ultra"
+    assert any("reasoning_effort" in warning for warning in ui.warnings)
+
+
+@pytest.mark.asyncio
+async def test_known_effort_tier_is_silent(tmp_path, monkeypatch):
+    """已知档位不警告，settings 正常携带."""
+    ORDERS.clear()
+    _patch(monkeypatch)
+    (tmp_path / ".mitocode").mkdir()
+    ui = _ui()
+
+    result = await bootstrap(
+        _args(workspace=tmp_path, model="my-model", api_key="k", reasoning_effort="high"),
+        ui,
+        CliApprover(ui),
+    )
+
+    assert result.provider.settings["reasoning_effort"] == "high"
+    assert not any("reasoning_effort" in warning for warning in ui.warnings)
+
+
+@pytest.mark.asyncio
+async def test_unset_effort_passes_none_in_settings(tmp_path, monkeypatch):
+    """未配置 effort 时 settings 携带 None，且不警告."""
+    ORDERS.clear()
+    _patch(monkeypatch)
+    (tmp_path / ".mitocode").mkdir()
+    ui = _ui()
+
+    result = await bootstrap(
+        _args(workspace=tmp_path, model="my-model", api_key="k"),
+        ui,
+        CliApprover(ui),
+    )
+
+    assert result.provider.settings["reasoning_effort"] is None
+    assert not any("reasoning_effort" in warning for warning in ui.warnings)
