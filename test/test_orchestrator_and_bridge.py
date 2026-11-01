@@ -246,6 +246,12 @@ def test_event_bridge_token():
     assert result == {"type": "token", "agent_id": 1, "content": "hello"}
 
 
+def test_bridge_maps_agent_reasoning_to_reasoning_payload():
+    bridge = EventBridge()
+    result = bridge.adapt({"event": "agent.reasoning", "delta": "hmm"}, agent_id=1)
+    assert result == {"type": "reasoning", "agent_id": 1, "content": "hmm"}
+
+
 def test_event_bridge_tool_call_header():
     tm = ToolManager()
 
@@ -440,7 +446,7 @@ class TestEventBridgeSkipUnknownEvents:
         "raw",
         [
             pytest.param({"id": "c1", "name": "Read"}, id="missing-event-key"),
-            pytest.param({"event": "agent.reasoning", "id": "c1"}, id="unknown-type"),
+            pytest.param({"event": "agent.unknown", "id": "c1"}, id="unknown-type"),
         ],
     )
     def test_adapt_missing_or_unknown_event_returns_none(self, raw):

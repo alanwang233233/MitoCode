@@ -141,6 +141,13 @@ class EventBridge:
                 "content": event.get("delta", ""),
             }
 
+        if event_type == "agent.reasoning":
+            return {
+                "type": "reasoning",
+                "agent_id": agent_id,
+                "content": event.get("delta", ""),
+            }
+
         if event_type in _TOOL_EVENT_TYPES:
             return self._adapt_tool_event(event_type, event, agent_id)
 
