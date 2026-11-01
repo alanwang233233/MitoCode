@@ -171,6 +171,68 @@ class _CancelMidStreamProvider(_SampleChatProvider):
         return True
 
 
+class _StreamExplodingProvider(_SampleChatProvider):
+    """首轮先输出一个文本增量、随后在流中途抛错的受控 provider."""
+
+    def __init__(self):
+        self.chat_count = 0
+
+    async def chat(self, tools=None, messages=None, **kwargs):
+        self.chat_count += 1
+
+        async def _stream():
+            yield _Chunk(content="半句")
+            raise RuntimeError("stream exploded")
+
+        return _stream()
+
+    async def get_model_list(self):
+        return []
+
+    async def init(self):
+        pass
+
+    @classmethod
+    def get_settings_schema(cls):
+        return {}
+
+    @classmethod
+    def check_settings_schema(cls, settings):
+        return True
+
+
+class _CancelAfterStreamProvider(_SampleChatProvider):
+    """在最后一个 chunk 已交出、流即将结束时才触发 session.cancel() 的 provider."""
+
+    def __init__(self):
+        self.session: Optional[AgentSession] = None
+        self.chat_count = 0
+
+    async def chat(self, tools=None, messages=None, **kwargs):
+        self.chat_count += 1
+        session = self.session
+
+        async def _stream():
+            yield _Chunk(content="收尾前")
+            session.cancel()
+
+        return _stream()
+
+    async def get_model_list(self):
+        return []
+
+    async def init(self):
+        pass
+
+    @classmethod
+    def get_settings_schema(cls):
+        return {}
+
+    @classmethod
+    def check_settings_schema(cls, settings):
+        return True
+
+
 def _counting_tool(exc: Optional[Exception] = None) -> Tuple[Callable, List[dict]]:
     """构造带调用记录的工具：正常返回 'ok'；注入 exc 时抛出该异常."""
 
@@ -1422,3 +1484,169 @@ class TestRunInterruptedAfterCompletedTool:
             "call_a": "a1",
             "call_b": "Error: interrupted by user.",
         }, "已完成调用保留真实结果，未完成调用补合成结果且各一条"
+
+
+# ──────────────────────────────────────────────
+# run(): 退化 delta 与流中途异常
+# ──────────────────────────────────────────────
+
+
+class TestRunDegenerateDelta:
+    """run() 对没有可用 delta 的 chunk 仍读取 choices[0] 的 finish_reason."""
+
+    @pytest.mark.parametrize(
+        "delta",
+        [
+            pytest.param(None, id="delta-none"),
+            pytest.param(SimpleNamespace(), id="delta-without-optional-attrs"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_run_missing_delta_still_honors_finish_reason_stop(
+        self, make_session, delta
+    ):
+        """delta 为 None 或无 content/tool_calls 属性 → 不产文本事件但仍以 stop 收尾."""
+        # Arrange
+        chunk = SimpleNamespace(
+            choices=[SimpleNamespace(delta=delta, finish_reason=REASON_STOP)]
+        )
+        provider = _ScriptedProvider([[chunk]])
+        session = make_session(provider)
+
+        # Act
+        events = await _drain_events(AgentRuntime.run(session))
+
+        # Assert
+        assert events == [
+            {"event": "system.finished.standard", "reason": REASON_STOP}
+        ], "退化 delta 不应吞掉 finish_reason，也不应产出 agent.text"
+        assert provider.calls[0]["messages"] == [
+            {"role": "user", "content": DEFAULT_USER_PROMPT}
+        ], "退化 delta 不应改变首轮请求上下文"
+        assistant_blocks = [
+            m for m in session.messages if getattr(m, "role", "") == "assistant"
+        ]
+        assert assistant_blocks == [], "没有文本内容时不应写入 assistant 消息块"
+
+
+class TestRunAsyncToolArgumentMismatch:
+    """协程工具收到不匹配的关键字参数时走 TypeError 分支而非通用异常分支."""
+
+    @pytest.mark.asyncio
+    async def test_run_async_tool_unexpected_kwarg_reports_invalid_argument(
+        self, make_session
+    ):
+        """异步工具收到未声明的关键字参数 → 'Invalid argument.' 前缀加 TypeError 文本."""
+        # Arrange
+        attempts: List[dict] = []
+
+        async def rigid(value: int) -> int:
+            attempts.append({"value": value})
+            return value
+
+        rounds = [
+            [
+                _Chunk(
+                    tool_calls=[
+                        _ToolCallChunk(0, call_id=CALL_ID_PRIMARY, name="rigid")
+                    ]
+                ),
+                _Chunk(tool_calls=[_ToolCallChunk(0, arguments='{"unexpected": 1}')]),
+                _Chunk(finish_reason=REASON_TOOL_CALLS),
+            ],
+            [_Chunk(finish_reason=REASON_STOP)],
+        ]
+        provider = _ScriptedProvider(rounds)
+        session = make_session(provider, tools_map={"rigid": rigid})
+
+        # Python 自身的 TypeError 文案是外部事实，用它构造期望值而非读取实现输出。
+        with pytest.raises(TypeError) as python_error:
+            rigid(unexpected=1)
+        expected_result = f"Invalid argument. {python_error.value}"
+
+        # Act
+        events = await _drain_events(AgentRuntime.run(session))
+
+        # Assert
+        results = _events_of_type(events, "agent.tool_call.result")
+        assert results == [
+            {
+                "event": "agent.tool_call.result",
+                "id": CALL_ID_PRIMARY,
+                "success": False,
+                "result": expected_result,
+            }
+        ], "异步工具的 TypeError 应映射为 'Invalid argument. ' 加异常原文"
+        assert results[0]["result"].startswith(
+            "Invalid argument. "
+        ), "TypeError 分支必须使用 Invalid argument. 前缀而非通用 Error executing tool"
+        assert attempts == [], "参数绑定失败时协程体不应执行"
+        assert len(provider.calls) == 2, "失败后仍应回环把错误结果提交给 LLM"
+        assert events[-1] == {
+            "event": "system.finished.standard",
+            "reason": REASON_STOP,
+        }, "参数失败的下一轮应以标准结束收尾"
+
+
+class TestRunStreamFailure:
+    """provider 流在迭代中途抛错时 run() 向调用方传播异常并保留已产出的部分."""
+
+    @pytest.mark.asyncio
+    async def test_run_stream_raising_after_text_propagates_with_partial_events(
+        self, make_session
+    ):
+        """流输出一个增量后抛错 → 异常传播，已产出的文本与助手消息保留且无终止事件."""
+        # Arrange
+        provider = _StreamExplodingProvider()
+        session = make_session(provider)
+        events: List[Dict[str, Any]] = []
+
+        # Act & Assert
+        with pytest.raises(RuntimeError, match="stream exploded"):
+            async for event in AgentRuntime.run(session):
+                events.append(event)
+
+        assert events == [
+            {"event": "agent.text", "delta": "半句"}
+        ], "异常之前已产出的文本事件应已交给调用方"
+        assert provider.chat_count == 1, "流中途失败不应触发重试"
+        context = session.build_standard_context()
+        assert context[-1] == {
+            "role": "assistant",
+            "content": "半句",
+        }, "流失败前收到的增量应保留在上下文中"
+        assert all(
+            e["event"] != "system.finished.standard" for e in events
+        ), "流中途失败不应产出标准结束事件"
+
+
+# ──────────────────────────────────────────────
+# run(): 流结束后的取消检查
+# ──────────────────────────────────────────────
+
+
+class TestRunCancelAfterStream:
+    """run() 在流已耗尽后才观察到取消请求时的终止行为."""
+
+    @pytest.mark.asyncio
+    async def test_run_cancel_after_final_chunk_ends_without_cancelled_event(
+        self, make_session
+    ):
+        """最后一个 chunk 交出后才取消 → 静默结束，不产 cancelled 也不产 finished 事件."""
+        # Arrange
+        provider = _CancelAfterStreamProvider()
+        session = make_session(provider)
+        provider.session = session
+
+        # Act
+        events = await _drain_events(AgentRuntime.run(session))
+
+        # Assert
+        assert events == [
+            {"event": "agent.text", "delta": "收尾前"}
+        ], "流后取消检查只保留取消前已产出的文本事件"
+        assert provider.chat_count == 1, "流后取消不应回环再次请求 chat"
+        assert session.is_cancelled(), "取消请求本身应保持生效状态"
+        assert all(
+            e["event"] != "system.cancelled" for e in events
+        ), "流结束后触发的中断当前不产出 system.cancelled（见 Gaps 记录的契约缺口）"

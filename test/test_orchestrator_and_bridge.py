@@ -357,6 +357,102 @@ async def test_redact_api_keys_leaves_other_text_intact():
 
 
 # ──────────────────────────────────────────────
+# EventBridge: 未知事件与缺键默认值
+# ──────────────────────────────────────────────
+
+
+class TestEventBridgeSkipUnknownEvents:
+    """EventBridge 对没有类型或类型未知的事件返回 None 且不改动输入."""
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            pytest.param({"id": "c1", "name": "Read"}, id="missing-event-key"),
+            pytest.param({"event": "agent.reasoning", "id": "c1"}, id="unknown-type"),
+        ],
+    )
+    def test_adapt_missing_or_unknown_event_returns_none(self, raw):
+        """缺 event 键或未知事件类型 → 返回 None 表示不转发."""
+        bridge = EventBridge()
+        snapshot = dict(raw)
+
+        result = bridge.adapt(raw, agent_id=8)
+
+        assert result is None, f"事件 {raw} 不应被转发到 TUI"
+        assert raw == snapshot, "跳过事件不应改动调用方传入的原始 dict"
+
+
+class TestEventBridgeHeaderDefaults:
+    """header 事件的 id 在缺键时回退为空串且其余字段保持文档化取值."""
+
+    def test_event_bridge_header_missing_id_defaults_to_empty_string(self):
+        """header 事件缺少 id 键 → id 回退为空串而 action/description 仍取工具名."""
+        bridge = EventBridge()
+
+        result = bridge.adapt(
+            {"event": "agent.tool_call.header", "name": "Read"}, agent_id=8
+        )
+
+        assert result == {
+            "type": "tool_call",
+            "agent_id": 8,
+            "id": "",
+            "name": "Read",
+            "action": "Read",
+            "description": "Read",
+            "additional": "",
+        }, "缺 id 的 header 应回退为空串且其余字段保持文档化取值"
+
+
+# ──────────────────────────────────────────────
+# EventBridge: 部分元数据回退
+# ──────────────────────────────────────────────
+
+
+class TestEventBridgePartialMetadataFallback:
+    """已注册工具的 action/description/display_param 三个回退相互独立."""
+
+    def test_adapt_registered_tool_with_action_but_no_doc_keeps_action(self):
+        """display_action 非空但 human_doc 为空 → action 保留，description 回退为工具名."""
+        manager = ToolManager()
+        manager.register(lambda **kw: "", name="sync_tool", display_action="file.write")
+        bridge = EventBridge(manager)
+
+        header = bridge.adapt(
+            {"event": "agent.tool_call.header", "id": "c1", "name": "sync_tool"},
+            agent_id=9,
+        )
+
+        assert header["action"] == "file.write", "非空 display_action 应优先于工具名"
+        assert (
+            header["description"] == "sync_tool"
+        ), "空 human_doc 应独立回退为工具名而不影响 action"
+        assert header["additional"] == "", "header 的 additional 字段恒为空串"
+
+    def test_adapt_registered_tool_with_display_param_but_no_doc_keeps_param(self):
+        """display_param 非空但 human_doc 为空 → tool_start 保留 display_param."""
+        manager = ToolManager()
+        manager.register(lambda **kw: "", name="sync_tool", display_param="file_path")
+        bridge = EventBridge(manager)
+
+        started = bridge.adapt(
+            {
+                "event": "agent.tool_call.execution",
+                "id": "c1",
+                "name": "sync_tool",
+                "args": {"file_path": "a.py"},
+            },
+            agent_id=9,
+        )
+
+        assert started["display_param"] == "file_path", "非空 display_param 应被透出"
+        assert (
+            started["description"] == "sync_tool"
+        ), "空 human_doc 不应掩盖 display_param 的透出"
+        assert started["action"] == "sync_tool", "空 display_action 应回退为工具名"
+
+
+# ──────────────────────────────────────────────
 # EventBridge: 元数据回退
 # ──────────────────────────────────────────────
 
