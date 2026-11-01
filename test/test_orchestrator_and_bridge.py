@@ -55,6 +55,38 @@ class EchoProvider(_SampleChatProvider):
         return _stream()
 
 
+class CancelAfterFinalChunkProvider(_SampleChatProvider):
+    """交出最后一个 chunk 后才调用 ``session.cancel()`` 的 provider."""
+
+    def __init__(self):
+        self.session = None
+
+    @staticmethod
+    def get_model_list():
+        return ["cancel-model"]
+
+    @classmethod
+    def get_settings_schema(cls):
+        return {"type": "object", "properties": {}, "additionalProperties": True}
+
+    @staticmethod
+    def check_settings_schema(settings):
+        return True
+
+    def init(self):
+        pass
+
+    async def chat(self, tools=None, messages=None, **kwargs):
+        session = self.session
+
+        async def _stream():
+            yield FakeChunk(content="partial ")
+            yield FakeChunk(finish_reason="stop")
+            session.cancel()
+
+        return _stream()
+
+
 @pytest.mark.asyncio
 async def test_orchestrator_create_and_send_message():
     orchestrator = AgentOrchestrator(default_provider=EchoProvider())
@@ -102,6 +134,45 @@ async def test_orchestrator_cancel_agent():
 
     session = orchestrator._sessions[agent_id]
     assert session.is_cancelled()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_cancel_after_stream_reaches_bridge_as_turn_cancelled():
+    """流结束后才落地的取消仍经 EventBridge 以 turn_cancelled 到达消费者."""
+    provider = CancelAfterFinalChunkProvider()
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    agent_id = await orchestrator.create_agent(
+        name="PostStreamCancel", provider=provider
+    )
+    provider.session = orchestrator.get_session(agent_id)
+
+    await orchestrator.send_message(agent_id, "hello world")
+
+    events = []
+    while True:
+        try:
+            agent_id_evt, event = await asyncio.wait_for(
+                orchestrator.event_queue.get(), timeout=2.0
+            )
+        except asyncio.TimeoutError:
+            break
+        events.append((agent_id_evt, event))
+        if event.get("type") == "sync":
+            agent_state = next(
+                (a["state"] for a in event.get("agents", []) if a["id"] == agent_id),
+                None,
+            )
+            if agent_state in ("finished", "cancelled", "error"):
+                break
+
+    forwarded = [e for aid, e in events if aid == agent_id]
+    assert {"type": "turn_cancelled", "agent_id": agent_id} in forwarded, (
+        "流后取消必须作为 turn_cancelled 事件到达 TUI 消费者，"
+        f"否则终止事件永远缺失；实际收到 {forwarded}"
+    )
+    assert all(
+        e["type"] != "turn_end" for e in forwarded
+    ), "取消轮不应同时产出 turn_end"
 
 
 @pytest.mark.asyncio

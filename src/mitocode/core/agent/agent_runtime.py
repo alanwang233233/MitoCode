@@ -89,11 +89,13 @@ class AgentRuntime:
             tool_calls_dict = {}
             active_tool_blocks = {}
             stream_finished_reason = None
+            stream_cancelled = False
 
             async for chunk in stream:
                 # Check for cancellation during the stream loop
                 if session.is_cancelled():
                     yield {"event": "system.cancelled"}
+                    stream_cancelled = True
                     break
 
                 if not getattr(chunk, "choices", None):
@@ -169,6 +171,12 @@ class AgentRuntime:
 
             # Break out entirely if we hit a cancel event while streaming
             if session.is_cancelled():
+                # The in-stream branch has already yielded its event; emitting
+                # again here would duplicate it. Only cover the case where the
+                # cancel landed after the final chunk, which otherwise ended the
+                # run silently with neither a cancelled nor a finished event.
+                if not stream_cancelled:
+                    yield {"event": "system.cancelled"}
                 break
 
             # 3. Handle End of Stream

@@ -1629,10 +1629,10 @@ class TestRunCancelAfterStream:
     """run() 在流已耗尽后才观察到取消请求时的终止行为."""
 
     @pytest.mark.asyncio
-    async def test_run_cancel_after_final_chunk_ends_without_cancelled_event(
+    async def test_run_cancel_after_final_chunk_yields_cancelled_event(
         self, make_session
     ):
-        """最后一个 chunk 交出后才取消 → 静默结束，不产 cancelled 也不产 finished 事件."""
+        """最后一个 chunk 交出后才取消 → 仍产出 system.cancelled，且不再回环请求 chat."""
         # Arrange
         provider = _CancelAfterStreamProvider()
         session = make_session(provider)
@@ -1643,10 +1643,8 @@ class TestRunCancelAfterStream:
 
         # Assert
         assert events == [
-            {"event": "agent.text", "delta": "收尾前"}
-        ], "流后取消检查只保留取消前已产出的文本事件"
+            {"event": "agent.text", "delta": "收尾前"},
+            {"event": "system.cancelled"},
+        ], "流后取消必须在已产出的文本之后补上 system.cancelled，以兑现 run() 的文档契约"
         assert provider.chat_count == 1, "流后取消不应回环再次请求 chat"
         assert session.is_cancelled(), "取消请求本身应保持生效状态"
-        assert all(
-            e["event"] != "system.cancelled" for e in events
-        ), "流结束后触发的中断当前不产出 system.cancelled（见 Gaps 记录的契约缺口）"
