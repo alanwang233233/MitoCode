@@ -64,7 +64,7 @@ class AgentRuntime:
 
             - agent.tool_call.execution:
                 Indicates a tool is currently being invoked.
-                Format: {"event": "agent.tool_call.execution", "name": str, "args": dict}
+                Format: {"event": "agent.tool_call.execution", "id": str, "name": str, "args": dict}
 
             - agent.tool_call.result:
                 The output/return value from an executed tool.
@@ -89,11 +89,13 @@ class AgentRuntime:
             tool_calls_dict = {}
             active_tool_blocks = {}
             stream_finished_reason = None
+            stream_cancelled = False
 
             async for chunk in stream:
                 # Check for cancellation during the stream loop
                 if session.is_cancelled():
                     yield {"event": "system.cancelled"}
+                    stream_cancelled = True
                     break
 
                 if not getattr(chunk, "choices", None):
@@ -169,6 +171,12 @@ class AgentRuntime:
 
             # Break out entirely if we hit a cancel event while streaming
             if session.is_cancelled():
+                # The in-stream branch has already yielded its event; emitting
+                # again here would duplicate it. Only cover the case where the
+                # cancel landed after the final chunk, which otherwise ended the
+                # run silently with neither a cancelled nor a finished event.
+                if not stream_cancelled:
+                    yield {"event": "system.cancelled"}
                 break
 
             # 3. Handle End of Stream
@@ -179,46 +187,60 @@ class AgentRuntime:
                 for block in active_tool_blocks.values():
                     block.finish()
 
-                for block in active_tool_blocks.values():
-                    func_name = block.name
-                    func_args = block.parameter
-                    success = False
+                completed: set[str] = set()
+                try:
+                    for block in active_tool_blocks.values():
+                        func_name = block.name
+                        func_args = block.parameter
+                        success = False
 
-                    yield {
-                        "event": "agent.tool_call.execution",
-                        "name": func_name,
-                        "args": func_args,
-                    }
+                        yield {
+                            "event": "agent.tool_call.execution",
+                            "id": block.id,
+                            "name": func_name,
+                            "args": func_args,
+                        }
 
-                    if block.parse_error:
-                        result_str = f"Invalid JSON Format. {block.parse_error}"
-                    elif func_name in session.tools_map:
-                        tool_func = session.tools_map[func_name]
-                        try:
-                            current_agent_id.set(session.agent_id)
-                            result = await AgentRuntime._invoke_tool(
-                                tool_func, func_args
+                        if block.parse_error:
+                            result_str = f"Invalid JSON Format. {block.parse_error}"
+                        elif func_name in session.tools_map:
+                            tool_func = session.tools_map[func_name]
+                            try:
+                                current_agent_id.set(session.agent_id)
+                                result = await AgentRuntime._invoke_tool(
+                                    tool_func, func_args
+                                )
+                                result_str = str(result)
+                                success = True
+                            except TypeError as e:
+                                result_str = f"Invalid argument. {str(e)}"
+                            except Exception as e:
+                                result_str = f"Error executing tool: {str(e)}"
+                        else:
+                            result_str = f"Error: Tool '{func_name}' is not registered."
+
+                        session.messages.append(
+                            _ToolResultMessageBlock(
+                                tool_call_id=block.id, result=result_str
                             )
-                            result_str = str(result)
-                            success = True
-                        except TypeError as e:
-                            result_str = f"Invalid argument. {str(e)}"
-                        except Exception as e:
-                            result_str = f"Error executing tool: {str(e)}"
-                    else:
-                        result_str = f"Error: Tool '{func_name}' is not registered."
-
-                    session.messages.append(
-                        _ToolResultMessageBlock(
-                            tool_call_id=block.id, result=result_str
                         )
-                    )
-                    yield {
-                        "event": "agent.tool_call.result",
-                        "id": block.id,
-                        "success": success,
-                        "result": result_str,
-                    }
+                        completed.add(block.id)
+                        yield {
+                            "event": "agent.tool_call.result",
+                            "id": block.id,
+                            "success": success,
+                            "result": result_str,
+                        }
+                except BaseException:
+                    for block in active_tool_blocks.values():
+                        if block.id not in completed:
+                            session.messages.append(
+                                _ToolResultMessageBlock(
+                                    tool_call_id=block.id,
+                                    result="Error: interrupted by user.",
+                                )
+                            )
+                    raise
 
                 # Loop continues back to `while True` to submit the tool
                 # execution results back to the LLM.

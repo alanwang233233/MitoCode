@@ -881,6 +881,174 @@ class TestAgentSessionStandardContext:
 
 
 # ──────────────────────────────────────────────
+# system prompt 与工具刷新
+# ──────────────────────────────────────────────
+
+
+class TestSystemPromptAndToolRefresh:
+    """system prompt 首块插入与 refresh_tools 重新快照托管工具的测试."""
+
+    def test_system_prompt_is_first_context_message(self, make_session):
+        """带 system_prompt 构造并发送用户输入 → 上下文首条是 system 消息."""
+        # Arrange
+        session = make_session(system_prompt="You are MitoCode.")
+        # Act
+        session.append_user_prompt("hi")
+        context = session.build_standard_context()
+        # Assert
+        assert context[0] == {
+            "role": "system",
+            "content": "You are MitoCode.",
+        }, "上下文首条应为 system 消息"
+        assert context[1] == {
+            "role": "user",
+            "content": "hi",
+        }, "用户消息应排在 system 之后"
+
+    def test_system_prompt_inserted_as_first_message_block(self, make_session):
+        """带 system_prompt 构造 → messages[0] 是 system 角色的文本块."""
+        # Act
+        session = make_session(system_prompt="You are MitoCode.")
+        # Assert
+        assert len(session.messages) == 1, "system prompt 应产生一个消息块"
+        first = session.messages[0]
+        assert isinstance(first, _PlainTextMessageBlock), "system 首块应为文本块"
+        assert first.role == "system", "首块角色应为 system"
+        assert first.message == "You are MitoCode.", "首块内容应为提示词原文"
+        assert first.finished is True, "system 块构造后应立即完成"
+
+    @pytest.mark.parametrize(
+        "settings",
+        [{}, {"system_prompt": ""}],
+        ids=["未提供system_prompt", "空system_prompt"],
+    )
+    def test_empty_system_prompt_adds_no_message_block(self, make_session, settings):
+        """system_prompt 缺省或为空串 → 消息历史保持为空且属性为空串."""
+        # Act
+        session = make_session(**settings)
+        # Assert
+        assert session.system_prompt == "", "空提示词应保存为空串"
+        assert session.messages == [], "空提示词不应产生任何消息块"
+
+    def test_system_prompt_is_not_absorbed_by_assistant_delta(self, make_session):
+        """只有 system 块时收到助手增量 → 新建 assistant 块而非写入 system 块."""
+        # Arrange
+        session = make_session(system_prompt="You are MitoCode.")
+        # Act
+        session.append_assistant_delta("Hello")
+        # Assert
+        assert len(session.messages) == 2, "应在 system 块之后新建 assistant 块"
+        assert session.messages[0].role == "system", "system 块不应被修改"
+        assert (
+            session.messages[0].message == "You are MitoCode."
+        ), "system 内容应保持原样"
+        assert session.messages[1].role == "assistant", "新块角色应为 assistant"
+        assert session.messages[1].message == "Hello", "增量应写入新块"
+
+    def test_refresh_tools_picks_up_new_registry_tools(self, mock_provider):
+        """构造后新注册的托管工具 → refresh_tools 后进入工具表与 schemas."""
+        # Arrange
+        manager = ToolManager()
+        manager.register(lambda x="": x, name="Old")
+        session = AgentSession(
+            provider=mock_provider,
+            tool_manager=manager,
+            tools_map={"User": lambda: "u"},
+            tool_schemas=[_make_function_schema("User")],
+        )
+        manager.register(lambda x="": x, name="New")
+        # Act
+        session.refresh_tools()
+        # Assert
+        assert "New" in session.tools_map, "refresh_tools 应拾取新注册的托管工具"
+        assert "Old" in session.tools_map, "既有托管工具应保留"
+        assert "User" in session.tools_map, "用户工具应保留"
+        assert {"New", "Old", "User"} <= {
+            s["function"]["name"] for s in session.tool_schemas
+        }, "工具 schemas 应同时包含新旧托管工具与用户工具"
+
+    def test_refresh_tools_keeps_history_provider_and_tree_fields(
+        self, make_session, mock_provider
+    ):
+        """refresh_tools → 不触碰消息历史、provider、取消标记与树字段."""
+        # Arrange
+        manager = _make_manager(tools_map={"a": _noop_tool})
+        made = make_session(
+            tool_manager=manager,
+            agent_id=3,
+            name="Worker",
+            parent_id=1,
+        )
+        made.append_user_prompt("hi")
+        made.sub_agent_ids.append(7)
+        made.cancel()
+        messages_before = list(made.messages)
+        # Act
+        made.refresh_tools()
+        # Assert
+        assert made.messages == messages_before, "刷新工具不应改动消息历史"
+        assert made.provider is mock_provider, "刷新工具不应替换 provider"
+        assert made.agent_id == 3, "刷新工具不应改动 agent_id"
+        assert made.name == "Worker", "刷新工具不应改动 name"
+        assert made.parent_id == 1, "刷新工具不应改动 parent_id"
+        assert made.sub_agent_ids == [7], "刷新工具不应改动子代理列表"
+        assert made.is_cancelled() is True, "刷新工具不应清除取消标记"
+
+    def test_refresh_tools_drops_unregistered_managed_tool(self, make_session):
+        """托管工具在构造后被注销 → refresh_tools 后不再出现在工具表与 schemas."""
+        # Arrange
+        manager = ToolManager()
+        manager.register(lambda: "kept", name="kept")
+        manager.register(lambda: "gone", name="gone")
+        made = make_session(tool_manager=manager, tools_map={"User": lambda: "u"})
+        manager.unregister("gone")
+        # Act
+        made.refresh_tools()
+        # Assert
+        assert "gone" not in made.tools_map, "已注销的托管工具应被移除"
+        assert "kept" in made.tools_map, "仍注册的托管工具应保留"
+        assert "User" in made.tools_map, "用户工具应保留"
+        assert "gone" not in {
+            s["function"]["name"] for s in made.tool_schemas
+        }, "已注销工具的 schema 应一并移除"
+
+    def test_init_explicit_none_user_collections_fall_back_to_empty(self, make_session):
+        """用户工具/schema 显式传 None → 视同未提供，得到空集合."""
+        # Act
+        made = make_session(tools_map=None, tool_schemas=None)
+        # Assert
+        assert made.tools_map == {}, "None 工具表应回落为空字典"
+        assert made.tool_schemas == [], "None schema 列表应回落为空列表"
+
+    def test_refresh_tools_without_manager_keeps_user_tools(self, make_session):
+        """无 tool_manager 的会话 → refresh_tools 保留用户工具且不报错."""
+        # Arrange
+        user_schemas = [_make_function_schema("local_tool")]
+        made = make_session(tools_map={"local": _noop_tool}, tool_schemas=user_schemas)
+        # Act
+        made.refresh_tools()
+        # Assert
+        assert made.tools_map == {"local": _noop_tool}, "用户工具应保持不变"
+        assert made.tool_schemas == user_schemas, "用户 schemas 应保持不变"
+        assert made.tool_manager is None, "无 manager 时不应凭空创建"
+
+    def test_refresh_tools_user_tool_still_overrides_managed_name(self, make_session):
+        """用户工具与刷新后托管工具同名 → 用户函数继续覆盖托管函数."""
+        # Arrange
+        manager = ToolManager()
+        manager.register(lambda: "managed", name="shared")
+        user_fn = mock.MagicMock(name="user_shared")
+        made = make_session(tool_manager=manager, tools_map={"shared": user_fn})
+        # Act
+        made.refresh_tools()
+        # Assert
+        assert made.tools_map["shared"] is user_fn, "刷新后同名工具仍应以用户实现为准"
+        assert "shared" in {
+            s["function"]["name"] for s in made.tool_schemas
+        }, "同名工具对应的 schema 也应保留"
+
+
+# ──────────────────────────────────────────────
 # to_agent_node 快照
 # ──────────────────────────────────────────────
 
@@ -924,3 +1092,25 @@ def _make_unfinished_plain_text() -> _PlainTextMessageBlock:
     block = _PlainTextMessageBlock("assistant", "半截输出")
     block.finished = False
     return block
+
+
+# ──────────────────────────────────────────────
+# provider 类型契约
+# ──────────────────────────────────────────────
+
+
+class TestAgentSessionProviderTypeContract:
+    """truthy 但类型不符的 provider 必须被拒绝，而非延迟到运行期才失败."""
+
+    @pytest.mark.parametrize(
+        "bad_provider",
+        [object(), "provider-as-string", 1],
+        ids=["普通object实例", "字符串", "整数"],
+    )
+    def test_init_wrong_type_provider_raises_type_error(self, bad_provider):
+        """provider 为 _SampleChatProvider 以外的 truthy 对象 → 抛出带契约文案的 TypeError."""
+        # Act / Assert
+        with pytest.raises(
+            TypeError, match=r"Provider must be an instance of _SampleChatProvider\."
+        ):
+            AgentSession(provider=bad_provider)

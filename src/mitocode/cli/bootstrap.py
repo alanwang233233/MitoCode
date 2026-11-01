@@ -1,0 +1,579 @@
+"""Startup helpers for the MitoCode command line interface.
+
+The first half of this module holds the startup logic that has no dependency on
+the terminal UI: resolving the workspace and reading the MCP server
+configuration.  Both are pure functions over ``pathlib``/JSON input, so they can
+be exercised without a console, a provider or a live MCP connection.  The second
+half, :func:`bootstrap`, assembles the runtime in the one order the design
+permits, from the workspace down to the first agent session.
+
+Two rules shape every error raised here:
+
+* a message may name a file or directory, but never a configuration value
+  (credentials, headers, environment entries, workspace contents);
+* the caller decides whether an error is fatal.  A malformed *default* MCP file
+  only disables MCP, while a malformed *explicit* one is the user's own
+  pointer and therefore a startup failure.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Awaitable, List, Optional, TypeVar, Union, cast
+
+from loguru import logger as loguru_logger
+
+from mitocode import APP_VERSION, MITOCODE_CONFIG_PATH
+from mitocode.cli.approval import CliApprover
+from mitocode.cli.args import CliArgs
+from mitocode.cli.config import ProviderConfig, resolve_provider_config
+from mitocode.cli.errors import MitoCodeCliConfigError
+from mitocode.cli.ui import CliUI
+from mitocode.core.agent.agent_orchestrator import AgentOrchestrator
+from mitocode.core.chat_provider.chat_provider_openai import ChatProviderOpenAI
+from mitocode.core.exception.mitocode_exception import (
+    MitoCodeAppTooOldError,
+    MitoCodeMcpConfigError,
+    MitoCodeMigrateError,
+    MitoCodeWorkspaceInitError,
+    MitoCodeWorkspaceTooOldError,
+)
+from mitocode.core.mcp.mcp_config import McpServerConfig
+from mitocode.core.mcp.mcp_manager import McpManager
+from mitocode.core.tool.builtin import ToolContext, register_builtin_tools
+from mitocode.core.tool.tool_manager import ToolManager
+from mitocode.core.workspace.migration import BasicMigration
+from mitocode.core.workspace.workspace import Workspace
+
+if TYPE_CHECKING:  # pragma: no cover - imported for annotations only
+    from mitocode.core.agent.agent_session import AgentSession
+
+CONFIG_FILENAME = "config.json"
+"""Workspace configuration file name inside the ``.mitocode`` directory."""
+
+DEFAULT_MCP_CONFIG_RELATIVE_PATH = Path(MITOCODE_CONFIG_PATH) / "mcp.json"
+"""Default MCP configuration file, relative to the workspace root."""
+
+SYSTEM_PROMPT_TEMPLATE = """\
+You are MitoCode, an interactive coding agent running in the user's terminal.
+You help with engineering tasks in the workspace at {workspace}.
+
+- Read files before changing them. Prefer Edit for targeted changes and Write
+  for new files; never rewrite a whole file to make one small change.
+- Use tools for facts: do not invent file contents, command output, or APIs.
+- Run tests or commands when they materially verify your work.
+- Keep answers concise and concrete; use Markdown.
+- Stay inside the workspace. Operations outside it need user approval.
+- If a task is ambiguous or destructive, ask before acting.
+"""
+"""Role instructions seeded into every CLI session, with a ``{workspace}`` slot."""
+
+_ResultT = TypeVar("_ResultT")
+
+
+async def _awaited(value: Union[_ResultT, Awaitable[_ResultT]]) -> _ResultT:
+    """Await a sync-or-async return value.
+
+    ``Workspace`` and ``BasicMigration`` return a coroutine when an event loop is
+    already running and a plain value otherwise. The CLI always calls them from
+    inside its event loop (an ``async`` function cannot be reached without one),
+    yet spelling that out as a helper keeps the union honest for type checkers
+    that cannot narrow it from the call site.
+
+    Args:
+        value: A plain result, or an awaitable resolving to one.
+
+    Returns:
+        The resolved value.
+    """
+    if asyncio.iscoroutine(value):
+        return await cast(Awaitable[_ResultT], value)
+    return cast(_ResultT, value)
+
+
+@dataclass(frozen=True)
+class WorkspaceResolution:
+    """Outcome of resolving the workspace at startup.
+
+    Attributes:
+        workspace: The loaded workspace. Always present, so every ``ToolContext``
+            gets a root directory boundary even when nothing was on disk.
+        initialized: Whether a ``.mitocode/config.json`` existed. ``False`` means
+            the workspace is in memory only and ``/init`` still has to write it.
+        migrated_from: Configuration version before an automatic migration, or
+            ``None`` when no migration happened.
+    """
+
+    workspace: Workspace
+    initialized: bool
+    migrated_from: Optional[int] = None
+
+
+async def resolve_workspace(path: Path) -> WorkspaceResolution:
+    """Load the workspace at *path*, migrating an outdated configuration.
+
+    A workspace without ``.mitocode/config.json`` is returned as an in-memory
+    :class:`Workspace` at the current application version; nothing is written to
+    disk, which keeps a read-only checkout usable and leaves initialization to
+    the explicit ``/init`` command.
+
+    Args:
+        path: Workspace root directory.
+
+    Returns:
+        The resolution describing the workspace, whether it came from disk and
+        which version it was migrated from.
+
+    Raises:
+        MitoCodeCliConfigError: The configuration is unreadable, invalid, written
+            by a newer MitoCode, or could not be migrated. The message names the
+            configuration file but never its contents.
+    """
+    workspace_path = Path(path)
+    config_file = workspace_path / MITOCODE_CONFIG_PATH / CONFIG_FILENAME
+
+    if not config_file.is_file():
+        return WorkspaceResolution(
+            workspace=Workspace(workspace_path, workspace_path.name, APP_VERSION),
+            initialized=False,
+            migrated_from=None,
+        )
+
+    try:
+        workspace = await _awaited(Workspace.init_from_path(workspace_path))
+    except MitoCodeWorkspaceTooOldError:
+        return await _migrate_workspace(workspace_path, config_file)
+    except MitoCodeAppTooOldError as exc:
+        raise _config_error(
+            config_file,
+            "it was created by a newer version of MitoCode; upgrade MitoCode "
+            "to open it",
+        ) from exc
+    except (MitoCodeWorkspaceInitError, UnicodeDecodeError) as exc:
+        raise _config_error(
+            config_file,
+            "it is unreadable, not valid JSON, or missing required fields",
+        ) from exc
+
+    return WorkspaceResolution(
+        workspace=workspace, initialized=True, migrated_from=None
+    )
+
+
+async def _migrate_workspace(
+    workspace_path: Path, config_file: Path
+) -> WorkspaceResolution:
+    """Migrate an outdated workspace and reload it.
+
+    Args:
+        workspace_path: Workspace root directory.
+        config_file: Configuration file that triggered the migration, used in
+            error messages.
+
+    Returns:
+        The resolution for the migrated workspace, with ``migrated_from`` set to
+        the version found before the migration.
+
+    Raises:
+        MitoCodeCliConfigError: The migration failed or the migrated
+            configuration could not be reloaded.
+    """
+    previous_version = _config_version(config_file)
+    try:
+        await _awaited(BasicMigration.migrate(workspace_path))
+        workspace = await _awaited(Workspace.init_from_path(workspace_path))
+    except (
+        MitoCodeMigrateError,
+        MitoCodeWorkspaceInitError,
+        MitoCodeAppTooOldError,
+        UnicodeDecodeError,
+    ) as exc:
+        raise _config_error(config_file, "automatic version migration failed") from exc
+
+    loguru_logger.debug(
+        "Migrated workspace at {} from version {} to {}",
+        workspace_path,
+        previous_version,
+        APP_VERSION,
+    )
+    return WorkspaceResolution(
+        workspace=workspace, initialized=True, migrated_from=previous_version
+    )
+
+
+def _config_version(config_file: Path) -> Optional[int]:
+    """Read the ``version`` field of a workspace configuration file.
+
+    Only used after :class:`MitoCodeWorkspaceTooOldError` reported a valid but
+    outdated version, so a failure here means the file changed underneath the
+    caller; the version is then simply reported as unknown.
+
+    Args:
+        config_file: Configuration file to read.
+
+    Returns:
+        The configuration version, or ``None`` when it cannot be determined.
+    """
+    try:
+        document = json.loads(config_file.read_text(encoding="utf-8"))
+        return int(document["version"])
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        loguru_logger.debug(
+            "Could not determine the previous workspace version: {}", type(exc).__name__
+        )
+        return None
+
+
+def _config_error(config_file: Path, reason: str) -> MitoCodeCliConfigError:
+    """Build a value-free workspace configuration error.
+
+    Args:
+        config_file: Configuration file the error is about.
+        reason: Short explanation of what is wrong with it.
+
+    Returns:
+        The error to raise, naming the file and what the user can do about it.
+    """
+    return MitoCodeCliConfigError(
+        f"Cannot open the workspace configuration at '{config_file}': {reason}.\n"
+        "Fix or remove that file and run mitocode again."
+    )
+
+
+def load_mcp_servers(
+    args: CliArgs, workspace: Workspace
+) -> Optional[List[McpServerConfig]]:
+    """Read the MCP server configuration for one CLI run.
+
+    ``--no-mcp`` skips reading entirely. Otherwise an explicit ``--mcp-config``
+    path wins over the default ``<workspace>/.mitocode/mcp.json``. A missing
+    default file means "no MCP servers" and returns ``None``; a missing explicit
+    file is the user's own pointer and raises.
+
+    Args:
+        args: Parsed command line arguments.
+        workspace: Resolved workspace, used to locate the default file.
+
+    Returns:
+        The validated server configurations in document order, or ``None`` when
+        MCP is disabled or no default file exists.
+
+    Raises:
+        MitoCodeMcpConfigError: The explicit file is missing or unreadable, or
+            either file is not valid JSON or not a valid ``mcpServers`` document.
+            The message names the file and whether it is the explicit or default
+            one, but never a header, environment or credential value.
+    """
+    if args.no_mcp:
+        return None
+
+    explicit_path = args.mcp_config
+    if explicit_path is not None:
+        path = Path(explicit_path)
+        label = "explicit MCP configuration file (--mcp-config)"
+        is_required = True
+    else:
+        path = workspace.path / DEFAULT_MCP_CONFIG_RELATIVE_PATH
+        label = "default MCP configuration file"
+        is_required = False
+
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        if not is_required:
+            return None
+        raise MitoCodeMcpConfigError(f"The {label} '{path}' does not exist.") from None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise MitoCodeMcpConfigError(
+            f"The {label} '{path}' could not be read as UTF-8 text."
+        ) from exc
+
+    try:
+        document = json.loads(raw)
+    except ValueError as exc:
+        raise MitoCodeMcpConfigError(
+            f"The {label} '{path}' is not valid JSON."
+        ) from exc
+
+    try:
+        return McpServerConfig.parse_config(document)
+    except MitoCodeMcpConfigError as exc:
+        raise MitoCodeMcpConfigError(f"The {label} '{path}' is invalid: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class Bootstrapped:  # pylint: disable=too-many-instance-attributes
+    """Everything a started CLI run needs, assembled in the design's order.
+
+    Attributes:
+        args: The parsed command line arguments the run started with.
+        resolution: Workspace resolution, including whether it was initialized.
+        provider_config: Validated provider settings, secret value excluded from
+            ``repr``.
+        tool_manager: Registry holding the built-in and MCP tools.
+        tool_context: World the built-in tools read, with the orchestrator
+            attached.
+        provider: The initialized chat provider.
+        orchestrator: Session registry and event router.
+        main_session: The interactive ``Main`` session.
+        mcp_manager: Live MCP manager, or ``None`` when MCP is disabled or could
+            not be configured.
+        mcp_error: Message describing why MCP is off, or ``""``.
+    """
+
+    args: CliArgs
+    resolution: WorkspaceResolution
+    provider_config: ProviderConfig
+    tool_manager: ToolManager
+    tool_context: ToolContext
+    provider: ChatProviderOpenAI
+    orchestrator: AgentOrchestrator
+    main_session: "AgentSession"
+    mcp_manager: Optional[McpManager]
+    mcp_error: str = ""
+
+
+def build_system_prompt(workspace: Path) -> str:
+    """Render the default system prompt for one workspace.
+
+    Args:
+        workspace: Workspace root. It is resolved first so the model always
+            receives an absolute path, whatever the user typed.
+
+    Returns:
+        :data:`SYSTEM_PROMPT_TEMPLATE` with the absolute workspace path filled
+        into its ``{workspace}`` slot.
+    """
+    return SYSTEM_PROMPT_TEMPLATE.format(workspace=str(Path(workspace).resolve()))
+
+
+async def bootstrap(args: CliArgs, ui: CliUI, approver: CliApprover) -> Bootstrapped:
+    """Assemble a CLI run from arguments to an interactive main session.
+
+    The order is a constraint, not a preference: the workspace has to exist
+    before provider settings can be read from it, the tool registry has to exist
+    before the orchestrator that owns it, and MCP has to finish starting before
+    any :class:`~mitocode.core.agent.agent_session.AgentSession` is created
+    because a session snapshots the registry in its constructor.
+
+    A malformed *default* ``<workspace>/.mitocode/mcp.json`` only disables MCP
+    and is reported through ``ui.warn``; a malformed explicit ``--mcp-config``
+    file is the user's own pointer and aborts startup.
+
+    Args:
+        args: Parsed command line arguments.
+        ui: Console surface used for startup warnings.
+        approver: Approval policy installed in the tool context.
+
+    Returns:
+        The started components, including the main session.
+
+    Raises:
+        MitoCodeCliConfigError: The workspace or provider configuration is
+            invalid, the provider cannot be initialized, or the explicit MCP
+            configuration file is unusable. Messages never contain the API key.
+    """
+    resolution = await resolve_workspace(args.workspace)
+    loguru_logger.debug(
+        "Workspace resolved at {} (initialized={})",
+        resolution.workspace.path,
+        resolution.initialized,
+    )
+
+    provider_config = resolve_provider_config(args, resolution.workspace.path)
+
+    tool_manager = ToolManager()
+    tool_context = ToolContext(workspace=resolution.workspace, approver=approver)
+    register_builtin_tools(tool_manager, tool_context)
+
+    provider = await _create_provider(provider_config, ui)
+    loguru_logger.debug("Provider initialized with model {}", provider_config.model)
+
+    mcp_manager, mcp_error = await _start_mcp(
+        args, resolution.workspace, tool_manager, ui
+    )
+
+    try:
+        orchestrator = AgentOrchestrator(
+            tool_manager=tool_manager,
+            default_provider=provider,
+            system_prompt=build_system_prompt(resolution.workspace.path),
+            # resolve_provider_config validated the key as non-blank, so the
+            # orchestrator can scrub the literal secret out of every provider
+            # failure's log line and error event.
+            redact_secrets=(provider_config.api_key,),
+        )
+        tool_context.attach_orchestrator(orchestrator)
+
+        main_session = await orchestrator.create_session(
+            name="Main", description="Interactive session"
+        )
+    except BaseException:
+        # MCP is live at this point and its manager would otherwise be lost
+        # with the exception, orphaning every server subprocess it started.
+        await _stop_mcp_after_failure(mcp_manager)
+        raise
+    loguru_logger.debug("Main session created with id {}", main_session.agent_id)
+
+    return Bootstrapped(
+        args=args,
+        resolution=resolution,
+        provider_config=provider_config,
+        tool_manager=tool_manager,
+        tool_context=tool_context,
+        provider=provider,
+        orchestrator=orchestrator,
+        main_session=main_session,
+        mcp_manager=mcp_manager,
+        mcp_error=mcp_error,
+    )
+
+
+async def _create_provider(config: ProviderConfig, ui: CliUI) -> ChatProviderOpenAI:
+    """Initialize the chat provider and keep the configured model usable.
+
+    ``init()`` replaces the seeded model list with the endpoint's live list. The
+    configured model may be missing from that list, so it is appended after the
+    factory returns; otherwise the first request would be rejected for a model
+    the user explicitly named.
+
+    Args:
+        config: Validated provider settings.
+        ui: Console surface used for the "not advertised" warning.
+
+    Returns:
+        The initialized provider.
+
+    Raises:
+        MitoCodeCliConfigError: The factory rejected the settings or could not
+            reach the endpoint. The API key is scrubbed from the message.
+    """
+    settings = {
+        "api_key": config.api_key,
+        "base_url": config.base_url,
+        "timeout": config.timeout,
+    }
+    try:
+        provider = cast(
+            ChatProviderOpenAI,
+            await ChatProviderOpenAI.factory(
+                default_model=config.model,
+                default_model_list=[config.model],
+                stream=True,
+                settings=settings,
+            ),
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        raise MitoCodeCliConfigError(_scrub_secret(str(exc), config.api_key)) from exc
+
+    model_list = list(provider.model_list or [])
+    if config.model not in model_list:
+        model_list.append(config.model)
+        ui.warn(
+            f"model '{config.model}' is not advertised by the endpoint; "
+            "using it anyway"
+        )
+    provider.model_list = model_list
+    return provider
+
+
+async def _stop_mcp_after_failure(manager: Optional[McpManager]) -> None:
+    """Stop an MCP manager whose startup owner is about to raise.
+
+    The stop coroutine is shielded because it releases subprocesses, and it is
+    awaited while the caller still holds the exception. A failure here is
+    logged only: the original exception must reach the caller unchanged.
+
+    Args:
+        manager: Live manager started earlier in :func:`bootstrap`, or ``None``
+            when MCP is disabled.
+    """
+    if manager is None:
+        return
+    try:
+        await asyncio.shield(manager.stop())
+    except BaseException:  # pylint: disable=broad-exception-caught
+        loguru_logger.exception("MCP shutdown failed after bootstrap error")
+
+
+async def _start_mcp(
+    args: CliArgs, workspace: Workspace, tool_manager: ToolManager, ui: CliUI
+) -> "tuple[Optional[McpManager], str]":
+    """Read the MCP configuration and start every configured server.
+
+    A manager whose ``start()`` raises -- including a cancellation that lands
+    while servers are still connecting -- is stopped before the exception
+    propagates, so no stdio subprocess outlives the failed startup.
+
+    Args:
+        args: Parsed command line arguments, carrying ``--no-mcp`` and
+            ``--mcp-config``.
+        workspace: Resolved workspace, used to find the default file.
+        tool_manager: Registry the servers' tools are published into.
+        ui: Console surface used when the default file is unusable.
+
+    Returns:
+        ``(manager, error)``: the live manager or ``None``, plus the message
+        explaining why MCP is off (``""`` when it is on or simply absent).
+
+    Raises:
+        MitoCodeCliConfigError: The explicit ``--mcp-config`` file is missing,
+            unreadable or invalid. The message names the file and never a
+            configuration value.
+    """
+    try:
+        servers = load_mcp_servers(args, workspace)
+        if servers is None:
+            return None, ""
+        manager = McpManager(servers, tool_manager=tool_manager)
+    except MitoCodeMcpConfigError as exc:
+        if args.mcp_config is not None:
+            raise MitoCodeCliConfigError(str(exc)) from exc
+        ui.warn(f"MCP is disabled: {exc}")
+        return None, str(exc)
+
+    try:
+        await manager.start()
+    except BaseException:
+        # Some servers may already be live when the exception or cancellation
+        # arrives; without this teardown the local manager reference would be
+        # lost and every subprocess it started would be orphaned.
+        await _stop_mcp_after_failure(manager)
+        raise
+
+    return manager, ""
+
+
+def _scrub_secret(message: str, secret: str) -> str:
+    """Replace the literal API key in *message* with ``***``.
+
+    Provider libraries usually quote only the endpoint, but a validation error
+    can echo the whole settings mapping. Blank secrets are ignored so an empty
+    value cannot turn every string into a match.
+
+    Args:
+        message: Text from an exception, possibly containing the key.
+        secret: The configured API key.
+
+    Returns:
+        The message with every occurrence of *secret* replaced.
+    """
+    if secret:
+        return message.replace(secret, "***")
+    return message
+
+
+__all__ = [
+    "CONFIG_FILENAME",
+    "DEFAULT_MCP_CONFIG_RELATIVE_PATH",
+    "SYSTEM_PROMPT_TEMPLATE",
+    "Bootstrapped",
+    "WorkspaceResolution",
+    "bootstrap",
+    "build_system_prompt",
+    "load_mcp_servers",
+    "resolve_workspace",
+]

@@ -1,0 +1,324 @@
+"""Application entry point for the MitoCode interactive CLI.
+
+:func:`main` is the only place that decides the process exit code.  It parses
+arguments, answers ``--version``/``--help`` without a terminal, refuses a non
+interactive stdin/stdout, and then hands one run to
+:func:`_amain` inside :func:`asyncio.run`.  :func:`run` is the console-script
+target and only wraps :func:`main` in ``SystemExit``.
+
+The startup order is a constraint, not a preference:
+
+1. arguments, version/help and the terminal check (no logging yet, so a
+   non-interactive invocation never touches the log directory);
+2. logging takeover, then the console, UI, approver and :func:`bootstrap`, which
+   resolves the workspace, registers tools, starts MCP and creates the main
+   session;
+3. state, event pump task and REPL, in that order, because the pump must be
+   consuming events before the first turn can produce any;
+4. ``SIGINT`` is routed to :meth:`Repl.handle_sigint` when the platform supports
+   it, then the REPL runs.
+
+Teardown lives in ``finally`` and is equally ordered: the pump task is
+cancelled and awaited first, because it renders into the UI and MCP shutdown
+may log, then ``mcp.stop()`` runs under :func:`asyncio.shield` so a second
+``Ctrl+C`` cannot leave a subprocess behind.  MCP shutdown failures are logged
+and never change the exit code.  The ``try`` starts as soon as
+:func:`bootstrap` returns, so a banner, state, pump, REPL or task-creation
+failure still stops MCP; bootstrap itself rolls back a manager it had already
+started.
+
+Errors surface once: configuration and application errors print a red panel and
+return ``1``, a ``KeyboardInterrupt`` during startup returns ``130``, and an
+unexpected exception is logged with its traceback before the same panel and
+``1``.  Nothing here prints a resolved credential.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import signal
+import sys
+from typing import Any, NoReturn, Optional, Sequence
+
+from loguru import logger as loguru_logger
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
+
+from mitocode.cli.approval import ApprovalPolicy, CliApprover
+from mitocode.cli.args import CliArgs, parse_args, render_help, version_string
+from mitocode.cli.bootstrap import Bootstrapped, bootstrap
+from mitocode.cli.errors import MitoCodeCliError
+from mitocode.cli.logging_setup import configure_logging
+from mitocode.cli.pump import EventPump
+from mitocode.cli.repl import Repl
+from mitocode.cli.state import CliState
+from mitocode.cli.theme import MITOCODE_THEME
+from mitocode.cli.ui import BannerInfo, CliUI
+from mitocode.core.exception.mitocode_exception import MitoCodeBaseError
+from mitocode.core.mcp.mcp_manager import McpManager
+from mitocode.core.tool.tool_manager import MCP_TOOL_PREFIX
+
+NON_INTERACTIVE_EXIT_CODE = 2
+"""Exit code for a run without a terminal; the CLI has no pipe mode."""
+
+INTERRUPTED_EXIT_CODE = 130
+"""Exit code for ``Ctrl+C`` during startup, the shell's ``SIGINT`` convention."""
+
+FAILURE_EXIT_CODE = 1
+"""Exit code for configuration, application and unexpected failures."""
+
+
+def _is_interactive() -> bool:
+    """Return whether both standard streams are terminals.
+
+    The CLI deliberately has no non-interactive mode, so this is checked before
+    logging is configured and before anything is written to the screen.
+
+    Returns:
+        ``True`` only when ``sys.stdin`` and ``sys.stdout`` are both TTYs.
+    """
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _display_version() -> str:
+    """Return the bare version number the banner prefixes with ``v``.
+
+    Returns:
+        The package version from :func:`version_string`, without its
+        ``"mitocode "`` prefix.
+    """
+    return version_string().split(" ", 1)[-1]
+
+
+def _error_console() -> Console:
+    """Build a console for startup failures, which belong on stderr.
+
+    Returns:
+        A themed console writing to :data:`sys.stderr`.
+    """
+    return Console(file=sys.stderr, theme=MITOCODE_THEME)
+
+
+def _report_error(message: str, *, title: str = "Error") -> None:
+    """Print one red panel describing a startup failure.
+
+    Args:
+        message: Readable explanation; callers guarantee it holds no secret.
+        title: Panel heading, ``Error`` by default.
+    """
+    _error_console().print(
+        Panel(
+            Text(message),
+            title=f"[bold red]{title}[/bold red]",
+            border_style="red",
+            expand=False,
+        )
+    )
+
+
+def _install_sigint_handler(loop: Any, repl: Repl) -> bool:
+    """Route ``SIGINT`` to the REPL when the event loop supports it.
+
+    ``asyncio.run`` turns ``Ctrl+C`` into ``KeyboardInterrupt`` on some
+    platforms; installing the handler as well lets a running turn be cancelled
+    cooperatively instead of killing the process.
+
+    Args:
+        loop: The running event loop.
+        repl: Receiver of the signal callback.
+
+    Returns:
+        ``True`` when the handler was installed, ``False`` when the platform or
+        the loop implementation cannot install one.
+    """
+    add_handler = getattr(loop, "add_signal_handler", None)
+    if add_handler is None:
+        return False
+    try:
+        add_handler(signal.SIGINT, repl.handle_sigint)
+    except (NotImplementedError, RuntimeError, ValueError):
+        loguru_logger.debug("SIGINT handler is not supported on this platform")
+        return False
+    return True
+
+
+def _banner_info(boot: Bootstrapped) -> BannerInfo:
+    """Assemble the facts the startup banner renders.
+
+    Built-in and MCP tool counts are separated by the ``mcp__`` name prefix the
+    registry uses, so the banner's two numbers cannot double count.
+
+    Args:
+        boot: Everything :func:`bootstrap` started.
+
+    Returns:
+        The banner's display facts.
+    """
+    tool_names = list(boot.tool_manager.tools_map())
+    builtin_count = sum(
+        1 for name in tool_names if not name.startswith(MCP_TOOL_PREFIX)
+    )
+    mcp_states = {}
+    if boot.mcp_manager is not None:
+        mcp_states = {
+            name: status.state for name, status in boot.mcp_manager.status().items()
+        }
+    return BannerInfo(
+        version=_display_version(),
+        model=boot.provider_config.model,
+        workspace=boot.resolution.workspace.path,
+        initialized=boot.resolution.initialized,
+        tool_count=builtin_count,
+        mcp=mcp_states,
+    )
+
+
+async def _stop_mcp(manager: Optional[McpManager]) -> None:
+    """Stop the MCP manager without letting its failure end the run.
+
+    The stop coroutine is shielded because it releases subprocesses: a
+    cancellation racing with shutdown must not leave them orphaned.  Errors are
+    logged only; the process has already finished its user-visible work.
+
+    Args:
+        manager: The live manager, or ``None`` when MCP is disabled.
+    """
+    if manager is None:
+        return
+    try:
+        await asyncio.shield(manager.stop())
+    except Exception:  # pylint: disable=broad-exception-caught
+        loguru_logger.exception("MCP shutdown failed")
+
+
+async def _amain(args: CliArgs, log_path: Any, console: Console) -> int:
+    """Start the components in the design's order and run the REPL.
+
+    Args:
+        args: Parsed command line arguments.
+        log_path: Log file reported by :func:`configure_logging`; stored on the
+            state so ``/log`` can show it and printed on exit under ``--debug``.
+        console: Themed console the UI renders through.
+
+    Returns:
+        The REPL's exit code, ``0`` for every clean exit path.
+
+    Raises:
+        MitoCodeCliError: Configuration is invalid.
+        MitoCodeBaseError: A workspace, provider or MCP error aborted startup.
+        KeyboardInterrupt: The user interrupted startup.
+    """
+    ui = CliUI(console, verbose=args.verbose)
+    approver = CliApprover(ui, ApprovalPolicy(args.permission_mode))
+    boot = await bootstrap(args, ui, approver)
+
+    pump_task: Optional[asyncio.Task[None]] = None
+    state: Optional[CliState] = None
+    try:
+        ui.show_banner(_banner_info(boot))
+
+        state = CliState(
+            args=args,
+            workspace=boot.resolution.workspace,
+            tool_manager=boot.tool_manager,
+            provider=boot.provider,
+            orchestrator=boot.orchestrator,
+            mcp_manager=boot.mcp_manager,
+            tool_context=boot.tool_context,
+            ui=ui,
+            approver=approver,
+            workspace_initialized=boot.resolution.initialized,
+            log_path=log_path,
+            main_id=boot.main_session.agent_id,
+            mcp_error=boot.mcp_error,
+            verbose=args.verbose,
+        )
+        pump = EventPump(boot.orchestrator.event_queue, ui, state)
+        pump_task = asyncio.create_task(pump.run())
+        repl = Repl(state, ui, pump, approver)
+        _install_sigint_handler(asyncio.get_running_loop(), repl)
+
+        return await repl.run()
+    finally:
+        if pump_task is not None:
+            pump_task.cancel()
+            await asyncio.gather(pump_task, return_exceptions=True)
+        await _stop_mcp(boot.mcp_manager)
+        if state is not None:
+            ui.note(
+                f"Session ended · {state.turn_count} turns "
+                f"· ~{state.estimate_tokens()} tokens"
+            )
+        if args.debug:
+            ui.note(f"Log file: {log_path}")
+
+
+def _start(argv: Sequence[str] | None) -> int:
+    """Parse arguments and run one session.
+
+    Args:
+        argv: Argument list without the program name, or ``None`` for
+            :data:`sys.argv`.
+
+    Returns:
+        ``0`` for version, help or a clean session, or ``2`` without a
+        terminal.
+    """
+    args = parse_args(argv)
+
+    if args.show_version:
+        Console(theme=MITOCODE_THEME).print(version_string())
+        return 0
+    if args.show_help:
+        render_help(Console(theme=MITOCODE_THEME))
+        return 0
+
+    if not _is_interactive():
+        _report_error(
+            "mitocode needs an interactive terminal: stdin and stdout "
+            "must both be a TTY.",
+            title="No interactive terminal",
+        )
+        return NON_INTERACTIVE_EXIT_CODE
+
+    log_path = configure_logging(debug=args.debug)
+    return asyncio.run(_amain(args, log_path, Console(theme=MITOCODE_THEME)))
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the CLI and return the process exit code.
+
+    Args:
+        argv: Argument list without the program name; ``None`` reads
+            :data:`sys.argv`.
+
+    Returns:
+        ``0`` on a clean session, ``1`` for a configuration/application
+        failure, ``2`` without an interactive terminal and ``130`` when
+        startup is interrupted.
+    """
+    try:
+        return _start(argv)
+    except KeyboardInterrupt:
+        return INTERRUPTED_EXIT_CODE
+    except (MitoCodeCliError, MitoCodeBaseError) as exc:
+        loguru_logger.debug("Startup failed: {}", type(exc).__name__)
+        _report_error(str(exc))
+        return FAILURE_EXIT_CODE
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        loguru_logger.exception("Unexpected CLI failure")
+        _report_error(str(exc), title="Unexpected error")
+        return FAILURE_EXIT_CODE
+
+
+def run() -> NoReturn:
+    """Run the CLI as the ``mitocode`` console script.
+
+    Raises:
+        SystemExit: Always, carrying :func:`main`'s exit code.
+    """
+    raise SystemExit(main())
+
+
+__all__ = ["main", "run"]

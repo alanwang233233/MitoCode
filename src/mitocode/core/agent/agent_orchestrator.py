@@ -2,7 +2,11 @@
 
 import asyncio
 import copy
-from typing import Dict, List
+import re
+import traceback
+from typing import Dict, List, Sequence
+
+from loguru import logger as loguru_logger
 
 from .agent_runtime import AgentRuntime
 from .agent_session import AgentSession
@@ -12,8 +16,14 @@ from ..chat_provider.sample_chat_provider import SampleChatProvider
 from ..chat_provider.scenario_provider import ScenarioProvider
 from ..tool.tool_manager import ToolManager
 
+logger = loguru_logger.bind(name=__name__)
 
-class AgentOrchestrator:
+# Matches the shape of an OpenAI-style secret key. Only the value is replaced;
+# surrounding words are preserved so the message stays diagnostically useful.
+_API_KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]+")
+
+
+class AgentOrchestrator:  # pylint: disable=too-many-instance-attributes
     """Central controller that directly manages multiple agent sessions.
 
     Responsibilities:
@@ -31,7 +41,21 @@ class AgentOrchestrator:
         self,
         tool_manager: ToolManager | None = None,
         default_provider: SampleChatProvider | ScenarioProvider | None = None,
+        system_prompt: str = "",
+        redact_secrets: Sequence[str] = (),
     ):
+        """Create an orchestrator.
+
+        Args:
+            tool_manager: Optional registry every new session snapshots.
+            default_provider: Provider used by sessions that do not pass one.
+            system_prompt: Role instructions seeded into every session this
+                orchestrator creates, including child agents. An explicit
+                ``system_prompt`` passed to :meth:`create_session` wins.
+            redact_secrets: Literal secret values (e.g. the configured API
+                key) scrubbed from error messages and error logs alongside the
+                ``sk-`` pattern. Blank entries are ignored.
+        """
         self._sessions: Dict[int, AgentSession] = {}
         self._tasks: Dict[int, asyncio.Task | None] = {}
         self._counter: int = 0
@@ -39,8 +63,51 @@ class AgentOrchestrator:
         self._default_provider: SampleChatProvider | ScenarioProvider | None = (
             default_provider
         )
+        self._system_prompt: str = system_prompt or ""
+        self._redact_secrets: tuple[str, ...] = tuple(
+            secret for secret in redact_secrets if secret and secret.strip()
+        )
         self._bridge = EventBridge(tool_manager)
         self.event_queue: asyncio.Queue = asyncio.Queue()
+
+    # ------------------------------------------------------------------
+    # Error reporting
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def redact_api_keys(message: str) -> str:
+        """Replace OpenAI-style ``sk-`` secrets in ``message`` with ``sk-***``.
+
+        The replacement is best-effort: it targets the literal ``sk-`` prefix
+        followed by key-shaped characters, which covers the API keys this
+        project reads from the environment without touching ordinary prose.
+
+        Args:
+            message: Raw text, typically an exception message.
+
+        Returns:
+            The text with every matched secret replaced by ``sk-***``.
+        """
+        return _API_KEY_PATTERN.sub("sk-***", message)
+
+    def _redact_message(self, message: str) -> str:
+        """Scrub this orchestrator's configured secrets out of *message*.
+
+        Every literal secret passed as ``redact_secrets`` is replaced first, so
+        a key the ``sk-`` pattern cannot shape-match (the CLI accepts any
+        non-blank key) is still gone; the static :meth:`redact_api_keys` pass
+        then runs unchanged on the result.
+
+        Args:
+            message: Raw text, typically an exception message or traceback.
+
+        Returns:
+            The text with every configured secret replaced by ``***`` and
+            every ``sk-``-shaped key replaced by ``sk-***``.
+        """
+        for secret in self._redact_secrets:
+            message = message.replace(secret, "***")
+        return self.redact_api_keys(message)
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -66,7 +133,9 @@ class AgentOrchestrator:
                 default_provider if not given.
             description: Optional description shown in the tree.
             parent_id: If set, the new session becomes a child of this node.
-            **session_kwargs: Forwarded to :class:`AgentSession`.
+            **session_kwargs: Forwarded to :class:`AgentSession`. The
+                orchestrator's ``system_prompt`` is used unless the caller
+                passes one explicitly.
 
         Returns:
             The newly created, already registered :class:`AgentSession`.
@@ -90,6 +159,8 @@ class AgentOrchestrator:
 
         agent_id = self._counter
         self._counter += 1
+
+        session_kwargs.setdefault("system_prompt", self._system_prompt)
 
         session = AgentSession(
             agent_id=agent_id,
@@ -251,8 +322,11 @@ class AgentOrchestrator:
         if session is None:
             # The session was destroyed before this task got scheduled.
             return
+        cancel_event_seen = False
         try:
             async for raw_event in AgentRuntime.run(session):
+                if raw_event.get("event") == "system.cancelled":
+                    cancel_event_seen = True
                 adapted = self._bridge.adapt(raw_event, agent_id)
                 if adapted is not None:
                     await self.event_queue.put((agent_id, adapted))
@@ -263,10 +337,57 @@ class AgentOrchestrator:
                 session.state = AgentState.FINISHED
         except asyncio.CancelledError:
             session.state = AgentState.CANCELLED
+            self._emit_synthetic_cancel(agent_id, cancel_event_seen)
             raise
-        except Exception:  # pylint: disable=broad-exception-caught
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # Provider failures stay inside the run loop on purpose: the TUI
+            # relies on the task completing quietly and the tree showing the
+            # error state. The log keeps the traceback, the event carries only
+            # the redacted message so a key can never reach a pane or a log sink.
+            logger.error(
+                f"Agent {agent_id} run failed\n"
+                f"{self._redact_message(traceback.format_exc())}"
+            )
+            await self.event_queue.put(
+                (
+                    agent_id,
+                    {
+                        "type": "error",
+                        "agent_id": agent_id,
+                        "message": self._redact_message(str(exc)),
+                    },
+                )
+            )
             session.state = AgentState.ERROR
         finally:
             if self._tasks.get(agent_id) is asyncio.current_task():
                 self._tasks[agent_id] = None
             await self._push_tree_sync()
+
+    def _emit_synthetic_cancel(self, agent_id: int, cancel_event_seen: bool) -> None:
+        """Queue the cancellation event a hard task kill never let the runtime yield.
+
+        ``task.cancel()`` injects ``CancelledError`` straight into whatever the
+        turn was awaiting, so the runtime's cooperative checkpoints never run
+        and no ``system.cancelled`` event is yielded; the consumer would never
+        learn that the turn ended. The event is synthesised here instead,
+        exactly once per run: when the cooperative path already yielded one,
+        *cancel_event_seen* is ``True`` and nothing is queued, so the consumer
+        never sees a duplicate. ``put_nowait`` is used because awaiting inside
+        a cancelled task's handler would let a second cancellation abort the
+        emit.
+
+        Args:
+            agent_id: Id of the agent whose turn was cancelled.
+            cancel_event_seen: Whether the runtime already yielded its own
+                ``system.cancelled`` event during this run.
+        """
+        if cancel_event_seen:
+            return
+        adapted = self._bridge.adapt({"event": "system.cancelled"}, agent_id)
+        if adapted is None:
+            return
+        try:
+            self.event_queue.put_nowait((agent_id, adapted))
+        except asyncio.QueueFull:
+            pass

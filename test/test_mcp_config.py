@@ -54,7 +54,6 @@ that belongs to the module's owner, not to this suite:
 """
 
 import os
-import re
 import sys
 from dataclasses import FrozenInstanceError
 from unittest.mock import patch
@@ -453,39 +452,39 @@ def test_parse_rejects_a_blank_or_non_string_command(bad_command):
 
 
 @pytest.mark.parametrize(
-    ("bad_enabled", "expected_repr"),
-    [("yes", "'yes'"), (1, "1"), (0, "0"), (None, "None")],
+    ("bad_enabled", "expected_type"),
+    [("yes", "str"), (1, "int"), (0, "int"), (None, "NoneType")],
     ids=["str", "int-one", "int-zero", "none"],
 )
-def test_parse_rejects_a_non_boolean_enabled(bad_enabled, expected_repr):
+def test_parse_rejects_a_non_boolean_enabled(bad_enabled, expected_type):
     """'enabled' is a flag; ints and strings are typos, not truthy values."""
     with pytest.raises(
         MitoCodeMcpConfigError,
-        match=f"'enabled' must be a boolean, got {expected_repr}$",
+        match=f"'enabled' must be a boolean, got {expected_type}$",
     ):
         McpServerConfig.parse("weather", {"url": HTTP_ENDPOINT, "enabled": bad_enabled})
 
 
 @pytest.mark.parametrize(
-    ("bad_cwd", "expected_repr"),
+    ("bad_cwd", "expected_type"),
     [
-        (5, "5"),
-        (None, "None"),
-        (["/tmp"], "['/tmp']"),
-        ({"dir": "/tmp"}, "{'dir': '/tmp'}"),
+        (5, "int"),
+        (None, "NoneType"),
+        (["/tmp"], "list"),
+        ({"dir": "/tmp"}, "dict"),
     ],
     ids=["int", "none", "list", "dict"],
 )
-def test_parse_rejects_a_non_string_cwd(bad_cwd, expected_repr):
-    """A non-string cwd must be refused, echoing the value that arrived.
+def test_parse_rejects_a_non_string_cwd(bad_cwd, expected_type):
+    """A non-string cwd must be refused without echoing the value that arrived.
 
-    ``cwd`` is not secret-bearing, so unlike ``env``/``headers`` its value is
-    rendered into the message on purpose: a wrong path is what makes the typo
-    findable.
+    Exception messages end up in the terminal and in logs, so every reader
+    reports only the offending value's type; a wrong path stays fixable because
+    the message names the field and the server entry.
     """
     with pytest.raises(
         MitoCodeMcpConfigError,
-        match=f"'cwd' must be a string, got {re.escape(expected_repr)}$",
+        match=f"'cwd' must be a string, got {expected_type}$",
     ):
         McpServerConfig.parse("files", {"command": "npx", "cwd": bad_cwd})
 
@@ -494,7 +493,7 @@ def test_parse_rejects_a_non_string_cwd(bad_cwd, expected_repr):
 def test_parse_rejects_a_boolean_timeout(field):
     """bool subclasses int, so 'timeout: true' must not become a 1s timeout."""
     with pytest.raises(
-        MitoCodeMcpConfigError, match=rf"'{field}' must be a positive number, got True"
+        MitoCodeMcpConfigError, match=rf"'{field}' must be a positive number, got bool"
     ):
         McpServerConfig.parse("files", {"command": "npx", field: True})
 
@@ -503,24 +502,24 @@ def test_parse_rejects_a_boolean_timeout(field):
 def test_parse_rejects_a_nan_timeout(field):
     """NaN is not greater than zero, so it must be refused rather than stored."""
     with pytest.raises(
-        MitoCodeMcpConfigError, match=rf"'{field}' must be a positive number, got nan"
+        MitoCodeMcpConfigError, match=rf"'{field}' must be a positive number, got float"
     ):
         McpServerConfig.parse("files", {"command": "npx", field: float("nan")})
 
 
 @pytest.mark.parametrize("field", ["timeout", "connect_timeout"])
 @pytest.mark.parametrize(
-    ("bad_timeout", "expected_repr"),
-    [(0, "0"), (0.0, "0.0"), (-1, "-1")],
+    ("bad_timeout", "expected_type"),
+    [(0, "int"), (0.0, "float"), (-1, "int")],
     ids=["int-zero", "float-zero", "negative"],
 )
 def test_parse_rejects_a_timeout_at_the_zero_boundary(
-    field, bad_timeout, expected_repr
+    field, bad_timeout, expected_type
 ):
     """The bound is strict: zero is refused, not accepted as a 0-second timeout."""
     with pytest.raises(
         MitoCodeMcpConfigError,
-        match=f"'{field}' must be a positive number, got {re.escape(expected_repr)}$",
+        match=f"'{field}' must be a positive number, got {expected_type}$",
     ):
         McpServerConfig.parse("files", {"command": "npx", field: bad_timeout})
 
@@ -528,7 +527,7 @@ def test_parse_rejects_a_timeout_at_the_zero_boundary(
 def test_parse_rejects_a_non_numeric_timeout():
     """A quoted timeout is a typo, not a string that coerces later."""
     with pytest.raises(
-        MitoCodeMcpConfigError, match="'timeout' must be a positive number, got '30'"
+        MitoCodeMcpConfigError, match="'timeout' must be a positive number, got str"
     ):
         McpServerConfig.parse("files", {"command": "npx", "timeout": "30"})
 

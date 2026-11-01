@@ -184,3 +184,9 @@ docs/superpowers
 # macOS metadata and local scratch files
 .DS_Store
 bubble_sort.py
+
+# MitoCode local state, credentials and logs (never commit)
+.mitocode/
+
+# Local process materials (research notes, not part of the codebase)
+过程性资料/
