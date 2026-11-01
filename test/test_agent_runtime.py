@@ -439,9 +439,7 @@ class TestRunReasoning:
         ]
 
     @pytest.mark.asyncio
-    async def test_run_reasoning_precedes_content_within_one_chunk(
-        self, make_session
-    ):
+    async def test_run_reasoning_precedes_content_within_one_chunk(self, make_session):
         """同一 chunk 内 reasoning 与 content 同时到达 → reasoning 事件在前."""
         provider = _ScriptedProvider(
             [

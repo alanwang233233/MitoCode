@@ -422,9 +422,7 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
             self._begin_live("reasoning")
             if inherited is not None:
                 self._live_started = inherited
-        self._reasoning_text = (self._reasoning_text + delta)[
-            -_REASONING_BUFFER_LIMIT:
-        ]
+        self._reasoning_text = (self._reasoning_text + delta)[-_REASONING_BUFFER_LIMIT:]
         if self._live is not None:
             self._live.update(self._render_live("reasoning", self._elapsed()))
 
@@ -436,7 +434,6 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
         content, so an aborted or empty reasoning stream leaves no residue.
         The live region is transient, so stopping it clears the preview and
         only the summary remains on screen.
-
         """
         if self._live_kind != "reasoning":
             return
