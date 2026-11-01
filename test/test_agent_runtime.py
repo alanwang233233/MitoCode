@@ -20,7 +20,10 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mitocode.core.agent.agent_runtime import AgentRuntime
-from mitocode.core.agent.agent_session import AgentSession
+from mitocode.core.agent.agent_session import (
+    AgentSession,
+    _PlainTextMessageBlock,
+)
 from mitocode.core.chat_provider.sample_chat_provider import _SampleChatProvider
 from mitocode.core.tool.builtin.context import current_agent_id
 
@@ -1808,3 +1811,102 @@ class TestRunCancelAfterStream:
         ], "流后取消必须在已产出的文本之后补上 system.cancelled，以兑现 run() 的文档契约"
         assert provider.chat_count == 1, "流后取消不应回环再次请求 chat"
         assert session.is_cancelled(), "取消请求本身应保持生效状态"
+
+
+# ──────────────────────────────────────────────
+# run(): 思维链封存与上下文形状
+# ──────────────────────────────────────────────
+
+
+class _CancelAfterReasoningProvider(_SampleChatProvider):
+    """先输出思考 delta，随后在流中途触发取消的受控 provider."""
+
+    def __init__(self):
+        self.session: Optional[AgentSession] = None
+
+    async def chat(self, tools=None, messages=None, **kwargs):
+        session = self.session
+
+        async def _stream():
+            yield _Chunk(reasoning_content="被打断的思考")
+            session.cancel()
+
+        return _stream()
+
+    async def get_model_list(self):
+        return []
+
+    async def init(self):
+        pass
+
+    @classmethod
+    def get_settings_schema(cls):
+        return {}
+
+    @classmethod
+    def check_settings_schema(cls, settings):
+        return True
+
+
+class TestReasoningSealShape:
+    """封存消息的位置与取消语义测试（修订 v2 评审裁定）."""
+
+    @pytest.mark.asyncio
+    async def test_late_reasoning_in_tool_calls_round_seals_after_tool_results(
+        self, make_session
+    ):
+        """tool_calls 回合中晚到的思考必须封存在工具结果之后，否则破坏
+        OpenAI 形状（tool 消息必须紧跟 tool_calls 消息）."""
+        provider = _ScriptedProvider(
+            [
+                [
+                    _Chunk(
+                        tool_calls=[
+                            _ToolCallChunk(
+                                0, call_id=CALL_ID_PRIMARY, name=TOOL_NAME_WEATHER
+                            )
+                        ]
+                    ),
+                    _Chunk(reasoning_content="晚到的思考"),
+                    _Chunk(finish_reason=REASON_TOOL_CALLS),
+                ],
+                [_Chunk(content="晴天"), _Chunk(finish_reason=REASON_STOP)],
+            ]
+        )
+        session = make_session(provider)
+        await _drain_events(AgentRuntime.run(session))
+        context = session.build_standard_context()
+        tool_result_index = next(
+            i for i, m in enumerate(context) if m.get("role") == "tool"
+        )
+        sealed_index = next(
+            i
+            for i, m in enumerate(context)
+            if m.get("reasoning_content") == "晚到的思考"
+        )
+        assert tool_result_index < sealed_index, (
+            "封存的思考消息必须出现在 tool 结果消息之后，"
+            "否则 tool 消息不再紧跟 tool_calls 消息"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cancelled_round_skips_sealing(self):
+        """取消的回合不封存；遗留思考随下一次用户轮丢弃."""
+        provider = _CancelAfterReasoningProvider()
+        session = AgentSession(provider=provider)
+        provider.session = session
+        session.append_user_prompt("随便问")
+        events = await _drain_events(AgentRuntime.run(session))
+        assert events[-1]["event"] == "system.cancelled"
+        sealed = [
+            b
+            for b in session.messages
+            if isinstance(b, _PlainTextMessageBlock)
+            and b.role == "assistant"
+            and b.message == ""
+            and b.reasoning_content
+        ]
+        assert sealed == [], "取消的回合不得封存空 content 的思考消息"
+        session.append_user_prompt("下一问")
+        session.append_assistant_delta("好的")
+        assert "被打断的思考" not in str(session.build_standard_context())

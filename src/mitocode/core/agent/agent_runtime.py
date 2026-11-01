@@ -45,6 +45,12 @@ class AgentRuntime:
                 Streaming text delta from the assistant.
                 Format: {"event": "agent.text", "delta": str}
 
+            - agent.reasoning:
+                Streaming reasoning delta from a thinking model. The delta is
+                also persisted onto the session's pending buffer for replay in
+                the next request; this event drives the UI preview only.
+                Format: {"event": "agent.reasoning", "delta": str}
+
             - agent.tool_call.header:
                 Initializes a tool call with its ID and name.
                 Format: {"event": "agent.tool_call.header", "id": str, "name": str}
@@ -182,12 +188,6 @@ class AgentRuntime:
                     yield {"event": "system.cancelled"}
                 break
 
-            # A completed round keeps its reasoning: anything still pending was
-            # never attached to a block and is sealed into a bare assistant
-            # message so it reaches the next request. Cancelled rounds skip
-            # this; their leftovers are discarded by the next user prompt.
-            session.seal_round_reasoning()
-
             # 3. Handle End of Stream
             if stream_finished_reason == "tool_calls":
                 yield {"event": "system.finished.tool_calls"}
@@ -251,6 +251,14 @@ class AgentRuntime:
                             )
                     raise
 
+                # Seal unclaimed reasoning only AFTER the tool results are in
+                # the history: a `tool` message must directly follow its
+                # `tool_calls` assistant message, so a sealed message sandwiched
+                # between them would be rejected by strict OpenAI-compatible
+                # endpoints. Sealed here it becomes a valid trailing assistant
+                # message before the next round.
+                session.seal_round_reasoning()
+
                 # Loop continues back to `while True` to submit the tool
                 # execution results back to the LLM.
                 continue
@@ -262,4 +270,5 @@ class AgentRuntime:
                     "event": "system.finished.standard",
                     "reason": stream_finished_reason,
                 }
+                session.seal_round_reasoning()
                 break

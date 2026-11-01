@@ -286,9 +286,9 @@ class EventPump:
     def _handle_reasoning(self, agent_id: int, event: Mapping[str, Any]) -> None:
         """Feed main-agent reasoning deltas to the UI; drop background ones.
 
-        Reasoning is display-only: it never touches the transcript stream or
-        the session history, and a background agent's reasoning is dropped
-        exactly like its prose.
+        The pump's role is display-only: it renders the reasoning preview and
+        nothing else. History persistence happens in the runtime, which feeds
+        the same deltas into the session for replay in the next request.
 
         Args:
             agent_id: Id of the emitting agent.
