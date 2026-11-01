@@ -2,7 +2,8 @@
 
 Credentials are resolved per key from four layers, highest first:
 
-1. command line flags (``--api-key``, ``--base-url``, ``--model``, ``--timeout``)
+1. command line flags (``--api-key``, ``--base-url``, ``--model``, ``--timeout``,
+   ``--reasoning-effort``)
 2. process environment (``MITOCODE_*``, then the ``OPENAI_*`` aliases)
 3. a ``.env`` file in the workspace root (parsed without touching ``os.environ``)
 4. the read-only local secret file ``<workspace>/.mitocode/secret/provider.json``
@@ -41,6 +42,23 @@ _API_KEY_NAMES: Tuple[str, ...] = ("MITOCODE_API_KEY", "OPENAI_API_KEY")
 _BASE_URL_NAMES: Tuple[str, ...] = ("MITOCODE_BASE_URL", "OPENAI_BASE_URL")
 _MODEL_NAMES: Tuple[str, ...] = ("MITOCODE_MODEL",)
 _TIMEOUT_NAMES: Tuple[str, ...] = ("MITOCODE_TIMEOUT",)
+_REASONING_EFFORT_NAMES: Tuple[str, ...] = ("MITOCODE_REASONING_EFFORT",)
+"""Environment (and dotenv) variable names for the reasoning effort tier.
+
+No ``OPENAI_*`` alias exists: unlike the API key and base URL there is no
+de-facto standard variable for this setting.
+"""
+
+KNOWN_REASONING_EFFORTS = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
+"""Effort tiers commonly understood by OpenAI-compatible endpoints.
+
+A value outside this set is still accepted and passed through — different
+endpoints expose private tiers — but it triggers a startup warning, because
+a misspelled tier would otherwise only fail (or be silently ignored) at the
+endpoint.
+"""
 
 _SOURCE_FLAGS = "flags"
 _SOURCE_ENVIRONMENT = "environment"
@@ -62,6 +80,8 @@ class ProviderConfig:
         base_url: Provider endpoint, or ``None`` to use the provider default.
         model: Model name to use for chat requests.
         timeout: Request timeout in seconds, always positive.
+        reasoning_effort: Lowercase reasoning effort tier, or ``None`` when
+            no layer supplied one. Not a secret.
         source: Layer that supplied ``api_key``: one of ``flags``,
             ``environment``, ``dotenv``, ``secret`` or ``default``.
     """
@@ -70,6 +90,7 @@ class ProviderConfig:
     base_url: Optional[str] = None
     model: str = ""
     timeout: float = DEFAULT_TIMEOUT
+    reasoning_effort: Optional[str] = None
     source: str = _SOURCE_DEFAULT
 
 
@@ -145,6 +166,21 @@ def resolve_provider_config(
         (_SOURCE_SECRET, secret.get("model")),
     )
     timeout = _resolve_timeout(args.timeout, environment, dotenv, secret)
+    reasoning_effort, reasoning_effort_source = _first_text(
+        (_SOURCE_FLAGS, args.reasoning_effort),
+        (_SOURCE_ENVIRONMENT, _first_env(environment, _REASONING_EFFORT_NAMES)),
+        (_SOURCE_DOTENV, _first_env(dotenv, _REASONING_EFFORT_NAMES)),
+        (_SOURCE_SECRET, _as_text(secret.get("reasoning_effort"))),
+    )
+    if reasoning_effort is not None:
+        reasoning_effort = reasoning_effort.lower()
+        if reasoning_effort not in KNOWN_REASONING_EFFORTS:
+            loguru_logger.warning(
+                "reasoning_effort from {} is not a known tier ({}); "
+                "passing it through unchanged",
+                _describe_reasoning_layer(reasoning_effort_source),
+                ", ".join(sorted(KNOWN_REASONING_EFFORTS)),
+            )
 
     missing = [
         name for name, value in (("api_key", api_key), ("model", model)) if not value
@@ -168,6 +204,7 @@ def resolve_provider_config(
         base_url=base_url,
         model=model,
         timeout=timeout,
+        reasoning_effort=reasoning_effort,
         source=source or _SOURCE_DEFAULT,
     )
 
@@ -266,6 +303,25 @@ def _resolve_timeout(
             "must be a finite number of seconds greater than zero"
         )
     return timeout
+
+
+def _describe_reasoning_layer(source: Optional[str]) -> str:
+    """Describe the configuration layer a reasoning effort came from.
+
+    Args:
+        source: Layer name from :data:`_SOURCE_FLAGS` and friends.
+
+    Returns:
+        A short help-oriented description, e.g. ``"--reasoning-effort"`` for
+        flags, naming files and variables but never the value itself.
+    """
+    if source == _SOURCE_FLAGS:
+        return "--reasoning-effort"
+    if source == _SOURCE_ENVIRONMENT:
+        return "the " + "/".join(_REASONING_EFFORT_NAMES) + " environment variable"
+    if source == _SOURCE_DOTENV:
+        return "the " + DOTENV_FILENAME + " file"
+    return "the " + SECRET_RELATIVE_PATH.as_posix() + " file"
 
 
 def _describe_layer(source: Optional[str]) -> str:
@@ -392,6 +448,7 @@ __all__ = [
     "DEFAULT_TIMEOUT",
     "DOTENV_FILENAME",
     "SECRET_RELATIVE_PATH",
+    "KNOWN_REASONING_EFFORTS",
     "ProviderConfig",
     "dotenv_values",
     "resolve_provider_config",
