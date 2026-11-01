@@ -185,6 +185,5 @@ docs/superpowers
 .DS_Store
 bubble_sort.py
 
-# MitoCode local credentials and logs (never commit)
-.mitocode/secret/
-.mitocode/logs/
+# MitoCode local state, credentials and logs (never commit)
+.mitocode/
