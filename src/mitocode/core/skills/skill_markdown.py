@@ -27,7 +27,9 @@ import yaml
 from mitocode.core.exception.mitocode_exception import MitoCodeSkillDefinitionError
 
 #: Skill names are lowercase alphanumeric words joined by single hyphens.
-_NAME_PATTERN = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+#: Matched with :func:`re.fullmatch` — an ``$``-anchored :meth:`re.Pattern.match`
+#: would admit a single trailing newline, which ``$`` accepts.
+_NAME_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 #: Longest accepted ``name`` value, in characters.
 _MAX_NAME_LENGTH = 64
@@ -144,8 +146,11 @@ def parse_skill_markdown(
 
     try:
         parsed = yaml.safe_load(raw)
-    except yaml.YAMLError as exc:
-        raise MitoCodeSkillDefinitionError("frontmatter is not valid YAML") from exc
+    except yaml.YAMLError:
+        # The dropped cause's own text quotes raw frontmatter lines, and the
+        # never-quote promise covers tracebacks too; the field-plus-rule
+        # message carries the diagnosis.
+        raise MitoCodeSkillDefinitionError("frontmatter is not valid YAML") from None
     if not isinstance(parsed, dict):
         raise MitoCodeSkillDefinitionError(
             "frontmatter must be a YAML mapping, got " + type(parsed).__name__
@@ -186,7 +191,7 @@ def _require_name(parsed: Mapping[str, Any], expected_name: Optional[str]) -> st
     name = parsed["name"]
     if not isinstance(name, str):
         raise MitoCodeSkillDefinitionError("frontmatter field 'name' must be a string")
-    if not name or len(name) > _MAX_NAME_LENGTH or not _NAME_PATTERN.match(name):
+    if not name or len(name) > _MAX_NAME_LENGTH or not _NAME_PATTERN.fullmatch(name):
         raise MitoCodeSkillDefinitionError(
             f"frontmatter field 'name' must be 1..{_MAX_NAME_LENGTH} characters "
             "of lowercase letters, digits and single hyphens, with no leading, "

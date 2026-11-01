@@ -148,9 +148,12 @@ def test_parse_skill_markdown_non_mapping_frontmatter_raises(raw_block):
 
 
 def test_parse_skill_markdown_invalid_yaml_syntax_raises():
-    """Syntactically invalid YAML between the fences raises."""
-    with pytest.raises(MitoCodeSkillDefinitionError):
+    """Syntactically invalid YAML between the fences raises, cause chain suppressed."""
+    with pytest.raises(MitoCodeSkillDefinitionError) as excinfo:
         parse_skill_markdown('---\nname: "unterminated\n---\nbody\n')
+    # The yaml cause's text quotes raw frontmatter lines; the never-quote rule
+    # must hold even in a traceback, so the chain is deliberately cut.
+    assert excinfo.value.__cause__ is None
 
 
 @pytest.mark.parametrize(
@@ -200,6 +203,19 @@ def test_parse_skill_markdown_name_of_exactly_64_chars_accepted():
     name = "a" * 64
     fm = parse_skill_markdown(f"---\nname: {name}\ndescription: d\n---\nbody\n")
     assert fm.name == name
+
+
+def test_parse_skill_markdown_name_with_trailing_newline_raises():
+    """A name carrying a trailing newline violates the pattern and raises.
+
+    Python's ``$`` matches just before a final newline, so an anchored
+    ``match()`` alone would admit ``"abc\\n"``; the check must span the
+    entire string.
+    """
+    text = '---\nname: "abc\\n"\ndescription: d\n---\nbody\n'
+    with pytest.raises(MitoCodeSkillDefinitionError) as excinfo:
+        parse_skill_markdown(text)
+    assert "name" in str(excinfo.value)
 
 
 def test_parse_skill_markdown_name_mismatch_with_expected_name_raises():

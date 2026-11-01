@@ -63,7 +63,19 @@ class SkillsManager:
         Args:
             roots: Directories to scan, in precedence order, as accepted by
                 the class docstring.
+
+        Raises:
+            TypeError: If *roots* is a bare string (or bytes).  A string is
+                technically a sequence of strings, so accepting it here would
+                silently scan one character per root; the caller almost
+                certainly meant a one-element list.
         """
+        if isinstance(roots, (str, bytes)):
+            raise TypeError(
+                "roots must be a sequence of str, Path or SkillRoot entries, "
+                "not a single string: a bare string would be scanned one "
+                "character at a time"
+            )
         normalised: List[SkillRoot] = []
         for root in roots:
             if isinstance(root, SkillRoot):

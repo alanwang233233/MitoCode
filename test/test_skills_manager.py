@@ -44,6 +44,12 @@ def test_skills_manager_init_normalises_bare_path_and_str_roots_to_empty_label(
     )
 
 
+def test_skills_manager_rejects_bare_string_roots():
+    """A bare string passed as roots raises instead of being scanned per character."""
+    with pytest.raises(TypeError, match="sequence"):
+        SkillsManager("/some/skills/dir")
+
+
 @pytest.mark.asyncio
 async def test_skills_manager_discover_finds_skills_under_two_roots_with_source_labels(
     tmp_path,

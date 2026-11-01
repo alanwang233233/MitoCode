@@ -1,7 +1,7 @@
 """Custom exception hierarchy for MitoCode.
 
-All application errors derive from :class:`MitoCodeBaseError`, organized
-into workspace-related and tool-related branches.
+All application errors derive from :class:`MitoCodeBaseError`, organized into
+one branch per subsystem: workspace, tool, chat provider, MCP, and skills.
 """
 
 import builtins
