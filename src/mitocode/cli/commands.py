@@ -412,7 +412,10 @@ async def _cmd_status(ctx: CommandContext, args: List[str]) -> CommandResult:
     table.add_row("model", Text(_model_name(state)))
     table.add_row(
         "effort",
-        Text(str(getattr(state.provider, "reasoning_effort", None) or "default")),
+        Text(
+            str(getattr(state.provider, "reasoning_effort", None))
+            or "default (not sent)"
+        ),
     )
     table.add_row("workspace", Text(_workspace_path(state)))
     table.add_row("messages", Text(str(len(getattr(session, "messages", []) or []))))

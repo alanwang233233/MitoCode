@@ -677,9 +677,13 @@ async def test_effort_show_set_warn_and_clear(tmp_path):
 
 @pytest.mark.asyncio
 async def test_status_shows_effort_row(tmp_path):
-    """/status 表格包含 effort 行."""
+    """/status 表格包含 effort 行；未设置时按规格显示 default (not sent)."""
     ctx, buffer = _ctx(tmp_path, answers=[])
     ctx.state.provider.reasoning_effort = "high"
     await dispatch("/status", ctx)
     assert "effort" in buffer.getvalue()
     assert "high" in buffer.getvalue()
+
+    ctx2, buffer2 = _ctx(tmp_path, answers=[])
+    await dispatch("/status", ctx2)
+    assert "not sent" in buffer2.getvalue()
