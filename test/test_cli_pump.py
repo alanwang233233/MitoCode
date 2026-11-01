@@ -59,6 +59,7 @@ class _RecordingUI:
         tool_results: One record per ``finish_tool`` call.
         notes: Messages passed to ``note``, in order.
         errors: Messages passed to ``error``, in order.
+        reasoning_ops: ``("feed", delta)`` / ``("end", "")`` records, in order.
         prompt_active: Always false; the pump never asks for input.
         verbose: Whether full tool output was requested.
         agent_count: Number of agents shown in the toolbar.
@@ -75,9 +76,22 @@ class _RecordingUI:
         self.tool_results = []
         self.notes = []
         self.errors = []
+        self.reasoning_ops = []
         self.prompt_active = False
         self.verbose = verbose
         self.agent_count = 1
+
+    def feed_reasoning(self, delta: str) -> None:
+        """Record one reasoning delta fed by the pump.
+
+        Args:
+            delta: Reasoning text handed to the UI.
+        """
+        self.reasoning_ops.append(("feed", delta))
+
+    def end_reasoning(self) -> None:
+        """Record one reasoning collapse requested by the pump."""
+        self.reasoning_ops.append(("end", ""))
 
     def begin_tool(self, call: Text, prefix: str = "") -> None:
         """Record a tool header line.
@@ -727,3 +741,96 @@ async def test_the_pump_survives_a_failure_log_that_itself_fails(tmp_path, monke
     assert ui.stream.feeds == ["still\n"]
     assert not task.done()
     await _stop(task)
+
+
+# ---------------------------------------------------------------------------
+# Reasoning events
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_main_reasoning_feeds_ui_and_background_reasoning_dropped(tmp_path):
+    """主 agent 的思维链喂给 UI；后台 agent 的思维链直接丢弃."""
+    queue: asyncio.Queue = asyncio.Queue()
+    ui = _RecordingUI()
+    pump = EventPump(queue, ui, _state(tmp_path, main_id=0))
+    task = asyncio.create_task(pump.run())
+    queue.put_nowait((0, {"type": "reasoning", "content": "hmm"}))
+    queue.put_nowait((7, {"type": "reasoning", "content": "bg"}))
+    await asyncio.wait_for(pump.wait_idle(), timeout=2)
+    await _stop(task)
+    assert ui.reasoning_ops == [("feed", "hmm")]
+
+
+@pytest.mark.asyncio
+async def test_token_and_tool_start_collapse_reasoning_in_order(tmp_path):
+    """正文 token 与工具开始事件都在渲染前收起思维链区域."""
+    queue: asyncio.Queue = asyncio.Queue()
+    ui = _RecordingUI()
+    pump = EventPump(queue, ui, _state(tmp_path, main_id=0))
+    task = asyncio.create_task(pump.run())
+    queue.put_nowait((0, {"type": "reasoning", "content": "hmm"}))
+    queue.put_nowait((0, {"type": "token", "content": "answer"}))
+    await asyncio.wait_for(pump.wait_idle(), timeout=2)
+    await _stop(task)
+    assert ui.reasoning_ops == [("feed", "hmm"), ("end", "")]
+
+    queue2: asyncio.Queue = asyncio.Queue()
+    ui2 = _RecordingUI()
+    pump2 = EventPump(queue2, ui2, _state(tmp_path, main_id=0))
+    task2 = asyncio.create_task(pump2.run())
+    queue2.put_nowait((0, {"type": "reasoning", "content": "hmm"}))
+    queue2.put_nowait(
+        (
+            0,
+            {
+                "type": "tool_start",
+                "id": "c1",
+                "name": "Read",
+                "args": {"file_path": "a.py"},
+                "display_param": "file_path",
+            },
+        )
+    )
+    await asyncio.wait_for(pump2.wait_idle(), timeout=2)
+    await _stop(task2)
+    assert ui2.reasoning_ops == [("feed", "hmm"), ("end", "")]
+
+
+@pytest.mark.asyncio
+async def test_background_turn_end_does_not_collapse_main_reasoning(tmp_path):
+    """后台 agent 的回合边界不得收起主会话正在进行的思维链."""
+    queue: asyncio.Queue = asyncio.Queue()
+    ui = _RecordingUI()
+    pump = EventPump(queue, ui, _state(tmp_path, main_id=0))
+    task = asyncio.create_task(pump.run())
+    queue.put_nowait((0, {"type": "reasoning", "content": "hmm"}))
+    queue.put_nowait((7, {"type": "turn_end", "reason": "stop"}))
+    await asyncio.wait_for(pump.wait_idle(), timeout=2)
+    await _stop(task)
+    assert ("end", "") not in ui.reasoning_ops
+    assert ui.notes == ["↳ agent #7 finished"]
+
+
+@pytest.mark.asyncio
+async def test_main_turn_end_and_cancel_collapse_reasoning(tmp_path):
+    """主回合结束与取消都收起思维链区域（无泄漏，各一行摘要调用）."""
+    queue: asyncio.Queue = asyncio.Queue()
+    ui = _RecordingUI()
+    pump = EventPump(queue, ui, _state(tmp_path, main_id=0))
+    task = asyncio.create_task(pump.run())
+    queue.put_nowait((0, {"type": "reasoning", "content": "hmm"}))
+    queue.put_nowait((0, {"type": "turn_cancelled"}))
+    await asyncio.wait_for(pump.wait_idle(), timeout=2)
+    await _stop(task)
+    assert ui.reasoning_ops == [("feed", "hmm"), ("end", "")]
+
+    queue2: asyncio.Queue = asyncio.Queue()
+    ui2 = _RecordingUI()
+    pump2 = EventPump(queue2, ui2, _state(tmp_path, main_id=0))
+    task2 = asyncio.create_task(pump2.run())
+    queue2.put_nowait((0, {"type": "reasoning", "content": "hmm"}))
+    queue2.put_nowait((0, {"type": "turn_end", "reason": "stop"}))
+    await asyncio.wait_for(pump2.wait_idle(), timeout=2)
+    await _stop(task2)
+    assert ui2.reasoning_ops == [("feed", "hmm"), ("end", "")]

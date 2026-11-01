@@ -26,6 +26,7 @@ from mitocode.cli.theme import MITOCODE_THEME
 from mitocode.cli.ui import (
     DEFAULT_HISTORY_PATH,
     PROMPT_MESSAGE,
+    SLASH_COMMANDS,
     BannerInfo,
     CliUI,
 )
@@ -391,3 +392,87 @@ def test_build_prompt_session_sets_history_completion_and_toolbar(tmp_path):
     toolbar = session.bottom_toolbar
     rendered = toolbar() if callable(toolbar) else toolbar
     assert "model-x" in str(rendered) and "/help" in str(rendered)
+
+
+# ---------------------------------------------------------------------------
+# Reasoning live region
+# ---------------------------------------------------------------------------
+
+
+def test_feed_reasoning_opens_region_and_inherits_thinking_clock():
+    """首个 reasoning delta 将 thinking spinner 切换为 reasoning 且保留计时起点."""
+    ui, _ = _ui()
+    ui.start_thinking()
+    started = ui._live_started
+    ui.feed_reasoning("step one")
+    assert ui._live_kind == "reasoning"
+    assert ui._live_started == started
+    ui.end_reasoning()
+
+
+def test_end_reasoning_prints_one_summary_and_is_idempotent():
+    """收起恰好打印一行 Thought for 摘要；重复调用不再打印且缓冲清空."""
+    ui, buffer = _ui()
+    ui.feed_reasoning("hmm")
+    ui.feed_reasoning(" more")
+    ui.end_reasoning()
+    ui.end_reasoning()
+    assert buffer.getvalue().count("Thought for") == 1
+    assert ui._reasoning_text == ""
+    assert ui._live_kind is None
+
+
+def test_empty_reasoning_never_opens_region_or_prints_summary():
+    """空 delta 完全被忽略：不开区域、不打印摘要."""
+    ui, buffer = _ui()
+    ui.feed_reasoning("")
+    assert ui._live_kind is None
+    ui.end_reasoning()
+    assert "Thought for" not in buffer.getvalue()
+
+
+def test_reasoning_buffer_is_bounded():
+    """缓冲最多保留最近 2000 字符."""
+    ui, _ = _ui()
+    ui.feed_reasoning("x" * 3000)
+    assert len(ui._reasoning_text) == 2000
+    ui.end_reasoning()
+
+
+def test_reasoning_region_without_prior_thinking_gets_fresh_clock():
+    """无 thinking spinner 时 reasoning 区域自起计时."""
+    ui, _ = _ui()
+    ui.feed_reasoning("direct reasoning, no thinking spinner")
+    assert ui._live_kind == "reasoning"
+    assert ui._live_started is not None
+    ui.end_reasoning()
+
+
+def test_background_begin_tool_keeps_main_thinking_and_reasoning_region():
+    """后台工具头不抢占主会话的 thinking/reasoning 区域；空闲时仍给 spinner."""
+    ui, _ = _ui()
+
+    ui.feed_reasoning("thinking hard")
+    ui.begin_tool(_tool_line(), prefix="↳ bg ")
+    assert ui._live_kind == "reasoning"
+    ui.end_reasoning()
+
+    ui.start_thinking()
+    ui.begin_tool(_tool_line(), prefix="↳ bg ")
+    assert ui._live_kind == "thinking"
+    ui.stop_thinking()
+
+    ui.begin_tool(_tool_line(), prefix="↳ bg ")
+    assert ui._live_kind == "tool"
+    ui.finish_tool(Text("ok"))
+    assert ui._live_kind is None
+
+
+def _tool_line() -> Text:
+    """Build a minimal tool header for begin_tool calls."""
+    return Text("Read a.py")
+
+
+def test_slash_commands_include_effort():
+    """/effort 出现在输入补全命令列表中."""
+    assert "effort" in SLASH_COMMANDS

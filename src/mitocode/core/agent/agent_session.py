@@ -31,6 +31,9 @@ class _PlainTextMessageBlock(_MessageBlock):
         super().__init__()
         self.role: str = role
         self.message: str = message
+        # Replayable reasoning captured before this block was created; only
+        # assistant blocks ever carry it into the standard context.
+        self.reasoning_content: str = ""
         # Text blocks are considered valid for context building immediately
         self.finished: bool = True
 
@@ -48,6 +51,9 @@ class _ToolCallMessageBlock(_MessageBlock):
         self.id = call_id
         self.arguments_string = ""
         self.parameter: Dict[str, Any] = {}
+        # Reasoning streamed before this tool call; replayed on the merged
+        # tool_calls assistant message by build_standard_context.
+        self.reasoning_content: str = ""
 
         self.parse_error: str | None = None
 
@@ -93,7 +99,7 @@ class _ToolResultMessageBlock(_MessageBlock):
         self.finished = True
 
 
-class AgentSession:
+class AgentSession:  # pylint: disable=too-many-instance-attributes
     """Stateful conversation container for one agent.
 
     Holds the message history as a list of internal message blocks, merges
@@ -174,6 +180,11 @@ class AgentSession:
         self.tool_schemas = tool_schemas
         self.tool_manager: ToolManager | None = tool_manager
         self._cancel_event = asyncio.Event()
+        # Reasoning text streamed in the current round that no assistant block
+        # has claimed yet; claimed first-come-first-served by the next block
+        # created for this round, or sealed into a bare assistant message at
+        # finish so it is never silently dropped.
+        self._pending_reasoning: str = ""
 
     def _merge_tools(
         self, tool_manager: ToolManager | None
@@ -250,7 +261,33 @@ class AgentSession:
     def append_user_prompt(self, prompt: str):
         """Adds a user prompt to the context and clears any prior cancellation."""
         self._cancel_event.clear()  # Reset cancellation state before new run
+        # A new user turn starts a fresh round: reasoning left over from an
+        # interrupted round (e.g. a cancellation mid-stream) belongs to no
+        # assistant message and is discarded here.
+        self._pending_reasoning = ""
         self.messages.append(_PlainTextMessageBlock("user", prompt))
+
+    def append_reasoning_delta(self, delta: str):
+        """Accumulates streamed reasoning text for this round's assistant turn.
+
+        The buffer is claimed by the first assistant block created afterwards
+        (text or tool call), or sealed into a bare assistant message by
+        :meth:`seal_round_reasoning` when the round produced nothing else.
+
+        Args:
+            delta: One piece of model reasoning text.
+        """
+        self._pending_reasoning += delta
+
+    def _take_pending_reasoning(self) -> str:
+        """Return the pending reasoning buffer and clear it.
+
+        Returns:
+            The reasoning text accumulated so far in this round, possibly
+            empty.
+        """
+        pending, self._pending_reasoning = self._pending_reasoning, ""
+        return pending
 
     def append_assistant_delta(self, delta: str):
         """Appends streaming text chunks to the latest assistant message."""
@@ -259,34 +296,87 @@ class AgentSession:
             or not isinstance(self.messages[-1], _PlainTextMessageBlock)
             or self.messages[-1].role != "assistant"
         ):
-            self.messages.append(_PlainTextMessageBlock("assistant", delta))
+            block = _PlainTextMessageBlock("assistant", delta)
+            block.reasoning_content = self._take_pending_reasoning()
+            self.messages.append(block)
         else:
             self.messages[-1].append(delta)
 
+    def append_tool_call_block(self, name: str, call_id: str) -> _ToolCallMessageBlock:
+        """Creates and appends a tool call block, claiming pending reasoning.
+
+        Args:
+            name: Tool function name streamed by the provider.
+            call_id: Tool call id streamed by the provider.
+
+        Returns:
+            The newly created block, for the runtime to stream argument
+            chunks into.
+        """
+        block = _ToolCallMessageBlock(name, call_id)
+        block.reasoning_content = self._take_pending_reasoning()
+        self.messages.append(block)
+        return block
+
+    def seal_round_reasoning(self):
+        """Persists unclaimed reasoning as a bare assistant message.
+
+        A round that streamed reasoning but produced neither text nor tool
+        calls would otherwise lose it. Idempotent: with an empty buffer it
+        appends nothing.
+        """
+        if not self._pending_reasoning:
+            return
+        block = _PlainTextMessageBlock("assistant", "")
+        block.reasoning_content = self._take_pending_reasoning()
+        self.messages.append(block)
+
     def build_standard_context(self) -> List[Dict[str, Any]]:
-        """Compiles internal message blocks into a provider-compatible JSON list."""
+        """Compiles internal message blocks into a provider-compatible JSON list.
+
+        Assistant messages replay their streamed reasoning as the OpenAI
+        compatible ``reasoning_content`` field when one was captured: a plain
+        text assistant message carries its own, and a merged ``tool_calls``
+        assistant message takes the first non-empty reasoning among its
+        blocks. The key is omitted entirely when empty, so turns without
+        thinking compile to exactly the same dicts as before.
+        """
         context = []
         tool_calls = []
+        tool_reasoning = ""
+
+        def _flush_tool_calls():
+            """Emit the accumulated tool-call run as one assistant message."""
+            nonlocal tool_calls, tool_reasoning
+            if not tool_calls:
+                return
+            message: Dict[str, Any] = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": tool_calls,
+            }
+            if tool_reasoning:
+                message["reasoning_content"] = tool_reasoning
+            context.append(message)
+            tool_calls = []
+            tool_reasoning = ""
 
         for block in self.messages:
             if not block.finished:
                 continue
 
             if isinstance(block, _PlainTextMessageBlock):
-                if tool_calls:
-                    context.append(
-                        {"role": "assistant", "content": None, "tool_calls": tool_calls}
-                    )
-                    tool_calls = []
-                context.append({"role": block.role, "content": block.message})
+                _flush_tool_calls()
+                message = {"role": block.role, "content": block.message}
+                if block.role == "assistant" and block.reasoning_content:
+                    message["reasoning_content"] = block.reasoning_content
+                context.append(message)
             elif isinstance(block, _ToolCallMessageBlock):
+                if not tool_reasoning and block.reasoning_content:
+                    tool_reasoning = block.reasoning_content
                 tool_calls.append(block.to_standard())
             elif isinstance(block, _ToolResultMessageBlock):
-                if tool_calls:
-                    context.append(
-                        {"role": "assistant", "content": None, "tool_calls": tool_calls}
-                    )
-                    tool_calls = []
+                _flush_tool_calls()
                 context.append(
                     {
                         "role": block.role,
@@ -296,10 +386,7 @@ class AgentSession:
                 )
 
         # Catch any trailing tool calls at the end of the history
-        if tool_calls:
-            context.append(
-                {"role": "assistant", "content": None, "tool_calls": tool_calls}
-            )
+        _flush_tool_calls()
 
         return context
 

@@ -4,11 +4,7 @@ import asyncio
 import inspect
 from typing import AsyncGenerator, Dict, Any
 
-from .agent_session import (
-    AgentSession,
-    _ToolCallMessageBlock,
-    _ToolResultMessageBlock,
-)
+from .agent_session import AgentSession, _ToolResultMessageBlock
 
 from mitocode.core.tool.builtin.context import current_agent_id
 
@@ -48,6 +44,12 @@ class AgentRuntime:
             - agent.text:
                 Streaming text delta from the assistant.
                 Format: {"event": "agent.text", "delta": str}
+
+            - agent.reasoning:
+                Streaming reasoning delta from a thinking model. The delta is
+                also persisted onto the session's pending buffer for replay in
+                the next request; this event drives the UI preview only.
+                Format: {"event": "agent.reasoning", "delta": str}
 
             - agent.tool_call.header:
                 Initializes a tool call with its ID and name.
@@ -104,6 +106,14 @@ class AgentRuntime:
                 delta = chunk.choices[0].delta
                 finish_reason = chunk.choices[0].finish_reason
 
+                # 0. Handle Reasoning (display event + persisted for replay)
+                reasoning_delta = getattr(delta, "reasoning_content", None) or getattr(
+                    delta, "reasoning", None
+                )
+                if isinstance(reasoning_delta, str) and reasoning_delta:
+                    session.append_reasoning_delta(reasoning_delta)
+                    yield {"event": "agent.reasoning", "delta": reasoning_delta}
+
                 # 1. Handle Text
                 if getattr(delta, "content", None):
                     session.append_assistant_delta(delta.content)
@@ -136,10 +146,9 @@ class AgentRuntime:
                             if index not in active_tool_blocks:
                                 call_id = tool_calls_dict[index]["id"]
                                 call_name = tool_calls_dict[index]["name"]
-                                block = _ToolCallMessageBlock(
-                                    name=call_name, call_id=call_id
+                                block = session.append_tool_call_block(
+                                    call_name, call_id
                                 )
-                                session.messages.append(block)
                                 active_tool_blocks[index] = block
                                 yield {
                                     "event": "agent.tool_call.header",
@@ -242,6 +251,14 @@ class AgentRuntime:
                             )
                     raise
 
+                # Seal unclaimed reasoning only AFTER the tool results are in
+                # the history: a `tool` message must directly follow its
+                # `tool_calls` assistant message, so a sealed message sandwiched
+                # between them would be rejected by strict OpenAI-compatible
+                # endpoints. Sealed here it becomes a valid trailing assistant
+                # message before the next round.
+                session.seal_round_reasoning()
+
                 # Loop continues back to `while True` to submit the tool
                 # execution results back to the LLM.
                 continue
@@ -253,4 +270,5 @@ class AgentRuntime:
                     "event": "system.finished.standard",
                     "reason": stream_finished_reason,
                 }
+                session.seal_round_reasoning()
                 break

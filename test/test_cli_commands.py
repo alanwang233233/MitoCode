@@ -32,6 +32,7 @@ EXPECTED_COMMANDS = {
     "help",
     "status",
     "model",
+    "effort",
     "clear",
     "agents",
     "tools",
@@ -729,11 +730,14 @@ async def test_estimate_tokens_counts_message_and_tool_text(tmp_path):
         SimpleNamespace(message="abcdefgh", content="", parameter={}),
         SimpleNamespace(message="", content="1234", parameter={}),
         SimpleNamespace(message="", content="", parameter={"path": "ab"}),
+        SimpleNamespace(
+            message="", content="", parameter={}, reasoning_content="12345678"
+        ),
     ]
     session = _FakeSession(messages=messages)
     ctx = _ctx(tmp_path, orchestrator=_FakeOrchestrator(sessions={0: session}))[0]
 
-    assert ctx.state.estimate_tokens() == 6
+    assert ctx.state.estimate_tokens() == 8
 
 
 @pytest.mark.asyncio
@@ -790,3 +794,42 @@ async def test_skills_command_warns_on_issues_even_with_empty_catalogue(tmp_path
     text = buffer.getvalue()
     assert "No skills installed" in text
     assert "skipped" in text
+
+
+# ---------------------------------------------------------------------------
+# /effort and the /status effort row
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_effort_show_set_warn_and_clear(tmp_path):
+    """/effort 显示当前值、设置档位、警告放行未知档位、default 清除."""
+    ctx, buffer = _ctx(tmp_path, answers=[])
+    ctx.state.provider.reasoning_effort = "high"
+
+    await dispatch("/effort", ctx)
+    assert "high" in buffer.getvalue()
+
+    await dispatch("/effort low", ctx)
+    assert ctx.state.provider.reasoning_effort == "low"
+
+    await dispatch("/effort ultra", ctx)
+    assert ctx.state.provider.reasoning_effort == "ultra"
+    assert "not a known tier" in buffer.getvalue()
+
+    await dispatch("/effort default", ctx)
+    assert ctx.state.provider.reasoning_effort is None
+
+
+@pytest.mark.asyncio
+async def test_status_shows_effort_row(tmp_path):
+    """/status 表格包含 effort 行；未设置时按规格显示 default (not sent)."""
+    ctx, buffer = _ctx(tmp_path, answers=[])
+    ctx.state.provider.reasoning_effort = "high"
+    await dispatch("/status", ctx)
+    assert "effort" in buffer.getvalue()
+    assert "high" in buffer.getvalue()
+
+    ctx2, buffer2 = _ctx(tmp_path, answers=[])
+    await dispatch("/status", ctx2)
+    assert "not sent" in buffer2.getvalue()

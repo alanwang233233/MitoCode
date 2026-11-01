@@ -39,7 +39,11 @@ from loguru import logger as loguru_logger
 from mitocode import APP_VERSION, MITOCODE_CONFIG_PATH
 from mitocode.cli.approval import CliApprover
 from mitocode.cli.args import CliArgs
-from mitocode.cli.config import ProviderConfig, resolve_provider_config
+from mitocode.cli.config import (
+    KNOWN_REASONING_EFFORTS,
+    ProviderConfig,
+    resolve_provider_config,
+)
 from mitocode.cli.errors import MitoCodeCliConfigError
 from mitocode.cli.ui import CliUI
 from mitocode.core.agent.agent_orchestrator import AgentOrchestrator
@@ -562,6 +566,7 @@ async def _create_provider(config: ProviderConfig, ui: CliUI) -> ChatProviderOpe
         "api_key": config.api_key,
         "base_url": config.base_url,
         "timeout": config.timeout,
+        "reasoning_effort": config.reasoning_effort,
     }
     try:
         provider = cast(
@@ -584,6 +589,15 @@ async def _create_provider(config: ProviderConfig, ui: CliUI) -> ChatProviderOpe
             "using it anyway"
         )
     provider.model_list = model_list
+    if (
+        config.reasoning_effort is not None
+        and config.reasoning_effort not in KNOWN_REASONING_EFFORTS
+    ):
+        ui.warn(
+            "reasoning_effort is not a known tier "
+            "(none, minimal, low, medium, high, xhigh, max); "
+            "passing it through anyway"
+        )
     return provider
 
 

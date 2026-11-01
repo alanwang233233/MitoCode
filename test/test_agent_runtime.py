@@ -20,7 +20,10 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mitocode.core.agent.agent_runtime import AgentRuntime
-from mitocode.core.agent.agent_session import AgentSession
+from mitocode.core.agent.agent_session import (
+    AgentSession,
+    _PlainTextMessageBlock,
+)
 from mitocode.core.chat_provider.sample_chat_provider import _SampleChatProvider
 from mitocode.core.tool.builtin.context import current_agent_id
 
@@ -93,13 +96,18 @@ class _Chunk:
         finish_reason: Optional[str] = None,
         tool_calls: Optional[List[_ToolCallChunk]] = None,
         choices: Optional[List[Any]] = None,
+        reasoning_content: Optional[str] = None,
     ):
         if choices is not None:
             self.choices: Any = choices
         else:
             self.choices = [
                 SimpleNamespace(
-                    delta=SimpleNamespace(content=content, tool_calls=tool_calls),
+                    delta=SimpleNamespace(
+                        content=content,
+                        reasoning_content=reasoning_content,
+                        tool_calls=tool_calls,
+                    ),
                     finish_reason=finish_reason,
                 )
             ]
@@ -398,6 +406,161 @@ class TestRunProviderInteraction:
         # Act & Assert
         with pytest.raises(RuntimeError, match="llm down"):
             await _drain_events(AgentRuntime.run(session))
+
+
+# ──────────────────────────────────────────────
+# run(): 思维链（reasoning）流式
+# ──────────────────────────────────────────────
+
+
+class TestRunReasoning:
+    """run() 对思维链 delta 的事件产出与历史隔离测试."""
+
+    @pytest.mark.asyncio
+    async def test_run_reasoning_content_yields_agent_reasoning_events(
+        self, make_session
+    ):
+        """reasoning_content delta → agent.reasoning 事件，且不与正文混淆."""
+        provider = _ScriptedProvider(
+            [
+                [
+                    _Chunk(reasoning_content="想"),
+                    _Chunk(reasoning_content="一下"),
+                    _Chunk(content="答案"),
+                    _Chunk(finish_reason=REASON_STOP),
+                ]
+            ]
+        )
+        session = make_session(provider)
+        events = await _drain_events(AgentRuntime.run(session))
+        assert _events_of_type(events, "agent.reasoning") == [
+            {"event": "agent.reasoning", "delta": "想"},
+            {"event": "agent.reasoning", "delta": "一下"},
+        ]
+        assert _events_of_type(events, "agent.text") == [
+            {"event": "agent.text", "delta": "答案"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_run_reasoning_precedes_content_within_one_chunk(self, make_session):
+        """同一 chunk 内 reasoning 与 content 同时到达 → reasoning 事件在前."""
+        provider = _ScriptedProvider(
+            [
+                [
+                    _Chunk(reasoning_content="r", content="c"),
+                    _Chunk(finish_reason=REASON_STOP),
+                ]
+            ]
+        )
+        events = await _drain_events(AgentRuntime.run(make_session(provider)))
+        kinds = [
+            e["event"]
+            for e in events
+            if e["event"] in ("agent.reasoning", "agent.text")
+        ]
+        assert kinds == ["agent.reasoning", "agent.text"]
+
+    @pytest.mark.asyncio
+    async def test_run_openrouter_reasoning_field_also_consumed(self, make_session):
+        """OpenRouter 风格 delta.reasoning 字段同样产出思维链事件."""
+        chunk = _Chunk(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content=None, tool_calls=None, reasoning="alt"
+                    ),
+                    finish_reason=None,
+                )
+            ]
+        )
+        provider = _ScriptedProvider([[chunk, _Chunk(finish_reason=REASON_STOP)]])
+        events = await _drain_events(AgentRuntime.run(make_session(provider)))
+        assert _events_of_type(events, "agent.reasoning") == [
+            {"event": "agent.reasoning", "delta": "alt"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_run_reasoning_replays_into_standard_context(self, make_session):
+        """修订 v2：思维链随 assistant 消息进入回传上下文."""
+        provider = _ScriptedProvider(
+            [
+                [
+                    _Chunk(reasoning_content="秘密思考"),
+                    _Chunk(content="答案"),
+                    _Chunk(finish_reason=REASON_STOP),
+                ]
+            ]
+        )
+        session = make_session(provider)
+        await _drain_events(AgentRuntime.run(session))
+        last = session.build_standard_context()[-1]
+        assert last["reasoning_content"] == "秘密思考"
+        assert last["content"] == "答案"
+
+    @pytest.mark.asyncio
+    async def test_run_reasoning_before_tool_calls_replays_on_tool_calls_message(
+        self, make_session
+    ):
+        """思考→工具调用场景：思考落在带 tool_calls 的 assistant 消息上."""
+        provider = _ScriptedProvider(
+            [
+                [
+                    _Chunk(reasoning_content="先查天气"),
+                    _Chunk(
+                        tool_calls=[
+                            _ToolCallChunk(
+                                0, call_id=CALL_ID_PRIMARY, name=TOOL_NAME_WEATHER
+                            )
+                        ]
+                    ),
+                    _Chunk(finish_reason=REASON_TOOL_CALLS),
+                ],
+                [_Chunk(content="晴天"), _Chunk(finish_reason=REASON_STOP)],
+            ]
+        )
+        session = make_session(provider)
+        await _drain_events(AgentRuntime.run(session))
+        context = session.build_standard_context()
+        with_calls = [m for m in context if m.get("tool_calls")]
+        assert len(with_calls) == 1
+        assert with_calls[0]["reasoning_content"] == "先查天气"
+        assert context[-1]["content"] == "晴天"
+
+    @pytest.mark.asyncio
+    async def test_run_reasoning_only_round_seals_into_context(self, make_session):
+        """本轮只有思考没有正文/工具调用：封存为空 content 的 assistant 消息."""
+        provider = _ScriptedProvider(
+            [[_Chunk(reasoning_content="白想了"), _Chunk(finish_reason=REASON_STOP)]]
+        )
+        session = make_session(provider)
+        await _drain_events(AgentRuntime.run(session))
+        last = session.build_standard_context()[-1]
+        assert last == {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "白想了",
+        }
+
+    @pytest.mark.asyncio
+    async def test_run_without_reasoning_adds_no_reasoning_key(self, make_session):
+        """普通模型无思考：回传消息不携带 reasoning_content 键."""
+        provider = _ScriptedProvider(
+            [[_Chunk(content="hi"), _Chunk(finish_reason=REASON_STOP)]]
+        )
+        session = make_session(provider)
+        await _drain_events(AgentRuntime.run(session))
+        assert "reasoning_content" not in session.build_standard_context()[-1]
+
+    @pytest.mark.asyncio
+    async def test_run_without_reasoning_fields_yields_no_reasoning_events(
+        self, make_session
+    ):
+        """普通模型无思维链字段 → 零 agent.reasoning 事件."""
+        provider = _ScriptedProvider(
+            [[_Chunk(content="hi"), _Chunk(finish_reason=REASON_STOP)]]
+        )
+        events = await _drain_events(AgentRuntime.run(make_session(provider)))
+        assert _events_of_type(events, "agent.reasoning") == []
 
 
 # ──────────────────────────────────────────────
@@ -1648,3 +1811,102 @@ class TestRunCancelAfterStream:
         ], "流后取消必须在已产出的文本之后补上 system.cancelled，以兑现 run() 的文档契约"
         assert provider.chat_count == 1, "流后取消不应回环再次请求 chat"
         assert session.is_cancelled(), "取消请求本身应保持生效状态"
+
+
+# ──────────────────────────────────────────────
+# run(): 思维链封存与上下文形状
+# ──────────────────────────────────────────────
+
+
+class _CancelAfterReasoningProvider(_SampleChatProvider):
+    """先输出思考 delta，随后在流结束前触发取消的受控 provider."""
+
+    def __init__(self):
+        self.session: Optional[AgentSession] = None
+
+    async def chat(self, tools=None, messages=None, **kwargs):
+        session = self.session
+
+        async def _stream():
+            yield _Chunk(reasoning_content="被打断的思考")
+            session.cancel()
+
+        return _stream()
+
+    async def get_model_list(self):
+        return []
+
+    async def init(self):
+        pass
+
+    @classmethod
+    def get_settings_schema(cls):
+        return {}
+
+    @classmethod
+    def check_settings_schema(cls, settings):
+        return True
+
+
+class TestReasoningSealShape:
+    """封存消息的位置与取消语义测试（修订 v2 评审裁定）."""
+
+    @pytest.mark.asyncio
+    async def test_late_reasoning_in_tool_calls_round_seals_after_tool_results(
+        self, make_session
+    ):
+        """tool_calls 回合中晚到的思考必须封存在工具结果之后，否则破坏
+        OpenAI 形状（tool 消息必须紧跟 tool_calls 消息）."""
+        provider = _ScriptedProvider(
+            [
+                [
+                    _Chunk(
+                        tool_calls=[
+                            _ToolCallChunk(
+                                0, call_id=CALL_ID_PRIMARY, name=TOOL_NAME_WEATHER
+                            )
+                        ]
+                    ),
+                    _Chunk(reasoning_content="晚到的思考"),
+                    _Chunk(finish_reason=REASON_TOOL_CALLS),
+                ],
+                [_Chunk(content="晴天"), _Chunk(finish_reason=REASON_STOP)],
+            ]
+        )
+        session = make_session(provider)
+        await _drain_events(AgentRuntime.run(session))
+        context = session.build_standard_context()
+        tool_result_index = next(
+            i for i, m in enumerate(context) if m.get("role") == "tool"
+        )
+        sealed_index = next(
+            i
+            for i, m in enumerate(context)
+            if m.get("reasoning_content") == "晚到的思考"
+        )
+        assert tool_result_index < sealed_index, (
+            "封存的思考消息必须出现在 tool 结果消息之后，"
+            "否则 tool 消息不再紧跟 tool_calls 消息"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cancelled_round_skips_sealing(self):
+        """取消的回合不封存；遗留思考随下一次用户轮丢弃."""
+        provider = _CancelAfterReasoningProvider()
+        session = AgentSession(provider=provider)
+        provider.session = session
+        session.append_user_prompt("随便问")
+        events = await _drain_events(AgentRuntime.run(session))
+        assert events[-1]["event"] == "system.cancelled"
+        sealed = [
+            b
+            for b in session.messages
+            if isinstance(b, _PlainTextMessageBlock)
+            and b.role == "assistant"
+            and b.message == ""
+            and b.reasoning_content
+        ]
+        assert sealed == [], "取消的回合不得封存空 content 的思考消息"
+        session.append_user_prompt("下一问")
+        session.append_assistant_delta("好的")
+        assert "被打断的思考" not in str(session.build_standard_context())

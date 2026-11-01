@@ -180,3 +180,9 @@ def test_cli_package_exports_only_main():
 
     assert cli.__all__ == ["main"]
     assert callable(cli.main)
+
+
+def test_reasoning_effort_flag_parses_and_defaults_to_none():
+    args = parse_args(["--reasoning-effort", "HIGH"])
+    assert args.reasoning_effort == "HIGH"
+    assert parse_args([]).reasoning_effort is None

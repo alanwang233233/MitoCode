@@ -12,6 +12,20 @@ from mitocode.core.exception.mitocode_exception import (
 from .sample_chat_provider import _SampleChatProvider
 
 
+def normalize_reasoning_effort(raw: object) -> Optional[str]:
+    """Normalize a reasoning effort setting to a lowercase tier or ``None``.
+
+    Args:
+        raw: Value from any configuration layer.
+
+    Returns:
+        The stripped, lowercased tier text, or ``None`` when blank or non-text.
+    """
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip().lower()
+    return None
+
+
 class ChatProviderOpenAI(_SampleChatProvider):
     """Provider subclass backed by the OpenAI Chat Completions API.
 
@@ -21,7 +35,16 @@ class ChatProviderOpenAI(_SampleChatProvider):
     via :meth:`init`, and a :meth:`chat` that either streams chunks through
     an ``AsyncGenerator`` or returns the full completion as a dict in
     OpenAI Chat Completions format, depending on the ``stream`` flag.
+
+    Attributes:
+        reasoning_effort: Lowercase ``reasoning_effort`` tier sent with every
+            chat request, or ``None`` to omit the parameter entirely. Seeded
+            from ``settings["reasoning_effort"]`` by :meth:`init`; the CLI
+            mutates it at runtime (``/effort``).
     """
+
+    reasoning_effort: Optional[str] = None
+    """Class-level default so instances built without ``init()`` stay valid."""
 
     @classmethod
     def get_settings_schema(cls) -> Dict[str, Any]:
@@ -36,6 +59,7 @@ class ChatProviderOpenAI(_SampleChatProvider):
                 "api_key": {"type": "string"},
                 "base_url": {"type": "string"},
                 "timeout": {"type": "number", "minimum": 1},
+                "reasoning_effort": {"type": "string"},
             },
             "required": ["api_key"],
             "additionalProperties": True,
@@ -67,6 +91,9 @@ class ChatProviderOpenAI(_SampleChatProvider):
             api_key=settings.get("api_key", ""),
             base_url=settings.get("base_url", None),
             timeout=settings.get("timeout", 60),
+        )
+        self.reasoning_effort = normalize_reasoning_effort(
+            settings.get("reasoning_effort")
         )
         self.model_list = await self.get_model_list()
 
@@ -151,6 +178,8 @@ class ChatProviderOpenAI(_SampleChatProvider):
         effective_tools = tools if tools is not None else self.default_tools
         if effective_tools:
             req["tools"] = effective_tools
+        if self.reasoning_effort:
+            req["reasoning_effort"] = self.reasoning_effort
 
         if stream:
             req["stream"] = True

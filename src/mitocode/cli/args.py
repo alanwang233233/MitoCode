@@ -33,6 +33,8 @@ class CliArgs:  # pylint: disable=too-many-instance-attributes
         api_key: Provider API key override (never printed by the CLI).
         base_url: Provider endpoint override.
         timeout: Provider request timeout in seconds.
+        reasoning_effort: Reasoning effort tier override (e.g. ``low``),
+            passed through to the provider when set.
         permission_mode: Approval policy for tool calls, one of ``ask``,
             ``allow`` or ``deny``.
         mcp_config: Explicit MCP server configuration file.
@@ -49,6 +51,7 @@ class CliArgs:  # pylint: disable=too-many-instance-attributes
     api_key: Optional[str] = field(default=None, repr=False)
     base_url: Optional[str] = None
     timeout: Optional[float] = None
+    reasoning_effort: Optional[str] = None
     permission_mode: str = "ask"
     mcp_config: Optional[Path] = None
     no_mcp: bool = False
@@ -102,6 +105,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         metavar="SECONDS",
         help="Provider request timeout in seconds.",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        metavar="VALUE",
+        help="Reasoning effort tier, e.g. minimal, low, medium, high.",
     )
 
     permissions = parser.add_mutually_exclusive_group()
@@ -191,6 +199,7 @@ def parse_args(argv: Sequence[str] | None = None) -> CliArgs:
         api_key=namespace.api_key,
         base_url=namespace.base_url,
         timeout=namespace.timeout,
+        reasoning_effort=namespace.reasoning_effort,
         permission_mode=permission_mode,
         mcp_config=namespace.mcp_config,
         no_mcp=namespace.no_mcp,
