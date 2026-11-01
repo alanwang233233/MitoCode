@@ -29,6 +29,7 @@ from mitocode.cli.bootstrap import (
 )
 from mitocode.cli.errors import MitoCodeCliConfigError
 from mitocode.cli.ui import CliUI
+from mitocode.core.skills.skill import Skill, SkillRoot
 from mitocode.core.tool.tool_manager import ToolManager
 from mitocode.core.workspace.workspace import Workspace
 
@@ -181,6 +182,102 @@ def test_system_prompt_names_the_workspace(tmp_path):
     assert str(tmp_path.resolve()) in prompt
     assert "{workspace}" not in prompt
     assert SYSTEM_PROMPT_TEMPLATE.count("{workspace}") == 1
+
+
+def _skill(name: str, description: str) -> Skill:
+    """Build a Skill value with throwaway paths; only the text fields matter."""
+    path = Path("/skills") / name
+    return Skill(
+        name=name,
+        description=description,
+        path=path,
+        skill_md_path=path / "SKILL.md",
+        source="workspace",
+    )
+
+
+def test_build_system_prompt_without_skills_is_the_base_template(tmp_path):
+    """No discovered skills leaves the prompt byte-identical to the base render."""
+    assert build_system_prompt(tmp_path) == build_system_prompt(tmp_path, skills=())
+    assert build_system_prompt(tmp_path) == SYSTEM_PROMPT_TEMPLATE.format(
+        workspace=str(Path(tmp_path).resolve())
+    )
+
+
+def test_build_system_prompt_with_skills_appends_the_catalogue(tmp_path):
+    """A non-empty catalogue appends a section instructing Skill-tool use."""
+    prompt = build_system_prompt(
+        tmp_path, skills=(_skill("alpha", "Do alpha things."),)
+    )
+    base = build_system_prompt(tmp_path)
+
+    assert prompt.startswith(base)
+    assert "## Skills" in prompt
+    assert "- alpha: Do alpha things." in prompt
+    assert "Skill tool" in prompt
+    assert prompt.count(str(tmp_path.resolve())) == 1
+
+
+def test_build_system_prompt_lists_skills_in_catalogue_order(tmp_path):
+    """The section lists one line per skill, in the catalogue's order."""
+    prompt = build_system_prompt(
+        tmp_path,
+        skills=(
+            _skill("alpha", "First."),
+            _skill("beta", "Second."),
+        ),
+    )
+
+    assert prompt.index("- alpha: First.") < prompt.index("- beta: Second.")
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_discovers_workspace_and_user_skills(tmp_path, monkeypatch):
+    """bootstrap serves both roots and hands the manager to prompt and context."""
+    ORDERS.clear()
+    _patch(monkeypatch)
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    skill_dir = tmp_path / ".mitocode" / "skills" / "alpha"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: alpha\ndescription: Do alpha things.\n---\nBody.\n",
+        encoding="utf-8",
+    )
+    ui = _ui()
+
+    result = await bootstrap(
+        _args(workspace=tmp_path, model="m", api_key="k"), ui, CliApprover(ui)
+    )
+
+    assert result.skills_manager.roots() == (
+        SkillRoot("workspace", tmp_path / ".mitocode" / "skills"),
+        SkillRoot("user", home / ".mitocode" / "skills"),
+    )
+    assert result.skills_manager.get("alpha") is not None
+    assert result.tool_context.skills_manager is result.skills_manager
+    prompt = result.orchestrator.kw["system_prompt"]
+    assert "## Skills" in prompt
+    assert "- alpha: Do alpha things." in prompt
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_without_any_skills_leaves_the_prompt_alone(
+    tmp_path, monkeypatch
+):
+    """With no skill installed anywhere, neither prompt nor context changes."""
+    ORDERS.clear()
+    _patch(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    ui = _ui()
+
+    result = await bootstrap(
+        _args(workspace=tmp_path, model="m", api_key="k"), ui, CliApprover(ui)
+    )
+
+    assert "## Skills" not in result.orchestrator.kw["system_prompt"]
+    assert result.orchestrator.kw["system_prompt"].startswith("You are MitoCode")
+    assert result.skills_manager.list_skills() == ()
 
 
 @pytest.mark.asyncio

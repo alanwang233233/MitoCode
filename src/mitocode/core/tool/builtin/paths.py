@@ -150,7 +150,7 @@ async def resolve(
             which operation was refused.  Deliberately **not** validated: the
             action is only displayed and echoed, so an unrecognised verb is
             already inert, and a check here would be a second source of truth
-            for which verbs exist alongside the eleven tool definitions.
+            for which verbs exist alongside the twelve tool definitions.
 
     Returns:
         ``(path, None)`` when the target may be operated on.  *path* is fully

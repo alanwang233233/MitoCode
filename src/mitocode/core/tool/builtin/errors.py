@@ -1,6 +1,6 @@
 """The single error boundary that every built-in tool returns through.
 
-Eleven tools will each fail in their own way — a file that vanished between
+Twelve tools will each fail in their own way — a file that vanished between
 the path check and the open, a regex the model mis-typed, a subprocess that
 died on a signal.  ``AgentRuntime`` awaits a tool, does ``str(result)``, and
 feeds the result straight back to the model: it has no ``try``/``except``
@@ -199,7 +199,7 @@ def tool_boundary(func: ToolFunction) -> ToolFunction:
             return await func(*args, **kwargs)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             # Broad on purpose, and it is the whole point of this decorator:
-            # eleven tools must not be able to drift on which exception types
+            # twelve tools must not be able to drift on which exception types
             # they report, and "every Exception becomes prose" is the
             # contract.  Narrowing it would put the model back at the mercy
             # of whatever a filesystem or a subprocess raised today.

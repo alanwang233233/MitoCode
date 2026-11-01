@@ -226,6 +226,7 @@ async def _amain(args: CliArgs, log_path: Any, console: Console) -> int:
             orchestrator=boot.orchestrator,
             mcp_manager=boot.mcp_manager,
             tool_context=boot.tool_context,
+            skills_manager=boot.skills_manager,
             ui=ui,
             approver=approver,
             workspace_initialized=boot.resolution.initialized,

@@ -85,6 +85,7 @@ def _boot(
         ),
         main_session=SimpleNamespace(agent_id=0),
         mcp_manager=manager,
+        skills_manager=None,
         mcp_error="",
     )
 
