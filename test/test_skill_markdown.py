@@ -368,3 +368,24 @@ def test_parse_skill_markdown_metadata_non_mapping_raises():
     with pytest.raises(MitoCodeSkillDefinitionError) as excinfo:
         parse_skill_markdown(text)
     assert "metadata" in str(excinfo.value)
+
+
+def test_split_frontmatter_strips_a_leading_bom():
+    """A leading UTF-8 BOM does not hide the opening fence."""
+    raw, body = split_frontmatter("\ufeff---\nname: x\n---\nbody")
+    assert raw == "name: x"
+    assert body == "body"
+
+
+def test_parse_skill_markdown_tolerates_leading_utf8_bom():
+    """A BOM-prefixed SKILL.md parses like a plain one.
+
+    Windows editors commonly write a BOM; without stripping it the opening
+    fence is invisible and a valid skill is rejected as having no
+    frontmatter at all.
+    """
+    text = "\ufeff---\nname: bombed\ndescription: d\n---\nbody\n"
+    fm = parse_skill_markdown(text)
+    assert fm.name == "bombed"
+    assert fm.description == "d"
+    assert fm.body == "body"

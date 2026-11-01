@@ -84,7 +84,9 @@ def split_frontmatter(text: str) -> Tuple[Optional[str], str]:
         text after the closing delimiter with leading and trailing empty
         lines stripped.
     """
-    lines = text.splitlines()
+    # A leading UTF-8 BOM (common from Windows editors) would otherwise make
+    # the opening fence invisible and a valid skill read as frontmatter-less.
+    lines = text.removeprefix("\ufeff").splitlines()
     if not lines or lines[0].rstrip() != "---":
         return (None, text)
 

@@ -776,3 +776,17 @@ async def test_init_failure_is_reported_not_raised(tmp_path):
     workspace.dump = lambda: (_ for _ in ()).throw(OSError("disk full"))
     await dispatch("/init", ctx)
     assert "disk full" in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_skills_command_warns_on_issues_even_with_empty_catalogue(tmp_path):
+    """A root holding only broken entries still shows the skipped warning."""
+    root = tmp_path / "skills"
+    (root / "broken").mkdir(parents=True)
+    ctx, buffer = _ctx(tmp_path, skills_manager=await _discovered_manager(root))
+
+    await dispatch("/skills", ctx)
+
+    text = buffer.getvalue()
+    assert "No skills installed" in text
+    assert "skipped" in text

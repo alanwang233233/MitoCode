@@ -1,5 +1,6 @@
 """Tests for mitocode.core.skills.skills_manager (skill discovery/management)."""
 
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -13,7 +14,7 @@ from mitocode.core.exception.mitocode_exception import (
     MitoCodeSkillReadError,
 )
 from mitocode.core.skills.skill import Skill, SkillIssue, SkillRoot
-from mitocode.core.skills.skills_manager import SkillsManager
+from mitocode.core.skills.skills_manager import MAX_SKILL_FILE_BYTES, SkillsManager
 
 
 def _skill_md(name, description="A test skill.", body="Step one.\n\nStep two."):
@@ -331,3 +332,160 @@ async def test_skills_manager_discover_unlistable_skill_dir_yields_issue(tmp_pat
         assert "cannot list the skill directory" in issues[0].detail
     finally:
         locked.chmod(0o755)
+
+
+@pytest.mark.asyncio
+async def test_discover_refuses_fifo_skill_md_instead_of_blocking(tmp_path):
+    """A FIFO standing in for SKILL.md becomes an issue; it is never opened."""
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("staging the named-pipe case needs POSIX FIFOs")
+    root = tmp_path / "root"
+    entry = root / "locked"
+    entry.mkdir(parents=True)
+    os.mkfifo(entry / "SKILL.md")
+    manager = SkillsManager([root])
+
+    await asyncio.wait_for(manager.discover(), timeout=10)
+
+    issues = manager.issues()
+    assert len(issues) == 1
+    assert issues[0].path == entry / "SKILL.md"
+    assert manager.list_skills() == ()
+
+
+@pytest.mark.asyncio
+async def test_read_skill_refuses_fifo_swapped_in_after_discovery(tmp_path):
+    """A SKILL.md swapped to a FIFO after discovery is a read error, not a hang."""
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("staging the named-pipe case needs POSIX FIFOs")
+    root = tmp_path / "root"
+    entry = _write_skill(root, "alpha", _skill_md("alpha"))
+    manager = SkillsManager([root])
+    await manager.discover()
+    (entry / "SKILL.md").unlink()
+    os.mkfifo(entry / "SKILL.md")
+
+    with pytest.raises(MitoCodeSkillReadError):
+        await asyncio.wait_for(manager.read_skill("alpha"), timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_discover_refuses_oversized_skill_md_from_its_size_alone(tmp_path):
+    """A SKILL.md above the read cap is refused from st_size, never loaded."""
+    root = tmp_path / "root"
+    entry = root / "big"
+    entry.mkdir(parents=True)
+    (entry / "SKILL.md").write_text(
+        "---\nname: big\ndescription: d\n---\n" + "x" * (MAX_SKILL_FILE_BYTES + 1),
+        encoding="utf-8",
+    )
+    manager = SkillsManager([root])
+
+    await manager.discover()
+
+    issues = manager.issues()
+    assert len(issues) == 1
+    assert issues[0].path == entry / "SKILL.md"
+    assert manager.list_skills() == ()
+
+
+@pytest.mark.asyncio
+async def test_read_skill_refuses_a_file_grown_past_the_cap(tmp_path):
+    """A SKILL.md that grows past the cap after discovery is a read error."""
+    root = tmp_path / "root"
+    entry = _write_skill(root, "alpha", _skill_md("alpha"))
+    manager = SkillsManager([root])
+    await manager.discover()
+    (entry / "SKILL.md").write_text(
+        "---\nname: alpha\ndescription: d\n---\n" + "x" * (MAX_SKILL_FILE_BYTES + 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(MitoCodeSkillReadError):
+        await manager.read_skill("alpha")
+
+
+@pytest.mark.asyncio
+async def test_read_skill_accepts_a_file_at_exactly_the_cap(tmp_path):
+    """The size boundary is inclusive: a SKILL.md of exactly the cap reads."""
+    root = tmp_path / "root"
+    entry = root / "alpha"
+    entry.mkdir(parents=True)
+    header = f"---\nname: alpha\ndescription: d\n---\n"
+    (entry / "SKILL.md").write_text(
+        header + "x" * (MAX_SKILL_FILE_BYTES - len(header)), encoding="utf-8"
+    )
+    manager = SkillsManager([root])
+    await manager.discover()
+
+    assert len(await manager.read_skill("alpha")) == MAX_SKILL_FILE_BYTES - len(header)
+
+
+@pytest.mark.asyncio
+async def test_discover_refuses_symlinked_skill_directory(tmp_path):
+    """A skill directory that is a symlink is an issue; it is never followed."""
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    (real / "SKILL.md").write_text(_skill_md("link"), encoding="utf-8")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "link").symlink_to(real, target_is_directory=True)
+    manager = SkillsManager([root])
+
+    await manager.discover()
+
+    issues = manager.issues()
+    assert len(issues) == 1
+    assert issues[0].path == root / "link"
+    assert manager.list_skills() == ()
+
+
+@pytest.mark.asyncio
+async def test_discover_refuses_symlinked_skill_md(tmp_path):
+    """A symlinked SKILL.md inside an ordinary directory is an issue."""
+    target = tmp_path / "real-skill.md"
+    target.write_text(_skill_md("alpha"), encoding="utf-8")
+    root = tmp_path / "root"
+    entry = root / "alpha"
+    entry.mkdir(parents=True)
+    (entry / "SKILL.md").symlink_to(target)
+    manager = SkillsManager([root])
+
+    await manager.discover()
+
+    issues = manager.issues()
+    assert len(issues) == 1
+    assert issues[0].path == entry / "SKILL.md"
+    assert manager.list_skills() == ()
+
+
+@pytest.mark.asyncio
+async def test_read_skill_refuses_a_file_that_left_the_roots_after_discovery(tmp_path):
+    """A SKILL.md re-pointed outside the roots after discovery is refused."""
+    root = tmp_path / "root"
+    entry = _write_skill(root, "alpha", _skill_md("alpha"))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.md"
+    secret.write_text("do not read", encoding="utf-8")
+    manager = SkillsManager([root])
+    await manager.discover()
+    (entry / "SKILL.md").unlink()
+    (entry / "SKILL.md").symlink_to(secret)
+
+    with pytest.raises(MitoCodeSkillReadError):
+        await manager.read_skill("alpha")
+
+
+@pytest.mark.asyncio
+async def test_read_skill_still_serves_a_file_swapped_within_the_roots(tmp_path):
+    """A regular in-roots swap keeps read_skill working; revalidation is not a freeze."""
+    root = tmp_path / "root"
+    entry = _write_skill(root, "alpha", _skill_md("alpha"))
+    manager = SkillsManager([root])
+    await manager.discover()
+    (entry / "SKILL.md").write_text(
+        _skill_md("alpha", body="Fresh body."), encoding="utf-8"
+    )
+
+    assert await manager.read_skill("alpha") == "Fresh body."

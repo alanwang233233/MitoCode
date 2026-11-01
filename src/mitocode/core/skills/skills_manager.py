@@ -21,6 +21,7 @@ workspace's ``.mitocode/skills`` or a user-level directory is the caller's
 """
 
 import asyncio
+import stat
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
@@ -32,7 +33,11 @@ from mitocode.core.exception.mitocode_exception import (
     MitoCodeSkillReadError,
 )
 from mitocode.core.skills.skill import Skill, SkillIssue, SkillRoot
-from mitocode.core.skills.skill_markdown import parse_skill_markdown, split_frontmatter
+from mitocode.core.skills.skill_markdown import (
+    SkillFrontmatter,
+    parse_skill_markdown,
+    split_frontmatter,
+)
 
 logger = loguru_logger.bind(name=__name__)
 
@@ -40,6 +45,49 @@ logger = loguru_logger.bind(name=__name__)
 #: case-sensitively by name, never by ``is_file()``, which on a
 #: case-insensitive filesystem would also accept ``skill.md``.
 _SKILL_FILE_NAME = "SKILL.md"
+
+#: Largest accepted ``SKILL.md``, checked from ``st_size`` before anything is
+#: opened — the same guard the file tools apply, and for the same reason: the
+#: body is loaded whole before any consumer clamps it, so the output budget
+#: does not bound the read itself.
+MAX_SKILL_FILE_BYTES = 10 * 1024 * 1024
+
+
+def _read_skill_text(path: Path) -> str:
+    """Read one SKILL.md with the file tools' admission checks applied.
+
+    A named pipe would block the reading thread forever, a directory or a
+    symlink is not the text file a skill entry promises, and an oversized
+    regular file would be loaded whole only to be clamped afterwards — so
+    all three are refused from the ``lstat`` result before anything is
+    opened, mirroring ``fs_tools``' regular-file and 10 MiB-size checks.
+    ``lstat`` rather than ``stat`` is deliberate: a symlinked SKILL.md is
+    refused outright, in step with discovery's symlink rejection.
+
+    Args:
+        path: The SKILL.md file to read.
+
+    Returns:
+        The file's decoded text.
+
+    Raises:
+        MitoCodeSkillReadError: If the path is not a regular file, is above
+            :data:`MAX_SKILL_FILE_BYTES`, or cannot be read or decoded.
+    """
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise MitoCodeSkillReadError(f"SKILL.md at {path} is not a regular file")
+        if info.st_size > MAX_SKILL_FILE_BYTES:
+            raise MitoCodeSkillReadError(
+                f"SKILL.md at {path} is {info.st_size} bytes, above the "
+                f"{MAX_SKILL_FILE_BYTES}-byte read cap"
+            )
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise MitoCodeSkillReadError(
+            f"SKILL.md at {path} cannot be read: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 class SkillsManager:
@@ -158,7 +206,12 @@ class SkillsManager:
         Progressive-disclosure level 2.  The file is re-read on every call
         and its frontmatter block, when structurally present, is stripped;
         field validation is deliberately not repeated, so a file edited after
-        the scan still yields its instructions.
+        the scan still yields its instructions.  Two things *are* re-checked
+        on every read, because a scan-time verdict can go stale: the file
+        must still resolve inside the scanned roots, and it must pass the
+        regular-file and size admission checks — a SKILL.md swapped for a
+        symlink, a named pipe or an oversized file after discovery is
+        refused, never read.
 
         Args:
             name: A skill name as returned by :meth:`discover`.
@@ -172,7 +225,9 @@ class SkillsManager:
             MitoCodeSkillNotFoundError: If *name* is not in the current
                 catalogue.
             MitoCodeSkillReadError: If the skill's file cannot be read from
-                disk (deleted, permission denied, decoding failure).
+                disk (deleted, permission denied, decoding failure), is not
+                a regular file or an admitted size, or no longer resolves
+                inside the scanned roots.
         """
         skill = self.get(name)
         if skill is None:
@@ -180,17 +235,44 @@ class SkillsManager:
                 f"unknown skill {name!r}: not in the catalogue; run discover() "
                 "and check the name"
             )
-        try:
-            text = await asyncio.to_thread(
-                skill.skill_md_path.read_text, encoding="utf-8"
-            )
-        except (OSError, UnicodeDecodeError) as exc:
+        if not self._resolved_within_roots(skill.skill_md_path):
             raise MitoCodeSkillReadError(
-                f"cannot read the SKILL.md of skill {name!r}: "
-                f"{type(exc).__name__}: {exc}"
+                f"cannot read the SKILL.md of skill {name!r}: it no longer "
+                "resolves inside the scanned skill roots"
+            )
+        try:
+            text = await asyncio.to_thread(_read_skill_text, skill.skill_md_path)
+        except MitoCodeSkillReadError as exc:
+            raise MitoCodeSkillReadError(
+                f"cannot read the SKILL.md of skill {name!r}: {exc}"
             ) from exc
         _raw, body = split_frontmatter(text)
         return body
+
+    def _resolved_within_roots(self, path: Path) -> bool:
+        """Report whether *path*'s full resolution stays inside the scan roots.
+
+        The containment re-read :meth:`read_skill` needs: discovery admitted
+        the file, but the tree can change underneath it, and a symlink
+        swapped in afterwards would otherwise serve whatever it points at.
+        Resolving and comparing against the resolved roots covers a symlinked
+        file, a symlinked ancestor directory and any ``..`` climb in one
+        check; a symlink loop, which cannot be resolved, counts as outside.
+
+        Args:
+            path: The skill file to re-check.
+
+        Returns:
+            True only when the fully resolved path lies under at least one
+            scanned root's own full resolution.
+        """
+        try:
+            resolved = path.resolve()
+        except (OSError, RuntimeError):
+            # RuntimeError is a symlink loop on 3.10-3.12; either way the
+            # path cannot be served.
+            return False
+        return any(resolved.is_relative_to(root.path.resolve()) for root in self._roots)
 
     def _scan(self) -> Tuple[Tuple[Skill, ...], Tuple[SkillIssue, ...]]:
         """Walk the roots and collect the catalogue and issues.
@@ -264,10 +346,14 @@ class SkillsManager:
     ) -> None:
         """Judge one candidate skill directory.
 
-        An entry becomes a skill only when it holds a case-sensitively named
-        ``SKILL.md`` whose contents validate; every other outcome appends an
-        issue.  A name an earlier root already claimed is shadowed: recorded
-        as an issue and skipped, the earlier root's skill standing.
+        An entry becomes a skill only when it holds a case-sensitively named,
+        non-symlink ``SKILL.md`` whose contents validate; every other outcome
+        appends an issue.  Symlinked entries — the directory itself or the
+        file — are refused rather than followed: a skill's body is served to
+        the model later by name, and a link planted where the user saw an
+        innocent directory must not turn into an arbitrary-file read.  A
+        name an earlier root already claimed is shadowed: recorded as an
+        issue and skipped, the earlier root's skill standing.
 
         Args:
             root: The root the entry was found under.
@@ -277,39 +363,11 @@ class SkillsManager:
             claimed: Skill names already taken by an earlier root, mapped to
                 a string identifying the winning root.
         """
-        try:
-            children = {child.name for child in entry.iterdir()}
-        except OSError as exc:
-            issues.append(
-                SkillIssue(
-                    path=entry,
-                    detail=f"cannot list the skill directory: "
-                    f"{type(exc).__name__}: {exc}",
-                )
-            )
+        skill_md = self._locate_skill_file(entry, issues)
+        if skill_md is None:
             return
-        if _SKILL_FILE_NAME not in children:
-            issues.append(
-                SkillIssue(path=entry, detail="directory contains no SKILL.md")
-            )
-            return
-
-        skill_md = entry / _SKILL_FILE_NAME
-        try:
-            text = skill_md.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            issues.append(
-                SkillIssue(
-                    path=skill_md,
-                    detail=f"cannot read SKILL.md: {type(exc).__name__}: {exc}",
-                )
-            )
-            return
-
-        try:
-            parsed = parse_skill_markdown(text, expected_name=entry.name)
-        except MitoCodeSkillDefinitionError as exc:
-            issues.append(SkillIssue(path=skill_md, detail=str(exc)))
+        parsed = self._load_skill_markdown(entry, skill_md, issues)
+        if parsed is None:
             return
 
         if parsed.name in claimed:
@@ -335,3 +393,88 @@ class SkillsManager:
                 metadata=dict(parsed.metadata),
             )
         )
+
+    def _locate_skill_file(
+        self, entry: Path, issues: List[SkillIssue]
+    ) -> Optional[Path]:
+        """Reject an inadmissible directory and return its SKILL.md path.
+
+        The structural half of admission: symlinked directories, unlistable
+        directories, directories without the skill file, and symlinked skill
+        files all fail here, before any content is read.
+
+        Args:
+            entry: The candidate skill directory.
+            issues: Issue accumulator; an entry rejected here appends its
+                issue and the caller skips it.
+
+        Returns:
+            The SKILL.md path to load, or ``None`` when the directory is not
+            admissible.
+        """
+        if entry.is_symlink():
+            issues.append(
+                SkillIssue(
+                    path=entry,
+                    detail="skill directory is a symlink; symlinks are not admitted",
+                )
+            )
+            return None
+        try:
+            children = {child.name for child in entry.iterdir()}
+        except OSError as exc:
+            issues.append(
+                SkillIssue(
+                    path=entry,
+                    detail=f"cannot list the skill directory: "
+                    f"{type(exc).__name__}: {exc}",
+                )
+            )
+            return None
+        if _SKILL_FILE_NAME not in children:
+            issues.append(
+                SkillIssue(path=entry, detail="directory contains no SKILL.md")
+            )
+            return None
+
+        skill_md = entry / _SKILL_FILE_NAME
+        if skill_md.is_symlink():
+            issues.append(
+                SkillIssue(
+                    path=skill_md,
+                    detail="SKILL.md is a symlink; symlinks are not admitted",
+                )
+            )
+            return None
+        return skill_md
+
+    def _load_skill_markdown(
+        self, entry: Path, skill_md: Path, issues: List[SkillIssue]
+    ) -> Optional[SkillFrontmatter]:
+        """Read and validate one located SKILL.md.
+
+        The content half of admission: the admission-checked read, then full
+        frontmatter validation against the directory name.
+
+        Args:
+            entry: The candidate skill directory, supplying the expected name.
+            skill_md: The located SKILL.md path from
+                :meth:`_locate_skill_file`.
+            issues: Issue accumulator; an entry rejected here appends its
+                issue and the caller skips it.
+
+        Returns:
+            The validated frontmatter, or ``None`` when the file is not
+            admissible.
+        """
+        try:
+            text = _read_skill_text(skill_md)
+        except MitoCodeSkillReadError as exc:
+            issues.append(SkillIssue(path=skill_md, detail=str(exc)))
+            return None
+
+        try:
+            return parse_skill_markdown(text, expected_name=entry.name)
+        except MitoCodeSkillDefinitionError as exc:
+            issues.append(SkillIssue(path=skill_md, detail=str(exc)))
+            return None

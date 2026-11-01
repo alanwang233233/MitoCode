@@ -611,6 +611,12 @@ async def _cmd_skills(ctx: CommandContext, args: List[str]) -> CommandResult:
         return CommandResult()
 
     skills = manager.list_skills()
+    issues = manager.issues()
+    if issues:
+        ctx.ui.warn(
+            f"{len(issues)} skill entries were skipped during discovery; "
+            "details are in the log."
+        )
     if not skills:
         # User-level discovery (~/.mitocode/skills) is temporarily disabled
         # in bootstrap.skills_roots, so only the workspace path is advertised.
@@ -630,13 +636,6 @@ async def _cmd_skills(ctx: CommandContext, args: List[str]) -> CommandResult:
             Text(skill.name), Text(skill.source or "—"), Text(skill.description)
         )
     ctx.ui.console.print(table)
-
-    issues = manager.issues()
-    if issues:
-        ctx.ui.warn(
-            f"{len(issues)} skill entries were skipped during discovery; "
-            "details are in the log."
-        )
     return CommandResult()
 
 
