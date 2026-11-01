@@ -1819,7 +1819,7 @@ class TestRunCancelAfterStream:
 
 
 class _CancelAfterReasoningProvider(_SampleChatProvider):
-    """先输出思考 delta，随后在流中途触发取消的受控 provider."""
+    """先输出思考 delta，随后在流结束前触发取消的受控 provider."""
 
     def __init__(self):
         self.session: Optional[AgentSession] = None
