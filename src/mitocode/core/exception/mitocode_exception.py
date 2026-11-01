@@ -108,3 +108,19 @@ class MitoCodeMcpConnectionError(MitoCodeMcpError):
 
 class MitoCodeMcpToolCallError(MitoCodeMcpError):
     """Raised when an MCP tool call fails or returns an error result."""
+
+
+class MitoCodeSkillError(MitoCodeBaseError):
+    """Base class for Agent Skill related errors."""
+
+
+class MitoCodeSkillDefinitionError(MitoCodeSkillError):
+    """Raised when a SKILL.md file is structurally broken or its frontmatter is invalid."""
+
+
+class MitoCodeSkillNotFoundError(MitoCodeSkillError):
+    """Raised when a skill name is looked up outside the manager's catalogue."""
+
+
+class MitoCodeSkillReadError(MitoCodeSkillError):
+    """Raised when a catalogued skill's SKILL.md cannot be read from disk."""
