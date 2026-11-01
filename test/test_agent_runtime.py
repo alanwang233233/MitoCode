@@ -93,13 +93,18 @@ class _Chunk:
         finish_reason: Optional[str] = None,
         tool_calls: Optional[List[_ToolCallChunk]] = None,
         choices: Optional[List[Any]] = None,
+        reasoning_content: Optional[str] = None,
     ):
         if choices is not None:
             self.choices: Any = choices
         else:
             self.choices = [
                 SimpleNamespace(
-                    delta=SimpleNamespace(content=content, tool_calls=tool_calls),
+                    delta=SimpleNamespace(
+                        content=content,
+                        reasoning_content=reasoning_content,
+                        tool_calls=tool_calls,
+                    ),
                     finish_reason=finish_reason,
                 )
             ]
@@ -398,6 +403,109 @@ class TestRunProviderInteraction:
         # Act & Assert
         with pytest.raises(RuntimeError, match="llm down"):
             await _drain_events(AgentRuntime.run(session))
+
+
+# ──────────────────────────────────────────────
+# run(): 思维链（reasoning）流式
+# ──────────────────────────────────────────────
+
+
+class TestRunReasoning:
+    """run() 对思维链 delta 的事件产出与历史隔离测试."""
+
+    @pytest.mark.asyncio
+    async def test_run_reasoning_content_yields_agent_reasoning_events(
+        self, make_session
+    ):
+        """reasoning_content delta → agent.reasoning 事件，且不与正文混淆."""
+        provider = _ScriptedProvider(
+            [
+                [
+                    _Chunk(reasoning_content="想"),
+                    _Chunk(reasoning_content="一下"),
+                    _Chunk(content="答案"),
+                    _Chunk(finish_reason=REASON_STOP),
+                ]
+            ]
+        )
+        session = make_session(provider)
+        events = await _drain_events(AgentRuntime.run(session))
+        assert _events_of_type(events, "agent.reasoning") == [
+            {"event": "agent.reasoning", "delta": "想"},
+            {"event": "agent.reasoning", "delta": "一下"},
+        ]
+        assert _events_of_type(events, "agent.text") == [
+            {"event": "agent.text", "delta": "答案"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_run_reasoning_precedes_content_within_one_chunk(
+        self, make_session
+    ):
+        """同一 chunk 内 reasoning 与 content 同时到达 → reasoning 事件在前."""
+        provider = _ScriptedProvider(
+            [
+                [
+                    _Chunk(reasoning_content="r", content="c"),
+                    _Chunk(finish_reason=REASON_STOP),
+                ]
+            ]
+        )
+        events = await _drain_events(AgentRuntime.run(make_session(provider)))
+        kinds = [
+            e["event"]
+            for e in events
+            if e["event"] in ("agent.reasoning", "agent.text")
+        ]
+        assert kinds == ["agent.reasoning", "agent.text"]
+
+    @pytest.mark.asyncio
+    async def test_run_openrouter_reasoning_field_also_consumed(self, make_session):
+        """OpenRouter 风格 delta.reasoning 字段同样产出思维链事件."""
+        chunk = _Chunk(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content=None, tool_calls=None, reasoning="alt"
+                    ),
+                    finish_reason=None,
+                )
+            ]
+        )
+        provider = _ScriptedProvider([[chunk, _Chunk(finish_reason=REASON_STOP)]])
+        events = await _drain_events(AgentRuntime.run(make_session(provider)))
+        assert _events_of_type(events, "agent.reasoning") == [
+            {"event": "agent.reasoning", "delta": "alt"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_run_reasoning_never_enters_standard_context(self, make_session):
+        """思维链绝不进入 build_standard_context 的回传消息."""
+        provider = _ScriptedProvider(
+            [
+                [
+                    _Chunk(reasoning_content="秘密思考"),
+                    _Chunk(content="答案"),
+                    _Chunk(finish_reason=REASON_STOP),
+                ]
+            ]
+        )
+        session = make_session(provider)
+        await _drain_events(AgentRuntime.run(session))
+        serialized = str(session.build_standard_context())
+        assert "秘密思考" not in serialized
+        assert "答案" in serialized
+
+    @pytest.mark.asyncio
+    async def test_run_without_reasoning_fields_yields_no_reasoning_events(
+        self, make_session
+    ):
+        """普通模型无思维链字段 → 零 agent.reasoning 事件."""
+        provider = _ScriptedProvider(
+            [[_Chunk(content="hi"), _Chunk(finish_reason=REASON_STOP)]]
+        )
+        events = await _drain_events(AgentRuntime.run(make_session(provider)))
+        assert _events_of_type(events, "agent.reasoning") == []
 
 
 # ──────────────────────────────────────────────

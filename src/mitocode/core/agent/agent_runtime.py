@@ -104,6 +104,13 @@ class AgentRuntime:
                 delta = chunk.choices[0].delta
                 finish_reason = chunk.choices[0].finish_reason
 
+                # 0. Handle Reasoning (display-only; never persisted to history)
+                reasoning_delta = getattr(delta, "reasoning_content", None) or getattr(
+                    delta, "reasoning", None
+                )
+                if isinstance(reasoning_delta, str) and reasoning_delta:
+                    yield {"event": "agent.reasoning", "delta": reasoning_delta}
+
                 # 1. Handle Text
                 if getattr(delta, "content", None):
                     session.append_assistant_delta(delta.content)
