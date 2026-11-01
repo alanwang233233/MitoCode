@@ -598,6 +598,9 @@ async def _cmd_skills(ctx: CommandContext, args: List[str]) -> CommandResult:
         return CommandResult()
 
     if args and args[0].lower() == "refresh":
+        if len(args) != 1:
+            ctx.ui.warn("Usage: /skills [refresh]")
+            return CommandResult()
         try:
             await manager.discover()
         except Exception as exc:  # pylint: disable=broad-exception-caught

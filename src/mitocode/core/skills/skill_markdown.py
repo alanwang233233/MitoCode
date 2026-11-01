@@ -45,7 +45,8 @@ class SkillFrontmatter:
     Attributes:
         name: ``name`` field; matches ``^[a-z0-9]+(-[a-z0-9]+)*$``, is at most
             64 characters, and equals ``expected_name`` when one was given.
-        description: ``description`` field, stripped; 1..1024 characters.
+        description: ``description`` field collapsed to one whitespace-normalised
+            line; 1..1024 characters after collapsing.
         license: ``license`` field; ``""`` when absent.
         allowed_tools: ``allowed-tools`` field split on commas, tokens
             stripped and empty tokens dropped; empty when absent.
@@ -108,8 +109,10 @@ def parse_skill_markdown(
     Unknown frontmatter keys are ignored for forward compatibility.  An
     optional key written with an empty value — ``license:``, ``allowed-tools:``,
     ``metadata:`` — is treated as absent.  The ``description`` is validated and
-    reported stripped of surrounding whitespace; ``name`` is validated as-is,
-    which its pattern already keeps whitespace-free.
+    reported as one whitespace-normalised line (surrounding whitespace
+    stripped, internal runs collapsed) so consumers can render one line per
+    skill; ``name`` is validated as-is, which its pattern already keeps
+    whitespace-free.
 
     Args:
         text: Full contents of a SKILL.md file.
@@ -212,7 +215,7 @@ def _require_description(parsed: Mapping[str, Any]) -> str:
         parsed: The frontmatter mapping.
 
     Returns:
-        The description, stripped of surrounding whitespace.
+        The description, collapsed to one whitespace-normalised line.
 
     Raises:
         MitoCodeSkillDefinitionError: If the field is missing, ill-typed,
@@ -227,17 +230,20 @@ def _require_description(parsed: Mapping[str, Any]) -> str:
         raise MitoCodeSkillDefinitionError(
             "frontmatter field 'description' must be a string"
         )
-    stripped = description.strip()
-    if not stripped:
+    # Collapse internal whitespace runs (a YAML ``|`` block is ordinary
+    # frontmatter): a description is one catalogue line everywhere it is
+    # rendered, most critically in the system prompt's skills section.
+    collapsed = " ".join(description.split())
+    if not collapsed:
         raise MitoCodeSkillDefinitionError(
             "frontmatter field 'description' must not be empty"
         )
-    if len(stripped) > _MAX_DESCRIPTION_LENGTH:
+    if len(collapsed) > _MAX_DESCRIPTION_LENGTH:
         raise MitoCodeSkillDefinitionError(
             "frontmatter field 'description' must be at most "
             f"{_MAX_DESCRIPTION_LENGTH} characters"
         )
-    return stripped
+    return collapsed
 
 
 def _optional_license(parsed: Mapping[str, Any]) -> str:

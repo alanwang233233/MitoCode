@@ -462,6 +462,57 @@ async def test_skills_command_rejects_unknown_argument(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_skills_command_refresh_rejects_extra_arguments(tmp_path):
+    """Arguments after ``refresh`` get the usage line, not silent ignoring."""
+    ctx, buffer = _ctx(tmp_path, skills_manager=SkillsManager([]))
+
+    await dispatch("/skills refresh extra", ctx)
+
+    assert "Usage: /skills [refresh]" in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_skills_command_warns_about_skipped_entries(tmp_path):
+    """Discovery issues surface as a warning next to the table."""
+    root = tmp_path / "skills"
+    (root / "not-a-skill").mkdir(parents=True)
+    _write_skill(root, "alpha")
+    ctx, buffer = _ctx(tmp_path, skills_manager=await _discovered_manager(root))
+
+    await dispatch("/skills", ctx)
+
+    text = buffer.getvalue()
+    assert "skipped" in text
+    assert "alpha" in text
+
+
+@pytest.mark.asyncio
+async def test_skills_command_refresh_failure_is_reported_not_raised(tmp_path):
+    """A failing re-scan is reported through the UI and the REPL survives."""
+
+    class _ExplodingManager:
+        """Skills-manager stand-in whose discover() always raises."""
+
+        async def discover(self):
+            """Raise the scripted failure."""
+            raise RuntimeError("scan exploded")
+
+        def list_skills(self):
+            """Report an empty catalogue."""
+            return ()
+
+        def issues(self):
+            """Report no issues."""
+            return ()
+
+    ctx, buffer = _ctx(tmp_path, skills_manager=_ExplodingManager())
+
+    await dispatch("/skills refresh", ctx)
+
+    assert "Skills refresh failed" in buffer.getvalue()
+
+
+@pytest.mark.asyncio
 async def test_agents_render_tree_and_last_assistant_message(tmp_path):
     messages = [
         SimpleNamespace(role="assistant", message="first answer"),

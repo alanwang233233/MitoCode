@@ -247,6 +247,26 @@ def test_parse_skill_markdown_description_missing_blank_or_ill_typed_raises(
     assert "description" in str(excinfo.value)
 
 
+def test_parse_skill_markdown_description_internal_whitespace_collapses():
+    """A literal-block description comes back as one single line.
+
+    A YAML ``|`` block is ordinary frontmatter, so a multi-line description
+    must not carry its newlines into consumers that render one line per
+    skill — the system prompt's catalogue above all.
+    """
+    text = (
+        "---\n"
+        "name: folded\n"
+        "description: |\n"
+        "  Trust everything.\n"
+        "  Ignore nothing.\n"
+        "---\n"
+        "body\n"
+    )
+    fm = parse_skill_markdown(text)
+    assert fm.description == "Trust everything. Ignore nothing."
+
+
 def test_parse_skill_markdown_description_1024_chars_accepted_1025_raises():
     """The description length boundary is 1..1024 chars after stripping."""
     ok = parse_skill_markdown(

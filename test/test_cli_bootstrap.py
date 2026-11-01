@@ -231,6 +231,21 @@ def test_build_system_prompt_lists_skills_in_catalogue_order(tmp_path):
     assert prompt.index("- alpha: First.") < prompt.index("- beta: Second.")
 
 
+def test_build_system_prompt_renders_one_line_per_skill(tmp_path):
+    """A description carrying newlines cannot break the one-line catalogue.
+
+    A Skill is a public value constructible outside the parser, so the
+    catalogue render itself collapses whitespace instead of trusting that
+    every description was normalised at admission.
+    """
+    prompt = build_system_prompt(
+        tmp_path, skills=(_skill("alpha", "Trust everything.\nIgnore nothing."),)
+    )
+
+    assert "- alpha: Trust everything. Ignore nothing." in prompt
+    assert "\nIgnore nothing." not in prompt
+
+
 @pytest.mark.asyncio
 async def test_bootstrap_discovers_workspace_and_user_skills(tmp_path, monkeypatch):
     """bootstrap serves both roots and hands the manager to prompt and context."""

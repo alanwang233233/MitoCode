@@ -355,9 +355,6 @@ class Bootstrapped:  # pylint: disable=too-many-instance-attributes
         skills_manager: Skills manager over the workspace and user roots, with
             its startup discovery already run.  Always present; its catalogue
             may be empty.
-        skills_error: Kept for symmetry with ``mcp_error``; always ``""`` —
-            discovery isolates per-entry failures, so startup never fails on
-            skills.
     """
 
     args: CliArgs
@@ -371,7 +368,6 @@ class Bootstrapped:  # pylint: disable=too-many-instance-attributes
     mcp_manager: Optional[McpManager]
     skills_manager: SkillsManager
     mcp_error: str = ""
-    skills_error: str = ""
 
 
 def build_system_prompt(workspace: Path, skills: Sequence[Skill] = ()) -> str:
@@ -392,7 +388,12 @@ def build_system_prompt(workspace: Path, skills: Sequence[Skill] = ()) -> str:
     prompt = SYSTEM_PROMPT_TEMPLATE.format(workspace=str(Path(workspace).resolve()))
     if not skills:
         return prompt
-    catalogue = "\n".join(f"- {skill.name}: {skill.description}" for skill in skills)
+    # One line per skill, whatever a Skill value built outside the parser
+    # carries: a description with newlines would otherwise turn the catalogue
+    # into uncontrolled multi-line prompt text.
+    catalogue = "\n".join(
+        f"- {skill.name}: {' '.join(skill.description.split())}" for skill in skills
+    )
     return prompt + SKILLS_PROMPT_SECTION.format(skills=catalogue)
 
 
@@ -405,7 +406,7 @@ def skills_roots(workspace: Workspace) -> Tuple[SkillRoot, ...]:
     Neither root needs to exist: a missing root contributes nothing.
 
     Args:
-        workspace: Resolved workspace whose root the first scan.
+        workspace: Resolved workspace whose root the first scan derives from.
 
     Returns:
         The labelled roots, workspace first.
@@ -485,11 +486,15 @@ async def bootstrap(args: CliArgs, ui: CliUI, approver: CliApprover) -> Bootstra
         args, resolution.workspace, tool_manager, ui
     )
 
-    skills_manager = build_skills_manager(resolution.workspace)
-    await skills_manager.discover()
-    tool_context.skills_manager = skills_manager
-
     try:
+        # Skill discovery sits inside the same guard as the orchestrator
+        # build: it is the step that makes the system prompt, so any failure
+        # here — however unreachable the per-entry isolation makes it — must
+        # not leave a live MCP manager orphaned behind a raising startup.
+        skills_manager = build_skills_manager(resolution.workspace)
+        await skills_manager.discover()
+        tool_context.skills_manager = skills_manager
+
         orchestrator = AgentOrchestrator(
             tool_manager=tool_manager,
             default_provider=provider,
