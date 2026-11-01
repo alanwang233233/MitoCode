@@ -98,6 +98,14 @@ def test_file_sink_is_always_debug(tmp_path):
     assert callable(handler._sink._retention_function)
 
 
+def test_file_sink_logs_tracebacks_without_variable_values(tmp_path):
+    configure_logging(log_dir=tmp_path)
+
+    handler = next(iter(logger._core.handlers.values()))
+    assert handler._exception_formatter._diagnose is False
+    assert handler._exception_formatter._backtrace is True
+
+
 def test_debug_flag_keeps_file_at_debug_level(tmp_path):
     path = configure_logging(debug=True, log_dir=tmp_path)
 

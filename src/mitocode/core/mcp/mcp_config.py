@@ -206,21 +206,23 @@ class McpServerConfig:  # pylint: disable=too-many-instance-attributes
 def _invalid(name: str, key: str, expected: str, value: Any) -> NoReturn:
     """Report one configuration field that failed validation.
 
-    ``value`` is rendered into the message, so this helper is only for fields
-    that cannot carry credentials.  Secret-bearing fields must raise their own
-    error naming just the offending entry's key — see :func:`_read_str_mapping`.
+    Only the offending value's *type* is reported, never the value itself:
+    exception messages reach the TUI error pane and the logs, so no reader of
+    configuration data may echo one.  Secret-bearing fields additionally name
+    just the offending entry's key — see :func:`_read_str_mapping`.
 
     Args:
         name: Name of the offending MCP server.
         key: The configuration key that failed validation.
         expected: Human-readable description of the accepted shape.
-        value: The offending value.
+        value: The offending value; only its type is rendered.
 
     Raises:
         MitoCodeMcpConfigError: Always.
     """
     raise MitoCodeMcpConfigError(
-        f"MCP server '{name}': '{key}' must be {expected}, got {value!r}"
+        f"MCP server '{name}': '{key}' must be {expected}, "
+        f"got {type(value).__name__}"
     )
 
 
@@ -258,6 +260,10 @@ def _read_http_url(name: str, value: Any) -> str:
 def _read_stdio_command(name: str, value: Any) -> str:
     """Validate the ``command`` field of a local server entry.
 
+    A mis-shaped ``command`` is reported by type only, never by value: a
+    command line routinely carries credentials (``--token <secret>``), and
+    exception messages reach the TUI error pane and the logs.
+
     Args:
         name: Name of the MCP server, used in the error message.
         value: The raw ``command`` value.
@@ -266,12 +272,13 @@ def _read_stdio_command(name: str, value: Any) -> str:
         The validated executable name.
 
     Raises:
-        MitoCodeMcpConfigError: If ``value`` is not a non-empty string.
+        MitoCodeMcpConfigError: If ``value`` is not a non-empty string.  The
+            message reports only the offending value's type, never its value.
     """
     if not isinstance(value, str) or not value.strip():
         raise MitoCodeMcpConfigError(
             f"MCP server '{name}': 'command' must be a non-empty string, "
-            f"got {value!r}"
+            f"got {type(value).__name__}"
         )
     return value
 

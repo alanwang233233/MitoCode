@@ -166,6 +166,21 @@ def test_error_message_does_not_leak_header_values(tmp_path):
     assert "Authorization" not in message
 
 
+def test_error_message_does_not_leak_non_string_command_values(tmp_path):
+    _write_mcp(
+        tmp_path,
+        '{"mcpServers":{"fs":{"command":["npx","--token","super-secret-token"]}}}',
+    )
+
+    with pytest.raises(MitoCodeMcpConfigError) as excinfo:
+        load_mcp_servers(_args(), _workspace(tmp_path))
+
+    message = str(excinfo.value)
+    assert "got list" in message
+    assert "super-secret-token" not in message
+    assert "--token" not in message
+
+
 @pytest.mark.asyncio
 async def test_loaded_config_matches_resolved_workspace(tmp_path):
     _write_mcp(tmp_path, '{"mcpServers":{"fs":{"command":"echo"}}}')

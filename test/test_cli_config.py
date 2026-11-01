@@ -57,16 +57,135 @@ def test_precedence_flags_over_env_over_dotenv_over_secret(tmp_path):
         '{"api_key":"secret","base_url":"http://secret","model":"secret-m","timeout":7}',
     )
     cfg = resolve_provider_config(
-        _args(api_key="flag", model="flag-m"),
+        _args(api_key="flag", model="flag-m", base_url="http://flag"),
         tmp_path,
         environ={"MITOCODE_API_KEY": "env", "MITOCODE_MODEL": "env-m"},
     )
     assert (cfg.api_key, cfg.model, cfg.base_url, cfg.timeout) == (
         "flag",
         "flag-m",
+        "http://flag",
+        7.0,
+    )
+
+
+def test_precedence_env_over_dotenv_over_secret(tmp_path):
+    (tmp_path / ".env").write_text(
+        "MITOCODE_API_KEY=from-dotenv\nMITOCODE_MODEL=dotenv-model\n"
+        "MITOCODE_TIMEOUT=5\n",
+        encoding="utf-8",
+    )
+    _write_secret(tmp_path, '{"api_key":"secret","model":"secret-m","timeout":7}')
+    cfg = resolve_provider_config(
+        _args(),
+        tmp_path,
+        environ={"MITOCODE_API_KEY": "env", "MITOCODE_MODEL": "env-m"},
+    )
+    assert (cfg.api_key, cfg.model, cfg.base_url, cfg.timeout) == (
+        "env",
+        "env-m",
+        None,
+        5.0,
+    )
+
+
+def test_precedence_dotenv_over_secret_within_workspace_layers(tmp_path):
+    (tmp_path / ".env").write_text(
+        "MITOCODE_API_KEY=from-dotenv\nMITOCODE_MODEL=dotenv-model\n",
+        encoding="utf-8",
+    )
+    _write_secret(
+        tmp_path,
+        '{"api_key":"secret","base_url":"http://secret","model":"secret-m","timeout":7}',
+    )
+    cfg = resolve_provider_config(_args(), tmp_path, environ={})
+    assert (cfg.api_key, cfg.model, cfg.base_url, cfg.timeout) == (
+        "from-dotenv",
+        "dotenv-model",
         "http://secret",
         7.0,
     )
+
+
+def test_workspace_base_url_with_environment_key_is_rejected(tmp_path):
+    (tmp_path / ".env").write_text(
+        "MITOCODE_BASE_URL=http://dotenv\n", encoding="utf-8"
+    )
+    with pytest.raises(MitoCodeCliConfigError) as info:
+        resolve_provider_config(
+            _args(),
+            tmp_path,
+            environ={"MITOCODE_API_KEY": "k", "MITOCODE_MODEL": "m"},
+        )
+    message = str(info.value)
+    assert DOTENV_FILENAME in message
+    assert "MITOCODE_BASE_URL" in message
+    assert "http://dotenv" not in message
+
+
+def test_secret_base_url_with_environment_key_is_rejected(tmp_path):
+    _write_secret(tmp_path, '{"base_url":"http://secret"}')
+    with pytest.raises(MitoCodeCliConfigError) as info:
+        resolve_provider_config(
+            _args(),
+            tmp_path,
+            environ={"MITOCODE_API_KEY": "k", "MITOCODE_MODEL": "m"},
+        )
+    message = str(info.value)
+    assert str(SECRET_RELATIVE_PATH) in message
+    assert "http://secret" not in message
+
+
+def test_flag_key_with_workspace_base_url_is_rejected(tmp_path):
+    _write_secret(tmp_path, '{"base_url":"http://secret"}')
+    with pytest.raises(MitoCodeCliConfigError):
+        resolve_provider_config(_args(api_key="k", model="m"), tmp_path, environ={})
+
+
+def test_workspace_key_pairs_with_workspace_base_url(tmp_path):
+    _write_secret(tmp_path, '{"api_key":"k","model":"m","base_url":"http://secret"}')
+    cfg = resolve_provider_config(_args(), tmp_path, environ={})
+    assert cfg.base_url == "http://secret"
+    assert cfg.source == "secret"
+
+
+def test_workspace_key_pairs_with_workspace_base_url_in_dotenv(tmp_path):
+    (tmp_path / ".env").write_text(
+        "MITOCODE_API_KEY=k\nMITOCODE_MODEL=m\nMITOCODE_BASE_URL=http://dotenv\n",
+        encoding="utf-8",
+    )
+    cfg = resolve_provider_config(_args(), tmp_path, environ={})
+    assert cfg.base_url == "http://dotenv"
+
+
+def test_workspace_key_pairs_with_environment_base_url(tmp_path):
+    _write_secret(tmp_path, '{"api_key":"k","model":"m"}')
+    cfg = resolve_provider_config(
+        _args(), tmp_path, environ={"MITOCODE_BASE_URL": "http://env"}
+    )
+    assert cfg.base_url == "http://env"
+
+
+def test_environment_key_pairs_with_environment_base_url(tmp_path):
+    cfg = resolve_provider_config(
+        _args(),
+        tmp_path,
+        environ={
+            "MITOCODE_API_KEY": "k",
+            "MITOCODE_MODEL": "m",
+            "MITOCODE_BASE_URL": "http://env",
+        },
+    )
+    assert cfg.base_url == "http://env"
+
+
+def test_flag_base_url_pairs_with_environment_key(tmp_path):
+    cfg = resolve_provider_config(
+        _args(base_url="http://flag"),
+        tmp_path,
+        environ={"MITOCODE_API_KEY": "k", "MITOCODE_MODEL": "m"},
+    )
+    assert cfg.base_url == "http://flag"
 
 
 def test_missing_credentials_names_keys_not_values(tmp_path):
@@ -360,3 +479,15 @@ def test_secret_api_key_never_appears_in_errors(tmp_path):
     message = str(info.value)
     assert "super-secret" not in message
     assert "MITOCODE_MODEL" in message
+
+
+def test_blank_workspace_base_url_falls_through_to_environment(tmp_path):
+    """A blank workspace base_url loses the layer contest, so env wins legally."""
+    _write_secret(
+        tmp_path, '{"api_key":"secret-key","model":"secret-m","base_url":"  "}'
+    )
+    cfg = resolve_provider_config(
+        _args(), tmp_path, environ={"MITOCODE_BASE_URL": "http://env"}
+    )
+    assert cfg.base_url == "http://env"
+    assert cfg.source == "secret"

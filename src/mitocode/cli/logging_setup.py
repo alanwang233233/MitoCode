@@ -6,7 +6,10 @@ therefore removes every existing sink and installs a single file sink.
 
 The log directory is private to the user (``0o700``) because debug lines may
 contain file paths and provider errors; the file itself is appended to and
-rotated by size so a long session cannot fill the disk.
+rotated by size so a long session cannot fill the disk. Tracebacks are written
+with ``diagnose=False`` so loguru never renders the local variable values of
+traceback frames into the file: those frames can hold raw credentials such as
+the provider API key.
 """
 
 from __future__ import annotations
@@ -94,6 +97,9 @@ def configure_logging(
         encoding="utf-8",
         format=LOG_FORMAT,
         backtrace=True,
+        # Tracebacks stay in the log, but loguru's variable-value diagnostics
+        # must never render frame locals: they can hold the raw API key.
+        diagnose=False,
     )
 
     if debug:

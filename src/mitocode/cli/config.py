@@ -48,6 +48,9 @@ _SOURCE_DOTENV = "dotenv"
 _SOURCE_SECRET = "secret"
 _SOURCE_DEFAULT = "default"
 
+_WORKSPACE_SOURCES = (_SOURCE_DOTENV, _SOURCE_SECRET)
+"""Layers backed by files inside the workspace rather than by the user."""
+
 
 @dataclass(frozen=True)
 class ProviderConfig:
@@ -113,8 +116,10 @@ def resolve_provider_config(
 
     Raises:
         MitoCodeCliConfigError: ``api_key`` or ``model`` is missing, a timeout
-            is not a positive number, or ``timeout`` is below one second. The
-            message names keys and file locations but never a value.
+            is not a positive number, ``timeout`` is below one second, or a
+            ``base_url`` from a workspace layer is paired with an ``api_key``
+            from the flags or environment. The message names keys and file
+            locations but never a value.
     """
     environment = os.environ if environ is None else environ
     root = Path(workspace)
@@ -127,7 +132,7 @@ def resolve_provider_config(
         (_SOURCE_DOTENV, _first_env(dotenv, _API_KEY_NAMES)),
         (_SOURCE_SECRET, secret.get("api_key")),
     )
-    base_url, _ = _first_text(
+    base_url, base_url_source = _first_text(
         (_SOURCE_FLAGS, args.base_url),
         (_SOURCE_ENVIRONMENT, _first_env(environment, _BASE_URL_NAMES)),
         (_SOURCE_DOTENV, _first_env(dotenv, _BASE_URL_NAMES)),
@@ -150,6 +155,13 @@ def resolve_provider_config(
     # The check above guarantees both required fields were supplied; restating
     # it narrows the optional types for static checkers.
     assert api_key is not None and model is not None
+
+    # A workspace-controlled endpoint must never receive a key the user holds
+    # outside the workspace: the request would carry that key to whatever the
+    # workspace file points at. Only the winning base_url is judged, so a
+    # blank workspace value falling through to the environment stays allowed.
+    if base_url_source in _WORKSPACE_SOURCES and source not in _WORKSPACE_SOURCES:
+        raise MitoCodeCliConfigError(_workspace_base_url_message(base_url_source))
 
     return ProviderConfig(
         api_key=api_key,
@@ -295,6 +307,37 @@ def _missing_message(missing: Sequence[str]) -> str:
         f"{model_names} environment variables,\n"
         f"a {DOTENV_FILENAME} file in the workspace root, or the "
         f"{SECRET_RELATIVE_PATH.as_posix()} file."
+    )
+
+
+def _workspace_base_url_message(base_url_source: str) -> str:
+    """Build the error shown when a workspace endpoint would capture a foreign key.
+
+    A ``base_url`` resolved from a workspace file is only allowed next to an
+    ``api_key`` resolved from the same workspace layers, otherwise the request
+    would send the user's key to an endpoint the workspace controls. The text
+    names the files, flags and variables involved and never any resolved value.
+
+    Args:
+        base_url_source: Layer that supplied ``base_url``; one of
+            :data:`_SOURCE_DOTENV` or :data:`_SOURCE_SECRET`.
+
+    Returns:
+        A multi-line, value-free error message.
+    """
+    location = (
+        DOTENV_FILENAME
+        if base_url_source == _SOURCE_DOTENV
+        else SECRET_RELATIVE_PATH.as_posix()
+    )
+    base_url_names = " / ".join(_BASE_URL_NAMES)
+    return (
+        "Refusing to pair an API key from the command line or the environment "
+        "with a\n"
+        f"base URL from the workspace {location} file: that endpoint is\n"
+        "controlled by the workspace and would receive the key.\n"
+        f"Pass --base-url, set {base_url_names} in the environment,\n"
+        "or move the API key into the same workspace file."
     )
 
 
