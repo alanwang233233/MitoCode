@@ -765,3 +765,470 @@ async def test_runtime_events_map_to_tui_types_without_dropping_any():
         "agent_id": 3,
         "reason": "stop",
     }, "标准终止应把 reason 透传到 turn_end"
+
+
+# ──────────────────────────────────────────────
+# AgentOrchestrator: 会话生命周期补充覆盖
+# ──────────────────────────────────────────────
+
+
+def _drain_events(orchestrator) -> list:
+    """取出事件队列中当前的全部事件，便于做确定性计数断言."""
+    events = []
+    while not orchestrator.event_queue.empty():
+        events.append(orchestrator.event_queue.get_nowait())
+    return events
+
+
+class _GateProvider(_SampleChatProvider):
+    """在交出任何 chunk 之前先等待 gate 的 provider，用于确定性占住运行中的任务."""
+
+    def __init__(self):
+        self.stream = True
+        self.started = asyncio.Event()
+        self.gate = asyncio.Event()
+
+    @staticmethod
+    def get_model_list():
+        return ["gate-model"]
+
+    @classmethod
+    def get_settings_schema(cls):
+        return {"type": "object", "properties": {}, "additionalProperties": True}
+
+    @staticmethod
+    def check_settings_schema(settings):
+        return True
+
+    def init(self):
+        pass
+
+    async def chat(self, tools=None, messages=None, **kwargs):
+        async def _stream():
+            self.started.set()
+            await self.gate.wait()
+            yield FakeChunk(content="done")
+            yield FakeChunk(finish_reason="stop")
+
+        return _stream()
+
+
+class _TurnProvider(EchoProvider):
+    """沿用 Echo 行为但额外暴露 turn 计数器的 provider，用于验证按会话深拷贝."""
+
+    def __init__(self):
+        super().__init__()
+        self.turn = 0
+
+
+class _ToolCallTurnProvider(_SampleChatProvider):
+    """首轮产出一次工具调用、次轮输出文本并 stop 的 provider."""
+
+    def __init__(self):
+        self.stream = True
+        self.chat_count = 0
+
+    @staticmethod
+    def get_model_list():
+        return ["tool-turn-model"]
+
+    @classmethod
+    def get_settings_schema(cls):
+        return {"type": "object", "properties": {}, "additionalProperties": True}
+
+    @staticmethod
+    def check_settings_schema(settings):
+        return True
+
+    def init(self):
+        pass
+
+    async def chat(self, tools=None, messages=None, **kwargs):
+        self.chat_count += 1
+        if self.chat_count == 1:
+            chunks = [
+                _delta_chunk(content="pre"),
+                _delta_chunk(
+                    tool_calls=[
+                        SimpleNamespace(
+                            index=0,
+                            id="call_1",
+                            function=SimpleNamespace(name="probe", arguments=None),
+                        )
+                    ]
+                ),
+                _delta_chunk(
+                    tool_calls=[
+                        SimpleNamespace(
+                            index=0,
+                            id=None,
+                            function=SimpleNamespace(name=None, arguments='{"x": 1}'),
+                        )
+                    ]
+                ),
+                _delta_chunk(finish_reason="tool_calls"),
+            ]
+        else:
+            chunks = [
+                _delta_chunk(content="post"),
+                _delta_chunk(finish_reason="stop"),
+            ]
+
+        async def _stream():
+            for chunk in chunks:
+                yield chunk
+
+        return _stream()
+
+
+@pytest.mark.asyncio
+async def test_create_session_unknown_parent_raises_value_error_with_parent_id():
+    """parent_id 指向未注册会话 → ValueError 文案带上该 id 且不注册任何会话."""
+    orchestrator = AgentOrchestrator()
+
+    with pytest.raises(ValueError, match=r"Parent agent 99 does not exist"):
+        await orchestrator.create_session(provider=EchoProvider(), parent_id=99)
+
+    assert orchestrator.get_tree_snapshot() == [], "失败创建不应留下会话节点"
+    assert orchestrator.get_session(99) is None, "未知 parent_id 不应被注册"
+
+
+@pytest.mark.asyncio
+async def test_create_session_deep_copies_turn_provider_and_resets_turn():
+    """带 turn 属性的 provider → 会话拿到独立副本且副本 turn 归零，原对象不变."""
+    provider = _TurnProvider()
+    provider.turn = 5
+    orchestrator = AgentOrchestrator()
+
+    session = await orchestrator.create_session(name="scenario", provider=provider)
+
+    assert session.provider is not provider, "带 turn 的 provider 必须按会话深拷贝隔离"
+    assert session.provider.turn == 0, "会话副本的 turn 应从 0 重新开始"
+    assert provider.turn == 5, "深拷贝不应修改调用方传入的 provider"
+
+    second = await orchestrator.create_session(name="scenario-2", provider=provider)
+    assert second.provider.turn == 0, "每个会话都应拿到自己的 turn 计数器"
+    assert (
+        session.provider is not second.provider
+    ), "两个会话的 provider 副本必须互不相同"
+
+
+@pytest.mark.asyncio
+async def test_create_session_provider_without_turn_is_used_by_reference():
+    """不带 turn 属性的 provider → 会话直接持有传入的同一实例，不做深拷贝."""
+    provider = EchoProvider()
+    orchestrator = AgentOrchestrator()
+
+    session = await orchestrator.create_session(name="plain", provider=provider)
+
+    assert session.provider is provider, "无 turn 的 provider 应按引用共享而非复制"
+
+
+@pytest.mark.asyncio
+async def test_destroy_agent_unknown_id_is_noop_and_queues_nothing():
+    """销毁未知 id → 既有会话保留且不推送树同步事件."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    session = await orchestrator.create_session(name="keep")
+    _drain_events(orchestrator)
+
+    await orchestrator.destroy_agent(999)
+
+    assert (
+        orchestrator.get_session(session.agent_id) is session
+    ), "未知 id 不应动到其它会话"
+    assert orchestrator.event_queue.empty(), "未知 id 的销毁不应推送树同步事件"
+
+
+@pytest.mark.asyncio
+async def test_destroy_agent_child_detaches_parent_and_pushes_single_sync():
+    """销毁子会话 → 从父会话子列表摘除、自身槽位清空且只推一次树同步."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    parent = await orchestrator.create_session(name="p")
+    child = await orchestrator.create_session(name="c", parent_id=parent.agent_id)
+    _drain_events(orchestrator)
+
+    await orchestrator.destroy_agent(child.agent_id)
+
+    assert orchestrator.get_session(child.agent_id) is None, "子会话应从注册表移除"
+    assert orchestrator.get_session(parent.agent_id) is parent, "父会话应保留"
+    assert parent.sub_agent_ids == [], "父会话的子代理列表应摘除被销毁的子 id"
+    assert orchestrator.event_queue.qsize() == 1, "顶层销毁应恰好推送一次树同步"
+    agent_evt, payload = orchestrator.event_queue.get_nowait()
+    assert agent_evt == -1, "树同步事件应使用 -1 作为 agent 标识"
+    assert payload["type"] == "sync", "销毁后推送的应是 sync 事件"
+    assert [node["id"] for node in payload["agents"]] == [
+        parent.agent_id
+    ], "同步快照应只剩父会话"
+
+
+@pytest.mark.asyncio
+async def test_destroy_agent_parent_cascades_to_grandchildren():
+    """销毁父会话 → 递归销毁子与孙，整棵树清空且顶层只推送一次同步."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    root = await orchestrator.create_session(name="r")
+    child = await orchestrator.create_session(name="c", parent_id=root.agent_id)
+    grandchild = await orchestrator.create_session(name="g", parent_id=child.agent_id)
+    _drain_events(orchestrator)
+
+    await orchestrator.destroy_agent(root.agent_id)
+
+    assert orchestrator.get_session(root.agent_id) is None, "根会话应被销毁"
+    assert orchestrator.get_session(child.agent_id) is None, "子会话应被级联销毁"
+    assert orchestrator.get_session(grandchild.agent_id) is None, "孙会话应被级联销毁"
+    assert orchestrator.get_tree_snapshot() == [], "级联销毁后树应为空"
+    assert orchestrator.event_queue.qsize() == 1, "递归销毁不应额外推送同步事件"
+
+
+@pytest.mark.asyncio
+async def test_destroy_agent_sync_false_removes_without_push():
+    """顶层调用传 _sync=False → 仍然完成移除但完全不推送同步事件."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    session = await orchestrator.create_session(name="silent")
+    _drain_events(orchestrator)
+
+    await orchestrator.destroy_agent(session.agent_id, _sync=False)
+
+    assert (
+        orchestrator.get_session(session.agent_id) is None
+    ), "_sync=False 仍应移除会话"
+    assert orchestrator.event_queue.empty(), "_sync=False 不应推送树同步事件"
+
+
+@pytest.mark.asyncio
+async def test_destroy_agent_child_already_detached_from_parent_is_removed():
+    """父会话子列表已缺失该 id → 销毁不得抛错，仍要清空会话本身."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    parent = await orchestrator.create_session(name="p")
+    child = await orchestrator.create_session(name="c", parent_id=parent.agent_id)
+    parent.sub_agent_ids.remove(child.agent_id)
+    _drain_events(orchestrator)
+
+    await orchestrator.destroy_agent(child.agent_id)
+
+    assert orchestrator.get_session(child.agent_id) is None, "已脱钩的子会话仍应被销毁"
+    assert parent.sub_agent_ids == [], "父会话子列表应保持为空且不重复摘除"
+
+
+@pytest.mark.asyncio
+async def test_cancel_agent_unknown_id_is_noop():
+    """取消未知 id → 既有会话保持未取消且不产生事件."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    session = await orchestrator.create_session(name="safe")
+    _drain_events(orchestrator)
+
+    await orchestrator.cancel_agent(999)
+
+    assert session.is_cancelled() is False, "取消未知 id 不应波及其它会话"
+    assert orchestrator.event_queue.empty(), "取消未知 id 不应产生事件"
+
+
+@pytest.mark.asyncio
+async def test_cancel_agent_without_task_marks_session_cancelled():
+    """会话没有关联任务时取消 → 只置位取消标记，不抛错也不产生事件."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    session = await orchestrator.create_session(name="idle")
+    _drain_events(orchestrator)
+    assert orchestrator._tasks[session.agent_id] is None, "前置：新会话的任务槽应为空"
+
+    await orchestrator.cancel_agent(session.agent_id)
+
+    assert session.is_cancelled() is True, "无任务时取消仍应置位会话取消标记"
+    assert orchestrator.event_queue.empty(), "取消不应额外推送树同步事件"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cascade, child_should_be_cancelled",
+    [(False, False), (True, True)],
+    ids=["cascade-false-只取消父", "cascade-true-级联取消子"],
+)
+async def test_cancel_agent_cascade_flag_controls_child_cancellation(
+    cascade, child_should_be_cancelled
+):
+    """cascade 标志决定子会话是否被递归取消，父会话总是被取消."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    parent = await orchestrator.create_session(name="p")
+    child = await orchestrator.create_session(name="c", parent_id=parent.agent_id)
+
+    await orchestrator.cancel_agent(parent.agent_id, cascade=cascade)
+
+    assert parent.is_cancelled() is True, "父会话无论如何都应被取消"
+    assert (
+        child.is_cancelled() is child_should_be_cancelled
+    ), f"cascade={cascade} 时子会话取消状态应为 {child_should_be_cancelled}"
+
+
+@pytest.mark.asyncio
+async def test_send_message_unknown_agent_returns_none_and_appends_nothing():
+    """向未知会话发消息 → 返回 None 且不改动任何既有会话的消息历史."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    session = await orchestrator.create_session(name="a")
+    _drain_events(orchestrator)
+
+    result = await orchestrator.send_message(999, "hello")
+
+    assert result is None, "未知 agent_id 应返回 None"
+    assert session.messages == [], "未知 agent_id 不应把消息写进别的会话"
+    assert orchestrator.event_queue.empty(), "未知 agent_id 不应推送树同步事件"
+
+
+@pytest.mark.asyncio
+async def test_send_message_while_running_replaces_previous_task():
+    """RUNNING 状态下再次发消息 → 旧任务被取消并等待，随后创建新任务."""
+    provider = _GateProvider()
+    orchestrator = AgentOrchestrator(default_provider=provider)
+    session = await orchestrator.create_session(name="gated")
+
+    first = await orchestrator.send_message(session.agent_id, "one")
+    assert isinstance(first, asyncio.Task), "首次发送应返回 asyncio.Task"
+    await asyncio.wait_for(provider.started.wait(), timeout=2.0)
+    assert session.state is AgentState.RUNNING, "前置：首个任务应仍在运行"
+
+    second = await orchestrator.send_message(session.agent_id, "two")
+
+    assert isinstance(second, asyncio.Task), "再次发送应返回新的 asyncio.Task"
+    assert second is not first, "再次发送必须换成新任务而非复用旧任务"
+    assert first.cancelled() is True, "旧任务应已被取消"
+    assert first.done() is True, "send_message 应在返回前等待旧任务结束"
+
+    provider.gate.set()
+    await asyncio.wait_for(second, timeout=2.0)
+
+    assert session.state is AgentState.FINISHED, "新任务正常结束应落到 FINISHED"
+    assert session.build_standard_context() == [
+        {"role": "user", "content": "one"},
+        {"role": "user", "content": "two"},
+        {"role": "assistant", "content": "done"},
+    ], "两条用户消息应保留且助手输出只来自新任务"
+
+
+class _AlwaysFullQueue(asyncio.Queue):
+    """put 立即抛出 QueueFull 的队列替身。
+
+    ``asyncio.Queue.put`` 在满时是等待空位而不是抛错，只有 ``put_nowait`` 抛
+    ``QueueFull``；这里用队列子类把"已满"这一边界变成确定性可测的输入。
+    """
+
+    async def put(self, item):
+        """模拟满队列，立即抛出 QueueFull."""
+        raise asyncio.QueueFull
+
+
+@pytest.mark.asyncio
+async def test_push_tree_sync_swallows_queue_full():
+    """事件队列已满 → _push_tree_sync 吞掉 QueueFull 且不写入任何事件."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    await orchestrator.create_session(name="root")
+    orchestrator.event_queue = _AlwaysFullQueue()
+
+    await orchestrator._push_tree_sync()
+
+    assert orchestrator.event_queue.empty(), "满队列不应收到同步事件"
+    assert [node["id"] for node in orchestrator.get_tree_snapshot()] == [
+        0
+    ], "QueueFull 只影响推送，不应改动树结构"
+
+
+@pytest.mark.asyncio
+async def test_run_session_unknown_id_returns_early_without_events():
+    """运行未知会话 → 立即返回，不产生事件也不登记任务."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    _drain_events(orchestrator)
+
+    await orchestrator._run_session(999)
+
+    assert orchestrator.get_session(999) is None, "未知会话不应因运行而被创建"
+    assert orchestrator.event_queue.empty(), "未知会话的早退不应推送任何事件"
+
+
+@pytest.mark.asyncio
+async def test_run_session_skips_adapted_none_events():
+    """运行时事件适配结果为 None → 不进入队列，只有可适配事件到达消费者."""
+    provider = _ToolCallTurnProvider()
+    orchestrator = AgentOrchestrator(default_provider=provider)
+    session = await orchestrator.create_session(name="round")
+    _drain_events(orchestrator)
+
+    task = await orchestrator.send_message(session.agent_id, "go")
+    await asyncio.wait_for(task, timeout=2.0)
+
+    events = _drain_events(orchestrator)
+    agent_events = [payload for aid, payload in events if aid == session.agent_id]
+
+    assert session.state is AgentState.FINISHED, "两轮结束后状态应为 FINISHED"
+    assert len(agent_events) == 7, "8 个运行时事件中恰有 1 个适配为 None 被丢弃"
+    assert all(
+        isinstance(payload, dict) and "type" in payload for payload in agent_events
+    ), "队列中不应出现 None 或缺失 type 的载荷"
+    assert [payload["type"] for payload in agent_events] == [
+        "token",
+        "tool_call",
+        "tool_call",
+        "tool_start",
+        "tool_result",
+        "token",
+        "turn_end",
+    ], "被丢弃的应是 finished.tool_calls，其余事件顺序不变"
+
+
+@pytest.mark.asyncio
+async def test_run_session_cancelled_sets_state_and_propagates():
+    """运行中被取消 → CancelledError 传到任务、状态落到 CANCELLED 且任务槽清空."""
+    provider = _GateProvider()
+    orchestrator = AgentOrchestrator(default_provider=provider)
+    session = await orchestrator.create_session(name="cancel-me")
+
+    task = await orchestrator.send_message(session.agent_id, "hi")
+    await asyncio.wait_for(provider.started.wait(), timeout=2.0)
+
+    await orchestrator.cancel_agent(session.agent_id)
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2.0)
+
+    assert session.state is AgentState.CANCELLED, "任务中止应把会话状态置为 CANCELLED"
+    assert session.is_cancelled() is True, "取消标记应保持置位"
+    assert orchestrator._tasks[session.agent_id] is None, "结束的任务应从任务槽清空"
+    assert (
+        orchestrator.get_tree_snapshot()[0]["state"] == "cancelled"
+    ), "树快照应把取消状态展示给 TUI"
+
+
+@pytest.mark.asyncio
+async def test_run_session_finally_keeps_foreign_task_slot():
+    """任务槽属于别的任务时 → finally 不得清空它，但会话仍正常跑完并推送同步."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    session = await orchestrator.create_session(name="guarded")
+    _drain_events(orchestrator)
+
+    foreign = asyncio.create_task(asyncio.sleep(0))
+    await foreign
+    orchestrator._tasks[session.agent_id] = foreign
+
+    await orchestrator._run_session(session.agent_id)
+
+    assert session.state is AgentState.FINISHED, "直接运行仍应把会话跑到 FINISHED"
+    assert (
+        orchestrator._tasks[session.agent_id] is foreign
+    ), "任务槽属于别的任务时不应被本任务清空"
+    assert orchestrator.event_queue.qsize() >= 1, "finally 仍应推送一次树同步"
+
+
+@pytest.mark.asyncio
+async def test_get_tree_snapshot_exposes_the_six_tui_keys():
+    """树快照节点恰好暴露 TUI 消费的六个键，新会话状态为 idle."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    await orchestrator.create_session(name="root", description="describe")
+
+    node = orchestrator.get_tree_snapshot()[0]
+
+    assert set(node.keys()) == {
+        "id",
+        "name",
+        "description",
+        "parent_id",
+        "sub_agent",
+        "state",
+    }, "快照节点键集合必须与 TUI 契约一致"
+    assert node["state"] == "idle", "从未运行过的会话状态应为 idle"
+    assert node["sub_agent"] == [], "新会话的子代理列表应为空"

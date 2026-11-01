@@ -1092,3 +1092,25 @@ def _make_unfinished_plain_text() -> _PlainTextMessageBlock:
     block = _PlainTextMessageBlock("assistant", "半截输出")
     block.finished = False
     return block
+
+
+# ──────────────────────────────────────────────
+# provider 类型契约
+# ──────────────────────────────────────────────
+
+
+class TestAgentSessionProviderTypeContract:
+    """truthy 但类型不符的 provider 必须被拒绝，而非延迟到运行期才失败."""
+
+    @pytest.mark.parametrize(
+        "bad_provider",
+        [object(), "provider-as-string", 1],
+        ids=["普通object实例", "字符串", "整数"],
+    )
+    def test_init_wrong_type_provider_raises_type_error(self, bad_provider):
+        """provider 为 _SampleChatProvider 以外的 truthy 对象 → 抛出带契约文案的 TypeError."""
+        # Act / Assert
+        with pytest.raises(
+            TypeError, match=r"Provider must be an instance of _SampleChatProvider\."
+        ):
+            AgentSession(provider=bad_provider)
