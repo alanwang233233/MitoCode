@@ -400,26 +400,32 @@ def build_system_prompt(workspace: Path, skills: Sequence[Skill] = ()) -> str:
 def skills_roots(workspace: Workspace) -> Tuple[SkillRoot, ...]:
     """Return the skill roots one CLI run scans, in precedence order.
 
-    The workspace's own ``.mitocode/skills`` comes first so a workspace can
-    override a user-level skill of the same name; the user-level
-    ``~/.mitocode/skills`` matches where the CLI already keeps its logs.
-    Neither root needs to exist: a missing root contributes nothing.
+    Currently only the workspace's own ``.mitocode/skills`` is scanned:
+    user-level discovery (``~/.mitocode/skills``) is **temporarily
+    disabled** — the root is commented out below rather than deleted, so
+    restoring it is a one-line uncomment (and reverting the companion test
+    in ``test_cli_bootstrap.py``).  The root needs no special handling once
+    restored: a missing directory contributes nothing.
 
     Args:
         workspace: Resolved workspace whose root the first scan derives from.
 
     Returns:
-        The labelled roots, workspace first.
+        The labelled roots in precedence order.
     """
     return (
         SkillRoot(
             label="workspace",
             path=workspace.path / MITOCODE_CONFIG_PATH / SKILLS_DIR_NAME,
         ),
-        SkillRoot(
-            label="user",
-            path=Path.home() / MITOCODE_CONFIG_PATH / SKILLS_DIR_NAME,
-        ),
+        # Temporarily disabled: user-level skill discovery is switched off.
+        # Restore this root (and the expected roots tuple in
+        # test_bootstrap_discovers_workspace_skills_only_for_now) to re-enable
+        # scanning ~/.mitocode/skills.
+        # SkillRoot(
+        #     label="user",
+        #     path=Path.home() / MITOCODE_CONFIG_PATH / SKILLS_DIR_NAME,
+        # ),
     )
 
 

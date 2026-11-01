@@ -247,8 +247,15 @@ def test_build_system_prompt_renders_one_line_per_skill(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_discovers_workspace_and_user_skills(tmp_path, monkeypatch):
-    """bootstrap serves both roots and hands the manager to prompt and context."""
+async def test_bootstrap_discovers_workspace_skills_only_for_now(tmp_path, monkeypatch):
+    """bootstrap serves the workspace root only, with the user root disabled.
+
+    User-level discovery (``~/.mitocode/skills``) is deliberately switched
+    off for now in :func:`bootstrap.skills_roots` — restore the commented
+    root there and this test's expected tuple together.  The HOME
+    monkeypatch proves a populated user directory stays unscanned rather
+    than merely absent.
+    """
     ORDERS.clear()
     _patch(monkeypatch)
     home = tmp_path / "home"
@@ -259,6 +266,12 @@ async def test_bootstrap_discovers_workspace_and_user_skills(tmp_path, monkeypat
         "---\nname: alpha\ndescription: Do alpha things.\n---\nBody.\n",
         encoding="utf-8",
     )
+    user_skill_dir = home / ".mitocode" / "skills" / "user-skill"
+    user_skill_dir.mkdir(parents=True)
+    (user_skill_dir / "SKILL.md").write_text(
+        "---\nname: user-skill\ndescription: Must not be discovered.\n---\nBody.\n",
+        encoding="utf-8",
+    )
     ui = _ui()
 
     result = await bootstrap(
@@ -267,13 +280,14 @@ async def test_bootstrap_discovers_workspace_and_user_skills(tmp_path, monkeypat
 
     assert result.skills_manager.roots() == (
         SkillRoot("workspace", tmp_path / ".mitocode" / "skills"),
-        SkillRoot("user", home / ".mitocode" / "skills"),
     )
     assert result.skills_manager.get("alpha") is not None
+    assert result.skills_manager.get("user-skill") is None
     assert result.tool_context.skills_manager is result.skills_manager
     prompt = result.orchestrator.kw["system_prompt"]
     assert "## Skills" in prompt
     assert "- alpha: Do alpha things." in prompt
+    assert "user-skill" not in prompt
 
 
 @pytest.mark.asyncio

@@ -612,10 +612,12 @@ async def _cmd_skills(ctx: CommandContext, args: List[str]) -> CommandResult:
 
     skills = manager.list_skills()
     if not skills:
+        # User-level discovery (~/.mitocode/skills) is temporarily disabled
+        # in bootstrap.skills_roots, so only the workspace path is advertised.
         ctx.ui.note(
             "No skills installed. Add a skill as a directory holding a "
-            "SKILL.md under .mitocode/skills in this workspace or under "
-            "~/.mitocode/skills, then run /skills refresh."
+            "SKILL.md under .mitocode/skills in this workspace, then run "
+            "/skills refresh."
         )
         return CommandResult()
 
