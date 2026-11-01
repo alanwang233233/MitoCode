@@ -30,6 +30,7 @@ EXPECTED_COMMANDS = {
     "help",
     "status",
     "model",
+    "effort",
     "clear",
     "agents",
     "tools",
@@ -647,3 +648,38 @@ async def test_init_failure_is_reported_not_raised(tmp_path):
     workspace.dump = lambda: (_ for _ in ()).throw(OSError("disk full"))
     await dispatch("/init", ctx)
     assert "disk full" in buffer.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# /effort and the /status effort row
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_effort_show_set_warn_and_clear(tmp_path):
+    """/effort 显示当前值、设置档位、警告放行未知档位、default 清除."""
+    ctx, buffer = _ctx(tmp_path, answers=[])
+    ctx.state.provider.reasoning_effort = "high"
+
+    await dispatch("/effort", ctx)
+    assert "high" in buffer.getvalue()
+
+    await dispatch("/effort low", ctx)
+    assert ctx.state.provider.reasoning_effort == "low"
+
+    await dispatch("/effort ultra", ctx)
+    assert ctx.state.provider.reasoning_effort == "ultra"
+    assert "not a known tier" in buffer.getvalue()
+
+    await dispatch("/effort default", ctx)
+    assert ctx.state.provider.reasoning_effort is None
+
+
+@pytest.mark.asyncio
+async def test_status_shows_effort_row(tmp_path):
+    """/status 表格包含 effort 行."""
+    ctx, buffer = _ctx(tmp_path, answers=[])
+    ctx.state.provider.reasoning_effort = "high"
+    await dispatch("/status", ctx)
+    assert "effort" in buffer.getvalue()
+    assert "high" in buffer.getvalue()

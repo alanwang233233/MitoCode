@@ -26,6 +26,7 @@ from mitocode.cli.theme import MITOCODE_THEME
 from mitocode.cli.ui import (
     DEFAULT_HISTORY_PATH,
     PROMPT_MESSAGE,
+    SLASH_COMMANDS,
     BannerInfo,
     CliUI,
 )
@@ -470,3 +471,8 @@ def test_background_begin_tool_keeps_main_thinking_and_reasoning_region():
 def _tool_line() -> Text:
     """Build a minimal tool header for begin_tool calls."""
     return Text("Read a.py")
+
+
+def test_slash_commands_include_effort():
+    """/effort 出现在输入补全命令列表中."""
+    assert "effort" in SLASH_COMMANDS

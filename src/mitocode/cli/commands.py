@@ -32,6 +32,7 @@ from rich.text import Text
 
 from loguru import logger as loguru_logger
 
+from mitocode.cli.config import KNOWN_REASONING_EFFORTS
 from mitocode.cli.state import CommandContext
 
 if TYPE_CHECKING:
@@ -409,6 +410,10 @@ async def _cmd_status(ctx: CommandContext, args: List[str]) -> CommandResult:
     table.add_column("Value")
     table.add_row("session", Text(f"#{state.main_id} {name}"))
     table.add_row("model", Text(_model_name(state)))
+    table.add_row(
+        "effort",
+        Text(str(getattr(state.provider, "reasoning_effort", None) or "default")),
+    )
     table.add_row("workspace", Text(_workspace_path(state)))
     table.add_row("messages", Text(str(len(getattr(session, "messages", []) or []))))
     table.add_row("tokens", Text(f"~{state.estimate_tokens()}"))
@@ -478,6 +483,51 @@ async def _cmd_model(ctx: CommandContext, args: List[str]) -> CommandResult:
             provider.model_list = registered
     provider.default_model = chosen
     ctx.ui.note(f"Model set to {chosen}.")
+    return CommandResult()
+
+
+@command("effort", "/effort [tier]", "Show or set the reasoning effort tier.")
+async def _cmd_effort(ctx: CommandContext, args: List[str]) -> CommandResult:
+    """Show or set ``provider.reasoning_effort`` for this session.
+
+    A tier outside :data:`KNOWN_REASONING_EFFORTS` is warned about but still
+    accepted, mirroring the startup warning: endpoints expose private tiers,
+    and a typo only surfaces at request time. ``default`` is a reserved word
+    that clears the setting so requests omit the parameter again.
+
+    Args:
+        ctx: Command context.
+        args: Optional tier name.
+
+    Returns:
+        A default result.
+    """
+    provider = ctx.state.provider
+    if not args:
+        current = getattr(provider, "reasoning_effort", None) or "default (not sent)"
+        ctx.ui.console.print(Text(f"  effort: {current}", style="mito.muted"))
+        ctx.ui.console.print(
+            Text(
+                "  known tiers: "
+                + " ".join(sorted(KNOWN_REASONING_EFFORTS))
+                + " · /effort default to clear",
+                style="mito.muted",
+            )
+        )
+        return CommandResult()
+    value = args[0].strip().lower()
+    if value == "default":
+        provider.reasoning_effort = None
+        ctx.ui.note("Reasoning effort cleared; requests will not carry it.")
+        return CommandResult()
+    if value not in KNOWN_REASONING_EFFORTS:
+        ctx.ui.warn(
+            f"'{value}' is not a known tier "
+            f"({', '.join(sorted(KNOWN_REASONING_EFFORTS))}); "
+            "passing it through anyway."
+        )
+    provider.reasoning_effort = value
+    ctx.ui.note(f"Reasoning effort set to {value}.")
     return CommandResult()
 
 

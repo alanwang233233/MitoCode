@@ -54,6 +54,7 @@ SLASH_COMMANDS: tuple[str, ...] = (
     "help",
     "status",
     "model",
+    "effort",
     "clear",
     "agents",
     "tools",
