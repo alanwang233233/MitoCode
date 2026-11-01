@@ -166,21 +166,9 @@ def resolve_provider_config(
         (_SOURCE_SECRET, secret.get("model")),
     )
     timeout = _resolve_timeout(args.timeout, environment, dotenv, secret)
-    reasoning_effort, reasoning_effort_source = _first_text(
-        (_SOURCE_FLAGS, args.reasoning_effort),
-        (_SOURCE_ENVIRONMENT, _first_env(environment, _REASONING_EFFORT_NAMES)),
-        (_SOURCE_DOTENV, _first_env(dotenv, _REASONING_EFFORT_NAMES)),
-        (_SOURCE_SECRET, _as_text(secret.get("reasoning_effort"))),
+    reasoning_effort = _resolve_reasoning_effort(
+        args.reasoning_effort, environment, dotenv, secret
     )
-    if reasoning_effort is not None:
-        reasoning_effort = reasoning_effort.lower()
-        if reasoning_effort not in KNOWN_REASONING_EFFORTS:
-            loguru_logger.warning(
-                "reasoning_effort from {} is not a known tier ({}); "
-                "passing it through unchanged",
-                _describe_reasoning_layer(reasoning_effort_source),
-                ", ".join(sorted(KNOWN_REASONING_EFFORTS)),
-            )
 
     missing = [
         name for name, value in (("api_key", api_key), ("model", model)) if not value
@@ -303,6 +291,46 @@ def _resolve_timeout(
             "must be a finite number of seconds greater than zero"
         )
     return timeout
+
+
+def _resolve_reasoning_effort(
+    flag_value: Optional[str],
+    environment: Mapping[str, str],
+    dotenv: Mapping[str, str],
+    secret: Mapping[str, object],
+) -> Optional[str]:
+    """Resolve the reasoning effort tier from every layer and warn on a miss.
+
+    Args:
+        flag_value: ``--reasoning-effort`` value, already parsed by argparse.
+        environment: Process environment mapping.
+        dotenv: Parsed ``.env`` mapping.
+        secret: Local secret file mapping.
+
+    Returns:
+        The lowercase tier to pass through, or ``None`` when no layer
+        supplied one. A value outside :data:`KNOWN_REASONING_EFFORTS` is
+        still returned — different endpoints expose private tiers — but a
+        value-free warning is logged, because a typo would otherwise only
+        fail (or be silently ignored) at the endpoint.
+    """
+    raw, source = _first_text(
+        (_SOURCE_FLAGS, flag_value),
+        (_SOURCE_ENVIRONMENT, _first_env(environment, _REASONING_EFFORT_NAMES)),
+        (_SOURCE_DOTENV, _first_env(dotenv, _REASONING_EFFORT_NAMES)),
+        (_SOURCE_SECRET, _as_text(secret.get("reasoning_effort"))),
+    )
+    if raw is None:
+        return None
+    tier = raw.lower()
+    if tier not in KNOWN_REASONING_EFFORTS:
+        loguru_logger.warning(
+            "reasoning_effort from {} is not a known tier ({}); "
+            "passing it through unchanged",
+            _describe_reasoning_layer(source),
+            ", ".join(sorted(KNOWN_REASONING_EFFORTS)),
+        )
+    return tier
 
 
 def _describe_reasoning_layer(source: Optional[str]) -> str:

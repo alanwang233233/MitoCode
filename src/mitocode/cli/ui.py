@@ -457,8 +457,8 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
         spinner is replaced by the tool spinner. A background call keeps the
         main agent's thinking or reasoning region alive — its header and
         result lines print above it — and only shows its own spinner when
-        nothing else is active, so background work can never break up a
-        main-agent thinking segment or its clock.
+        the region is idle or already showing a tool spinner, so background
+        work can never break up a main-agent thinking segment or its clock.
 
         Args:
             call: Header produced by

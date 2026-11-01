@@ -579,7 +579,9 @@ async def test_unknown_effort_tier_warns_at_startup(tmp_path, monkeypatch):
     ui = _ui()
 
     result = await bootstrap(
-        _args(workspace=tmp_path, model="my-model", api_key="k", reasoning_effort="ultra"),
+        _args(
+            workspace=tmp_path, model="my-model", api_key="k", reasoning_effort="ultra"
+        ),
         ui,
         CliApprover(ui),
     )
@@ -597,7 +599,9 @@ async def test_known_effort_tier_is_silent(tmp_path, monkeypatch):
     ui = _ui()
 
     result = await bootstrap(
-        _args(workspace=tmp_path, model="my-model", api_key="k", reasoning_effort="high"),
+        _args(
+            workspace=tmp_path, model="my-model", api_key="k", reasoning_effort="high"
+        ),
         ui,
         CliApprover(ui),
     )
