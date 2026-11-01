@@ -5,6 +5,7 @@ import unittest.mock as mock
 from types import SimpleNamespace
 
 import pytest
+from loguru import logger as loguru_logger
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -1049,11 +1050,21 @@ async def test_destroy_agent_while_running_cancels_child_task():
     ), "销毁后再向该 id 发消息应返回 None"
 
     after = _drain_events(orchestrator)
-    assert len(after) == 2, "销毁后应只有销毁自身与任务 finally 各推送一次树同步"
-    assert all(
-        aid == -1 and payload["type"] == "sync" for aid, payload in after
-    ), "销毁后到达队列的都应是树同步，不应再有该会话的运行时事件"
-    assert [payload["agents"] for _, payload in after] == [
+    assert len(after) == 3, (
+        "销毁推送一次树同步，被取消的任务补发恰好一条中止事件、"
+        "其 finally 再推送一次树同步"
+    )
+    assert (
+        after[0][0] == -1 and after[0][1]["type"] == "sync"
+    ), "第一条应是销毁自身推送的树同步"
+    assert after[1] == (
+        child.agent_id,
+        {"type": "turn_cancelled", "agent_id": child.agent_id},
+    ), "被硬取消的任务必须补发恰好一条 turn_cancelled，否则 TUI 永远不知道轮次被打断"
+    assert (
+        after[2][0] == -1 and after[2][1]["type"] == "sync"
+    ), "最后一条应是任务 finally 推送的树同步"
+    assert [payload["agents"] for aid, payload in after if aid == -1] == [
         [
             {
                 "id": parent.agent_id,
@@ -1354,3 +1365,191 @@ async def test_get_tree_snapshot_exposes_the_six_tui_keys():
     }, "快照节点键集合必须与 TUI 契约一致"
     assert node["state"] == "idle", "从未运行过的会话状态应为 idle"
     assert node["sub_agent"] == [], "新会话的子代理列表应为空"
+
+
+# ──────────────────────────────────────────────
+# AgentOrchestrator: 硬取消（task.cancel）时的中止事件补发
+# ──────────────────────────────────────────────
+
+
+def _turn_cancelled_events(events, agent_id):
+    """从队列事件中筛出某个 agent 的 turn_cancelled 载荷列表."""
+    return [
+        payload
+        for aid, payload in events
+        if aid == agent_id and payload["type"] == "turn_cancelled"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_streaming_emits_exactly_one_turn_cancelled():
+    """流式输出中被硬取消 → 恰好一条 turn_cancelled，状态 CANCELLED，异常照常上抛."""
+    provider = _TextThenGateProvider()
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    session = await orchestrator.create_session(name="stream-cancel", provider=provider)
+    _drain_events(orchestrator)
+
+    task = await orchestrator.send_message(session.agent_id, "hi")
+    await asyncio.wait_for(provider.started.wait(), timeout=2.0)
+    _drain_events(orchestrator)
+
+    # cancel_agent 与 Repl.handle_sigint 同构：置位取消标记并立即 cancel 任务。
+    await orchestrator.cancel_agent(session.agent_id)
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2.0)
+
+    events = _drain_events(orchestrator)
+    assert (
+        len(_turn_cancelled_events(events, session.agent_id)) == 1
+    ), f"硬取消必须补发恰好一条 turn_cancelled，实际事件 {events}"
+    assert session.state is AgentState.CANCELLED, "硬取消后状态应落到 CANCELLED"
+    assert all(
+        payload["type"] != "turn_end"
+        for aid, payload in events
+        if aid == session.agent_id
+    ), "被取消的轮次不应同时产出 turn_end"
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_tool_execution_emits_exactly_one_turn_cancelled():
+    """工具执行中被硬取消 → 恰好一条 turn_cancelled 且会话历史保持合法."""
+    tool_started = asyncio.Event()
+
+    async def probe(x: int) -> str:
+        tool_started.set()
+        await asyncio.sleep(30)
+        return f"probe:{x}"
+
+    manager = ToolManager()
+    manager.register(probe, name="probe", human_doc="probe doc")
+    provider = _ToolCallTurnProvider()
+    orchestrator = AgentOrchestrator(
+        tool_manager=manager, default_provider=EchoProvider()
+    )
+    session = await orchestrator.create_session(name="tool-cancel", provider=provider)
+    _drain_events(orchestrator)
+
+    task = await orchestrator.send_message(session.agent_id, "go")
+    await asyncio.wait_for(tool_started.wait(), timeout=2.0)
+
+    await orchestrator.cancel_agent(session.agent_id)
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2.0)
+
+    events = _drain_events(orchestrator)
+    assert (
+        len(_turn_cancelled_events(events, session.agent_id)) == 1
+    ), f"工具执行中的硬取消必须补发恰好一条 turn_cancelled，实际事件 {events}"
+    assert session.state is AgentState.CANCELLED, "硬取消后状态应落到 CANCELLED"
+
+    context = session.build_standard_context()
+    call_ids = {
+        call["id"]
+        for message in context
+        if message.get("role") == "assistant" and message.get("tool_calls")
+        for call in message["tool_calls"]
+    }
+    result_ids = {
+        message["tool_call_id"] for message in context if message.get("role") == "tool"
+    }
+    assert (
+        call_ids == result_ids == {"call_1"}
+    ), "被打断的工具调用应补上合成结果，保持 assistant/tool 消息成对"
+
+
+@pytest.mark.asyncio
+async def test_cooperative_cancel_emits_exactly_one_turn_cancelled_without_raising():
+    """只置位会话取消标记（不 cancel 任务）→ 恰好一条 turn_cancelled 且任务正常结束."""
+    provider = _TextThenGateProvider()
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    session = await orchestrator.create_session(name="coop-cancel", provider=provider)
+    _drain_events(orchestrator)
+
+    task = await orchestrator.send_message(session.agent_id, "hi")
+    await asyncio.wait_for(provider.started.wait(), timeout=2.0)
+    _drain_events(orchestrator)
+
+    session.cancel()
+    provider.gate.set()
+
+    await asyncio.wait_for(task, timeout=2.0)
+
+    events = _drain_events(orchestrator)
+    assert (
+        len(_turn_cancelled_events(events, session.agent_id)) == 1
+    ), f"协作式取消必须恰好产出一条 turn_cancelled，实际事件 {events}"
+    assert session.state is AgentState.CANCELLED, "协作式取消后状态应落到 CANCELLED"
+    assert task.cancelled() is False, "协作式取消由运行时自查结束，任务不应是 cancelled"
+
+
+# ──────────────────────────────────────────────
+# AgentOrchestrator: 配置 secret 的字面抹除
+# ──────────────────────────────────────────────
+
+
+class _SecretBoomProvider(EchoProvider):
+    """Provider that raises with a configured non-``sk-`` secret in the message."""
+
+    async def chat(self, tools=None, messages=None, **kwargs):
+        raise RuntimeError("request failed token=super-secret-42")
+
+
+@pytest.mark.asyncio
+async def test_run_session_redacts_configured_secret_from_event_and_log():
+    """配置的普通 API key 在错误事件消息与日志 traceback 中都被字面抹除."""
+    records: list = []
+    orchestrator = AgentOrchestrator(
+        default_provider=_SecretBoomProvider(),
+        redact_secrets=("super-secret-42",),
+    )
+    agent_id = await orchestrator.create_agent(name="secret-boom")
+
+    handler_id = loguru_logger.add(records.append, level="ERROR")
+    try:
+        task = await orchestrator.send_message(agent_id, "hi")
+        await asyncio.wait_for(task, timeout=2.0)
+    finally:
+        loguru_logger.remove(handler_id)
+
+    events = _drain_events(orchestrator)
+    errors = [payload for _, payload in events if payload.get("type") == "error"]
+    assert errors, "provider 失败必须产生一条 error 事件"
+    assert (
+        "super-secret-42" not in errors[0]["message"]
+    ), "配置的 key 不得进入 error 事件消息"
+    assert (
+        errors[0]["message"] == "request failed token=***"
+    ), "字面 secret 应被替换为 *** 且其余文本保持可诊断"
+    assert orchestrator.get_session(agent_id).state is AgentState.ERROR
+
+    log_text = "".join(str(record) for record in records)
+    assert "run failed" in log_text, "错误日志应被捕获（含 traceback）"
+    assert "super-secret-42" not in log_text, "配置的 key 不得进入日志 traceback"
+    assert "request failed token=***" in log_text, "日志应保留抹除后的可诊断文本"
+
+
+class _BlankSecretBoomProvider(EchoProvider):
+    """Provider that raises a plain message, used against blank secrets."""
+
+    async def chat(self, tools=None, messages=None, **kwargs):
+        raise RuntimeError("plain boom")
+
+
+@pytest.mark.asyncio
+async def test_blank_redact_secrets_are_ignored():
+    """空白 secret 被忽略 → 不会把错误消息替换成星号碎片."""
+    orchestrator = AgentOrchestrator(
+        default_provider=_BlankSecretBoomProvider(),
+        redact_secrets=("", "   "),
+    )
+    agent_id = await orchestrator.create_agent(name="blank-secret")
+    task = await orchestrator.send_message(agent_id, "hi")
+    await asyncio.wait_for(task, timeout=2.0)
+
+    events = _drain_events(orchestrator)
+    errors = [payload for _, payload in events if payload.get("type") == "error"]
+    assert (
+        errors and errors[0]["message"] == "plain boom"
+    ), "空串/空白 secret 必须被忽略，否则 replace('') 会撕碎整条消息"

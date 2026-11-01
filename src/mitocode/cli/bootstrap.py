@@ -401,6 +401,10 @@ async def bootstrap(args: CliArgs, ui: CliUI, approver: CliApprover) -> Bootstra
             tool_manager=tool_manager,
             default_provider=provider,
             system_prompt=build_system_prompt(resolution.workspace.path),
+            # resolve_provider_config validated the key as non-blank, so the
+            # orchestrator can scrub the literal secret out of every provider
+            # failure's log line and error event.
+            redact_secrets=(provider_config.api_key,),
         )
         tool_context.attach_orchestrator(orchestrator)
 
@@ -500,6 +504,10 @@ async def _start_mcp(
 ) -> "tuple[Optional[McpManager], str]":
     """Read the MCP configuration and start every configured server.
 
+    A manager whose ``start()`` raises -- including a cancellation that lands
+    while servers are still connecting -- is stopped before the exception
+    propagates, so no stdio subprocess outlives the failed startup.
+
     Args:
         args: Parsed command line arguments, carrying ``--no-mcp`` and
             ``--mcp-config``.
@@ -521,12 +529,20 @@ async def _start_mcp(
         if servers is None:
             return None, ""
         manager = McpManager(servers, tool_manager=tool_manager)
-        await manager.start()
     except MitoCodeMcpConfigError as exc:
         if args.mcp_config is not None:
             raise MitoCodeCliConfigError(str(exc)) from exc
         ui.warn(f"MCP is disabled: {exc}")
         return None, str(exc)
+
+    try:
+        await manager.start()
+    except BaseException:
+        # Some servers may already be live when the exception or cancellation
+        # arrives; without this teardown the local manager reference would be
+        # lost and every subprocess it started would be orphaned.
+        await _stop_mcp_after_failure(manager)
+        raise
 
     return manager, ""
 

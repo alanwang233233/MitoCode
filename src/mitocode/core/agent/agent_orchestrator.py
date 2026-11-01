@@ -4,7 +4,7 @@ import asyncio
 import copy
 import re
 import traceback
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
 from loguru import logger as loguru_logger
 
@@ -23,7 +23,7 @@ logger = loguru_logger.bind(name=__name__)
 _API_KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]+")
 
 
-class AgentOrchestrator:
+class AgentOrchestrator:  # pylint: disable=too-many-instance-attributes
     """Central controller that directly manages multiple agent sessions.
 
     Responsibilities:
@@ -42,6 +42,7 @@ class AgentOrchestrator:
         tool_manager: ToolManager | None = None,
         default_provider: SampleChatProvider | ScenarioProvider | None = None,
         system_prompt: str = "",
+        redact_secrets: Sequence[str] = (),
     ):
         """Create an orchestrator.
 
@@ -51,6 +52,9 @@ class AgentOrchestrator:
             system_prompt: Role instructions seeded into every session this
                 orchestrator creates, including child agents. An explicit
                 ``system_prompt`` passed to :meth:`create_session` wins.
+            redact_secrets: Literal secret values (e.g. the configured API
+                key) scrubbed from error messages and error logs alongside the
+                ``sk-`` pattern. Blank entries are ignored.
         """
         self._sessions: Dict[int, AgentSession] = {}
         self._tasks: Dict[int, asyncio.Task | None] = {}
@@ -60,6 +64,9 @@ class AgentOrchestrator:
             default_provider
         )
         self._system_prompt: str = system_prompt or ""
+        self._redact_secrets: tuple[str, ...] = tuple(
+            secret for secret in redact_secrets if secret and secret.strip()
+        )
         self._bridge = EventBridge(tool_manager)
         self.event_queue: asyncio.Queue = asyncio.Queue()
 
@@ -82,6 +89,25 @@ class AgentOrchestrator:
             The text with every matched secret replaced by ``sk-***``.
         """
         return _API_KEY_PATTERN.sub("sk-***", message)
+
+    def _redact_message(self, message: str) -> str:
+        """Scrub this orchestrator's configured secrets out of *message*.
+
+        Every literal secret passed as ``redact_secrets`` is replaced first, so
+        a key the ``sk-`` pattern cannot shape-match (the CLI accepts any
+        non-blank key) is still gone; the static :meth:`redact_api_keys` pass
+        then runs unchanged on the result.
+
+        Args:
+            message: Raw text, typically an exception message or traceback.
+
+        Returns:
+            The text with every configured secret replaced by ``***`` and
+            every ``sk-``-shaped key replaced by ``sk-***``.
+        """
+        for secret in self._redact_secrets:
+            message = message.replace(secret, "***")
+        return self.redact_api_keys(message)
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -296,8 +322,11 @@ class AgentOrchestrator:
         if session is None:
             # The session was destroyed before this task got scheduled.
             return
+        cancel_event_seen = False
         try:
             async for raw_event in AgentRuntime.run(session):
+                if raw_event.get("event") == "system.cancelled":
+                    cancel_event_seen = True
                 adapted = self._bridge.adapt(raw_event, agent_id)
                 if adapted is not None:
                     await self.event_queue.put((agent_id, adapted))
@@ -308,6 +337,7 @@ class AgentOrchestrator:
                 session.state = AgentState.FINISHED
         except asyncio.CancelledError:
             session.state = AgentState.CANCELLED
+            self._emit_synthetic_cancel(agent_id, cancel_event_seen)
             raise
         except Exception as exc:  # pylint: disable=broad-exception-caught
             # Provider failures stay inside the run loop on purpose: the TUI
@@ -316,7 +346,7 @@ class AgentOrchestrator:
             # the redacted message so a key can never reach a pane or a log sink.
             logger.error(
                 f"Agent {agent_id} run failed\n"
-                f"{self.redact_api_keys(traceback.format_exc())}"
+                f"{self._redact_message(traceback.format_exc())}"
             )
             await self.event_queue.put(
                 (
@@ -324,7 +354,7 @@ class AgentOrchestrator:
                     {
                         "type": "error",
                         "agent_id": agent_id,
-                        "message": self.redact_api_keys(str(exc)),
+                        "message": self._redact_message(str(exc)),
                     },
                 )
             )
@@ -333,3 +363,31 @@ class AgentOrchestrator:
             if self._tasks.get(agent_id) is asyncio.current_task():
                 self._tasks[agent_id] = None
             await self._push_tree_sync()
+
+    def _emit_synthetic_cancel(self, agent_id: int, cancel_event_seen: bool) -> None:
+        """Queue the cancellation event a hard task kill never let the runtime yield.
+
+        ``task.cancel()`` injects ``CancelledError`` straight into whatever the
+        turn was awaiting, so the runtime's cooperative checkpoints never run
+        and no ``system.cancelled`` event is yielded; the consumer would never
+        learn that the turn ended. The event is synthesised here instead,
+        exactly once per run: when the cooperative path already yielded one,
+        *cancel_event_seen* is ``True`` and nothing is queued, so the consumer
+        never sees a duplicate. ``put_nowait`` is used because awaiting inside
+        a cancelled task's handler would let a second cancellation abort the
+        emit.
+
+        Args:
+            agent_id: Id of the agent whose turn was cancelled.
+            cancel_event_seen: Whether the runtime already yielded its own
+                ``system.cancelled`` event during this run.
+        """
+        if cancel_event_seen:
+            return
+        adapted = self._bridge.adapt({"event": "system.cancelled"}, agent_id)
+        if adapted is None:
+            return
+        try:
+            self.event_queue.put_nowait((agent_id, adapted))
+        except asyncio.QueueFull:
+            pass

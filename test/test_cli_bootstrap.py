@@ -6,6 +6,7 @@ the design fixes: MCP must start before the first agent session exists, because
 ``AgentSession`` snapshots the tool registry in its constructor.
 """
 
+import asyncio
 import os
 import sys
 from io import StringIO
@@ -28,6 +29,8 @@ from mitocode.cli.bootstrap import (
 )
 from mitocode.cli.errors import MitoCodeCliConfigError
 from mitocode.cli.ui import CliUI
+from mitocode.core.tool.tool_manager import ToolManager
+from mitocode.core.workspace.workspace import Workspace
 
 ORDERS: list[str] = []
 
@@ -401,3 +404,167 @@ async def test_session_failure_after_mcp_start_stops_the_manager(tmp_path, monke
     assert ORDERS.index("mcp.start") < ORDERS.index("mcp.stop")
     assert ORDERS.index("create_session") < ORDERS.index("mcp.stop")
     assert _FakeMcp.instances[-1].config is not None
+
+
+# ──────────────────────────────────────────────
+# _start_mcp: start() 失败时不得遗留 manager
+# ──────────────────────────────────────────────
+
+
+def _workspace(root: Path) -> Workspace:
+    """Build a workspace rooted at *root* for direct ``_start_mcp`` calls.
+
+    Args:
+        root: Directory the default MCP configuration is read from.
+
+    Returns:
+        The workspace object.
+    """
+    return Workspace(root, "test-workspace", 1)
+
+
+class _FailingStartMcp:
+    """MCP manager stand-in whose ``start()`` raises a scripted exception.
+
+    Attributes:
+        failure: Exception instance raised by ``start()``.
+    """
+
+    def __init__(self, config, *, tool_manager):
+        self.config = config
+        self.tool_manager = tool_manager
+
+    async def start(self):
+        """Raise the scripted failure after recording the start."""
+        ORDERS.append("mcp.start")
+        raise _FailingStartMcp.failure
+
+    async def stop(self):
+        """Record a stop without touching real subprocesses."""
+        ORDERS.append("mcp.stop")
+
+
+@pytest.mark.asyncio
+async def test_start_mcp_cancelled_stops_manager_and_propagates(tmp_path, monkeypatch):
+    """start() 被取消 → 先 shielded stop 掉 manager，CancelledError 原样传播."""
+    ORDERS.clear()
+    _FailingStartMcp.failure = asyncio.CancelledError()
+    monkeypatch.setattr(bootstrap_module, "McpManager", _FailingStartMcp)
+    _write_mcp(tmp_path, '{"mcpServers":{"s":{"command":"echo"}}}')
+    ui = _ui()
+
+    with pytest.raises(asyncio.CancelledError):
+        await bootstrap_module._start_mcp(
+            _args(workspace=tmp_path), _workspace(tmp_path), ToolManager(), ui
+        )
+
+    assert ORDERS.count("mcp.stop") == 1, "取消传播前必须 stop 已启动的 manager"
+    assert ORDERS.index("mcp.start") < ORDERS.index("mcp.stop")
+
+
+@pytest.mark.asyncio
+async def test_start_mcp_runtime_error_stops_manager_and_propagates(
+    tmp_path, monkeypatch
+):
+    """start() 抛 RuntimeError → 先 stop manager，异常原样传播."""
+    ORDERS.clear()
+    _FailingStartMcp.failure = RuntimeError("connect exploded")
+    monkeypatch.setattr(bootstrap_module, "McpManager", _FailingStartMcp)
+    _write_mcp(tmp_path, '{"mcpServers":{"s":{"command":"echo"}}}')
+    ui = _ui()
+
+    with pytest.raises(RuntimeError, match="connect exploded"):
+        await bootstrap_module._start_mcp(
+            _args(workspace=tmp_path), _workspace(tmp_path), ToolManager(), ui
+        )
+
+    assert ORDERS.count("mcp.stop") == 1, "异常传播前必须 stop 已启动的 manager"
+    assert ORDERS.index("mcp.start") < ORDERS.index("mcp.stop")
+
+
+@pytest.mark.asyncio
+async def test_start_mcp_success_path_returns_manager_without_stop(
+    tmp_path, monkeypatch
+):
+    """start() 成功 → 返回 (manager, "") 且不触发任何 stop."""
+    ORDERS.clear()
+    _patch(monkeypatch)
+    _write_mcp(tmp_path, '{"mcpServers":{"s":{"command":"echo"}}}')
+    ui = _ui()
+
+    manager, error = await bootstrap_module._start_mcp(
+        _args(workspace=tmp_path), _workspace(tmp_path), ToolManager(), ui
+    )
+
+    assert isinstance(manager, _FakeMcp), "成功路径应返回启动的 manager 本身"
+    assert error == ""
+    assert ORDERS == ["mcp.start"], "成功路径不应有 stop 或其它记录"
+
+
+@pytest.mark.asyncio
+async def test_config_error_path_never_constructs_or_stops_a_manager(
+    tmp_path, monkeypatch
+):
+    """默认 MCP 配置损坏 → 仅警告禁用，不构造 manager 也不调用 stop."""
+    ORDERS.clear()
+    _patch(monkeypatch)
+    _write_mcp(tmp_path, "{ not json")
+    ui = _ui()
+    known = len(_FakeMcp.instances)
+
+    result = await bootstrap(
+        _args(workspace=tmp_path, model="m", api_key="k"), ui, CliApprover(ui)
+    )
+
+    assert result.mcp_manager is None
+    assert result.mcp_error
+    assert len(_FakeMcp.instances) == known, "配置错误路径不应构造任何 manager"
+    assert "mcp.stop" not in ORDERS, "不存在 manager 时不得调用 stop"
+
+
+@pytest.mark.asyncio
+async def test_explicit_config_error_propagates_without_stopping(tmp_path, monkeypatch):
+    """显式 MCP 配置损坏 → 启动失败传播，且不构造、不 stop 任何 manager."""
+    ORDERS.clear()
+    _patch(monkeypatch)
+    explicit = tmp_path / "servers.json"
+    explicit.write_text("{", encoding="utf-8")
+    ui = _ui()
+    known = len(_FakeMcp.instances)
+
+    with pytest.raises(MitoCodeCliConfigError):
+        await bootstrap(
+            _args(
+                workspace=tmp_path,
+                model="m",
+                api_key="k",
+                mcp_config=explicit,
+            ),
+            ui,
+            CliApprover(ui),
+        )
+
+    assert len(_FakeMcp.instances) == known, "配置错误路径不应构造任何 manager"
+    assert "mcp.stop" not in ORDERS, "不存在 manager 时不得调用 stop"
+
+
+# ──────────────────────────────────────────────
+# bootstrap: API key 交给 orchestrator 用于字面抹除
+# ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_passes_provider_api_key_for_redaction(tmp_path, monkeypatch):
+    """bootstrap 把解析出的 API key 作为 redact_secrets 传给 orchestrator."""
+    ORDERS.clear()
+    _patch(monkeypatch)
+    (tmp_path / ".mitocode").mkdir()
+    ui = _ui()
+
+    result = await bootstrap(
+        _args(workspace=tmp_path, model="m", api_key="k"), ui, CliApprover(ui)
+    )
+
+    assert result.orchestrator.kw["redact_secrets"] == (
+        "k",
+    ), "orchestrator 必须拿到字面 key 才能在错误事件与日志中抹除它"
