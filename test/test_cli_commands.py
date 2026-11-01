@@ -601,11 +601,12 @@ async def test_estimate_tokens_counts_message_and_tool_text(tmp_path):
         SimpleNamespace(message="abcdefgh", content="", parameter={}),
         SimpleNamespace(message="", content="1234", parameter={}),
         SimpleNamespace(message="", content="", parameter={"path": "ab"}),
+        SimpleNamespace(message="", content="", parameter={}, reasoning_content="12345678"),
     ]
     session = _FakeSession(messages=messages)
     ctx = _ctx(tmp_path, orchestrator=_FakeOrchestrator(sessions={0: session}))[0]
 
-    assert ctx.state.estimate_tokens() == 6
+    assert ctx.state.estimate_tokens() == 8
 
 
 @pytest.mark.asyncio
