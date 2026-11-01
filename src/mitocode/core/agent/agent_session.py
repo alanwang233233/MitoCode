@@ -99,7 +99,7 @@ class _ToolResultMessageBlock(_MessageBlock):
         self.finished = True
 
 
-class AgentSession:
+class AgentSession:  # pylint: disable=too-many-instance-attributes
     """Stateful conversation container for one agent.
 
     Holds the message history as a list of internal message blocks, merges

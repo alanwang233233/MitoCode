@@ -477,8 +477,8 @@ class TestRunReasoning:
         ]
 
     @pytest.mark.asyncio
-    async def test_run_reasoning_never_enters_standard_context(self, make_session):
-        """思维链绝不进入 build_standard_context 的回传消息."""
+    async def test_run_reasoning_replays_into_standard_context(self, make_session):
+        """修订 v2：思维链随 assistant 消息进入回传上下文."""
         provider = _ScriptedProvider(
             [
                 [
@@ -490,9 +490,63 @@ class TestRunReasoning:
         )
         session = make_session(provider)
         await _drain_events(AgentRuntime.run(session))
-        serialized = str(session.build_standard_context())
-        assert "秘密思考" not in serialized
-        assert "答案" in serialized
+        last = session.build_standard_context()[-1]
+        assert last["reasoning_content"] == "秘密思考"
+        assert last["content"] == "答案"
+
+    @pytest.mark.asyncio
+    async def test_run_reasoning_before_tool_calls_replays_on_tool_calls_message(
+        self, make_session
+    ):
+        """思考→工具调用场景：思考落在带 tool_calls 的 assistant 消息上."""
+        provider = _ScriptedProvider(
+            [
+                [
+                    _Chunk(reasoning_content="先查天气"),
+                    _Chunk(
+                        tool_calls=[
+                            _ToolCallChunk(
+                                0, call_id=CALL_ID_PRIMARY, name=TOOL_NAME_WEATHER
+                            )
+                        ]
+                    ),
+                    _Chunk(finish_reason=REASON_TOOL_CALLS),
+                ],
+                [_Chunk(content="晴天"), _Chunk(finish_reason=REASON_STOP)],
+            ]
+        )
+        session = make_session(provider)
+        await _drain_events(AgentRuntime.run(session))
+        context = session.build_standard_context()
+        with_calls = [m for m in context if m.get("tool_calls")]
+        assert len(with_calls) == 1
+        assert with_calls[0]["reasoning_content"] == "先查天气"
+        assert context[-1]["content"] == "晴天"
+
+    @pytest.mark.asyncio
+    async def test_run_reasoning_only_round_seals_into_context(self, make_session):
+        """本轮只有思考没有正文/工具调用：封存为空 content 的 assistant 消息."""
+        provider = _ScriptedProvider(
+            [[_Chunk(reasoning_content="白想了"), _Chunk(finish_reason=REASON_STOP)]]
+        )
+        session = make_session(provider)
+        await _drain_events(AgentRuntime.run(session))
+        last = session.build_standard_context()[-1]
+        assert last == {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "白想了",
+        }
+
+    @pytest.mark.asyncio
+    async def test_run_without_reasoning_adds_no_reasoning_key(self, make_session):
+        """普通模型无思考：回传消息不携带 reasoning_content 键."""
+        provider = _ScriptedProvider(
+            [[_Chunk(content="hi"), _Chunk(finish_reason=REASON_STOP)]]
+        )
+        session = make_session(provider)
+        await _drain_events(AgentRuntime.run(session))
+        assert "reasoning_content" not in session.build_standard_context()[-1]
 
     @pytest.mark.asyncio
     async def test_run_without_reasoning_fields_yields_no_reasoning_events(

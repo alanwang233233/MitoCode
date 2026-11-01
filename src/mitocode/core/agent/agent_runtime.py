@@ -4,11 +4,7 @@ import asyncio
 import inspect
 from typing import AsyncGenerator, Dict, Any
 
-from .agent_session import (
-    AgentSession,
-    _ToolCallMessageBlock,
-    _ToolResultMessageBlock,
-)
+from .agent_session import AgentSession, _ToolResultMessageBlock
 
 from mitocode.core.tool.builtin.context import current_agent_id
 
@@ -104,11 +100,12 @@ class AgentRuntime:
                 delta = chunk.choices[0].delta
                 finish_reason = chunk.choices[0].finish_reason
 
-                # 0. Handle Reasoning (display-only; never persisted to history)
+                # 0. Handle Reasoning (display event + persisted for replay)
                 reasoning_delta = getattr(delta, "reasoning_content", None) or getattr(
                     delta, "reasoning", None
                 )
                 if isinstance(reasoning_delta, str) and reasoning_delta:
+                    session.append_reasoning_delta(reasoning_delta)
                     yield {"event": "agent.reasoning", "delta": reasoning_delta}
 
                 # 1. Handle Text
@@ -143,10 +140,9 @@ class AgentRuntime:
                             if index not in active_tool_blocks:
                                 call_id = tool_calls_dict[index]["id"]
                                 call_name = tool_calls_dict[index]["name"]
-                                block = _ToolCallMessageBlock(
-                                    name=call_name, call_id=call_id
+                                block = session.append_tool_call_block(
+                                    call_name, call_id
                                 )
-                                session.messages.append(block)
                                 active_tool_blocks[index] = block
                                 yield {
                                     "event": "agent.tool_call.header",
@@ -185,6 +181,12 @@ class AgentRuntime:
                 if not stream_cancelled:
                     yield {"event": "system.cancelled"}
                 break
+
+            # A completed round keeps its reasoning: anything still pending was
+            # never attached to a block and is sealed into a bare assistant
+            # message so it reaches the next request. Cancelled rounds skip
+            # this; their leftovers are discarded by the next user prompt.
+            session.seal_round_reasoning()
 
             # 3. Handle End of Stream
             if stream_finished_reason == "tool_calls":

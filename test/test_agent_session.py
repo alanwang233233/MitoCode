@@ -1136,9 +1136,7 @@ class TestReasoningReplay:
         assert block.reasoning_content == "想一下"
         assert block.message == "答"
 
-    def test_pending_claimed_by_tool_block_lands_on_tool_calls_message(
-        self, session
-    ):
+    def test_pending_claimed_by_tool_block_lands_on_tool_calls_message(self, session):
         """思考→工具调用场景：思考落在带 tool_calls 的 assistant 消息上."""
         session.append_reasoning_delta("先查天气")
         block = session.append_tool_call_block(TOOL_NAME_WEATHER, CALL_ID_PRIMARY)
@@ -1149,9 +1147,7 @@ class TestReasoningReplay:
         assert len(assistant) == 1
         assert assistant[0]["reasoning_content"] == "先查天气"
 
-    def test_build_standard_context_emits_reasoning_on_assistant_text(
-        self, session
-    ):
+    def test_build_standard_context_emits_reasoning_on_assistant_text(self, session):
         """思考→正文场景：文本 assistant 消息携带 reasoning_content."""
         session.append_reasoning_delta("想")
         session.append_assistant_delta("答")
@@ -1175,9 +1171,7 @@ class TestReasoningReplay:
         context = session.build_standard_context()
         assert context[-1] == {"role": "user", "content": "问题"}
 
-    def test_merged_tool_calls_message_takes_first_nonempty_reasoning(
-        self, session
-    ):
+    def test_merged_tool_calls_message_takes_first_nonempty_reasoning(self, session):
         """连续工具块合并时取第一个非空思考；后续块不带键."""
         session.append_reasoning_delta("R")
         first = session.append_tool_call_block(TOOL_NAME_WEATHER, CALL_ID_PRIMARY)
@@ -1207,7 +1201,16 @@ class TestReasoningReplay:
         }
         # 幂等：再次封存不会产生第二条消息
         session.seal_round_reasoning()
-        assert len([b for b in session.messages if isinstance(b, _PlainTextMessageBlock) and b.role == "assistant"]) == 1
+        assert (
+            len(
+                [
+                    b
+                    for b in session.messages
+                    if isinstance(b, _PlainTextMessageBlock) and b.role == "assistant"
+                ]
+            )
+            == 1
+        )
 
     def test_append_user_prompt_discards_unclaimed_pending(self, session):
         """取消等场景遗留的未认领思考随新用户轮丢弃."""
