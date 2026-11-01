@@ -1114,3 +1114,116 @@ class TestAgentSessionProviderTypeContract:
             TypeError, match=r"Provider must be an instance of _SampleChatProvider\."
         ):
             AgentSession(provider=bad_provider)
+
+
+# ──────────────────────────────────────────────
+# 思维链回传（reasoning replay）
+# ──────────────────────────────────────────────
+
+
+class TestReasoningReplay:
+    """思维链聚合、认领与 build_standard_context 回传规则测试."""
+
+    def test_append_reasoning_delta_accumulates_and_claims_on_new_text_block(
+        self, session
+    ):
+        """思考 delta 聚合为暂存；下一个新建文本块认领它."""
+        session.append_reasoning_delta("想")
+        session.append_reasoning_delta("一下")
+        session.append_assistant_delta("答")
+        block = session.messages[-1]
+        assert isinstance(block, _PlainTextMessageBlock)
+        assert block.reasoning_content == "想一下"
+        assert block.message == "答"
+
+    def test_pending_claimed_by_tool_block_lands_on_tool_calls_message(self, session):
+        """思考→工具调用场景：思考落在带 tool_calls 的 assistant 消息上."""
+        session.append_reasoning_delta("先查天气")
+        block = session.append_tool_call_block(TOOL_NAME_WEATHER, CALL_ID_PRIMARY)
+        block.append_argument_chunk(VALID_JSON_ARGS)
+        block.finish()
+        context = session.build_standard_context()
+        assistant = [m for m in context if m.get("tool_calls")]
+        assert len(assistant) == 1
+        assert assistant[0]["reasoning_content"] == "先查天气"
+
+    def test_build_standard_context_emits_reasoning_on_assistant_text(self, session):
+        """思考→正文场景：文本 assistant 消息携带 reasoning_content."""
+        session.append_reasoning_delta("想")
+        session.append_assistant_delta("答")
+        context = session.build_standard_context()
+        assert context[-1] == {
+            "role": "assistant",
+            "content": "答",
+            "reasoning_content": "想",
+        }
+
+    def test_build_standard_context_omits_key_when_empty(self, session):
+        """无思考时 assistant 消息不携带 reasoning_content 键（字节级不变）."""
+        session.append_assistant_delta("答")
+        context = session.build_standard_context()
+        assert "reasoning_content" not in context[-1]
+
+    def test_user_and_system_messages_never_carry_reasoning(self, session):
+        """user/system 消息永不携带 reasoning_content 键."""
+        session.append_reasoning_delta("泄漏")
+        session.append_user_prompt("问题")
+        context = session.build_standard_context()
+        assert context[-1] == {"role": "user", "content": "问题"}
+
+    def test_merged_tool_calls_message_takes_first_nonempty_reasoning(self, session):
+        """连续工具块合并时取第一个非空思考；后续块不带键."""
+        session.append_reasoning_delta("R")
+        first = session.append_tool_call_block(TOOL_NAME_WEATHER, CALL_ID_PRIMARY)
+        second = session.append_tool_call_block(TOOL_NAME_WEATHER, CALL_ID_SECONDARY)
+        for block in (first, second):
+            block.append_argument_chunk(VALID_JSON_ARGS)
+            block.finish()
+        context = session.build_standard_context()
+        merged = [m for m in context if m.get("tool_calls")]
+        assert len(merged) == 1
+        assert merged[0]["reasoning_content"] == "R"
+        assert len(merged[0]["tool_calls"]) == 2
+
+    def test_seal_round_reasoning_preserves_unclaimed_thinking(self, session):
+        """本轮只有思考没有任何块时，封存为空 content 的 assistant 消息."""
+        session.append_reasoning_delta("白想了")
+        session.seal_round_reasoning()
+        block = session.messages[-1]
+        assert isinstance(block, _PlainTextMessageBlock)
+        assert block.role == "assistant"
+        assert block.message == ""
+        assert block.reasoning_content == "白想了"
+        assert session.build_standard_context()[-1] == {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "白想了",
+        }
+        # 幂等：再次封存不会产生第二条消息
+        session.seal_round_reasoning()
+        assert (
+            len(
+                [
+                    b
+                    for b in session.messages
+                    if isinstance(b, _PlainTextMessageBlock) and b.role == "assistant"
+                ]
+            )
+            == 1
+        )
+
+    def test_append_user_prompt_discards_unclaimed_pending(self, session):
+        """取消等场景遗留的未认领思考随新用户轮丢弃."""
+        session.append_reasoning_delta("被打断的思考")
+        session.append_user_prompt("新问题")
+        session.append_assistant_delta("新回答")
+        block = session.messages[-1]
+        assert block.reasoning_content == ""
+        assert "被打断的思考" not in str(session.build_standard_context())
+
+    def test_reasoning_after_text_block_claims_next_tool_block(self, session):
+        """块创建后才到达的思考保持先到先得：归下一个工具块."""
+        session.append_assistant_delta("先说结论")
+        session.append_reasoning_delta("再想想")
+        block = session.append_tool_call_block(TOOL_NAME_WEATHER, CALL_ID_PRIMARY)
+        assert block.reasoning_content == "再想想"

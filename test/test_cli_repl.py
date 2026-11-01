@@ -339,6 +339,18 @@ class RecordingUI:
         """Record that the thinking spinner was stopped."""
         self.thinking_stops += 1
 
+    def feed_reasoning(self, delta):
+        """Record a reasoning delta fed by the pump.
+
+        Args:
+            delta: Reasoning text handed to the UI.
+        """
+        self.events.append(("reasoning_feed", delta))
+
+    def end_reasoning(self):
+        """Record that the reasoning region was collapsed."""
+        self.events.append(("reasoning_end", ""))
+
     def pause_live(self):
         """Satisfy the approval contract without rendering anything."""
 

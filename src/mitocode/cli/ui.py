@@ -54,6 +54,7 @@ SLASH_COMMANDS: tuple[str, ...] = (
     "help",
     "status",
     "model",
+    "effort",
     "clear",
     "agents",
     "tools",
@@ -77,8 +78,17 @@ _SUCCESS_STATES = frozenset({"connected", "ready", "running", "ok"})
 _ERROR_STATES = frozenset({"failed", "error", "disconnected", "closed"})
 """MCP states rendered with the error colour."""
 
-_LIVE_STATES = frozenset({"thinking", "tool"})
+_LIVE_STATES = frozenset({"thinking", "reasoning", "tool"})
 """Kinds of transient spinner :class:`CliUI` can show."""
+
+_REASONING_BUFFER_LIMIT = 2000
+"""Maximum characters of reasoning text kept for the live preview."""
+
+_REASONING_PREVIEW_LINES = 6
+"""Maximum number of reasoning lines shown under the Reasoning header."""
+
+_REASONING_LINE_WIDTH = 120
+"""Maximum characters of one reasoning preview line before truncation."""
 
 _WORKSPACE_LIMIT = 64
 """Maximum characters of workspace path shown in the banner and status line."""
@@ -266,6 +276,7 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
         self._live_started = 0.0
         self._paused = False
         self._ticker: Optional["asyncio.Task[None]"] = None
+        self._reasoning_text = ""
 
     # ------------------------------------------------------------------
     # Banner, messages and turn summary
@@ -339,6 +350,7 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
             tokens: Approximate tokens used in the turn.
             tool_calls: Number of main-agent tool calls in the turn.
         """
+        self.end_reasoning()
         self.stream.flush()
         self.stop_thinking()
         self._stop_live()
@@ -391,8 +403,62 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
         if self._live_kind == "thinking":
             self._stop_live()
 
+    def feed_reasoning(self, delta: str) -> None:
+        """Stream one reasoning delta into the transient reasoning region.
+
+        The first delta switches the thinking spinner to a ``"reasoning"``
+        live region. The segment clock is inherited from the thinking
+        spinner when one was running, so ``Thought for`` counts from the
+        moment the turn started waiting, not from the first token. Empty
+        deltas are ignored entirely: they neither open nor update the
+        region.
+
+        Args:
+            delta: One piece of model reasoning text.
+        """
+        if not delta:
+            return
+        if self._live_kind != "reasoning":
+            inherited = self._live_started if self._live_kind == "thinking" else None
+            self._begin_live("reasoning")
+            if inherited is not None:
+                self._live_started = inherited
+        self._reasoning_text = (self._reasoning_text + delta)[-_REASONING_BUFFER_LIMIT:]
+        if self._live is not None:
+            self._live.update(self._render_live("reasoning", self._elapsed()))
+
+    def end_reasoning(self) -> None:
+        """Collapse the reasoning region, printing one duration summary.
+
+        Idempotent: calls while no reasoning region is active do nothing.
+        The summary line is printed only when the segment actually received
+        content, so an aborted or empty reasoning stream leaves no residue.
+        The live region is transient, so stopping it clears the preview and
+        only the summary remains on screen.
+        """
+        if self._live_kind != "reasoning":
+            return
+        elapsed = self._elapsed()
+        had_content = bool(self._reasoning_text.strip())
+        self._reasoning_text = ""
+        self._stop_live()
+        if had_content:
+            self.console.print(
+                Text.assemble(
+                    ("✻ ", "mito.accent"),
+                    (f"Thought for {elapsed}s", "mito.muted"),
+                )
+            )
+
     def begin_tool(self, call: Text, prefix: str = "") -> None:
         """Flush assistant text, print a tool header and start its spinner.
+
+        A main-agent call (no *prefix*) owns the transient region: any
+        spinner is replaced by the tool spinner. A background call keeps the
+        main agent's thinking or reasoning region alive — its header and
+        result lines print above it — and only shows its own spinner when
+        the region is idle or already showing a tool spinner, so background
+        work can never break up a main-agent thinking segment or its clock.
 
         Args:
             call: Header produced by
@@ -401,8 +467,20 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
                 background agents.
         """
         self.stream.flush()
-        self.stop_thinking()
-        self._stop_live()
+        if prefix:
+            if self._live_kind not in (None, "tool"):
+                self.console.print(
+                    Text.assemble(
+                        ("● ", "mito.accent"),
+                        (prefix, "mito.muted"),
+                        call,
+                    )
+                )
+                return
+            self._stop_live()
+        else:
+            self.stop_thinking()
+            self._stop_live()
         self.console.print(
             Text.assemble(
                 ("● ", "mito.accent"),
@@ -500,11 +578,12 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
         """Build the renderable for one spinner refresh.
 
         Args:
-            kind: ``"thinking"`` or ``"tool"``.
+            kind: ``"thinking"``, ``"reasoning"`` or ``"tool"``.
             elapsed: Whole seconds since the spinner started.
 
         Returns:
-            A ``Text`` for thinking or a one-row grid with a dots spinner for a
+            A ``Text`` for thinking, a header plus trailing reasoning preview
+            lines for reasoning, or a one-row grid with a dots spinner for a
             running tool.
         """
         if kind == "thinking":
@@ -512,6 +591,23 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
                 ("✻ ", "mito.accent"),
                 (f"Thinking… ({elapsed}s)", "mito.muted"),
             )
+        if kind == "reasoning":
+            header = Text.assemble(
+                ("✻ ", "mito.accent"),
+                (f"Reasoning… ({elapsed}s)", "mito.muted"),
+            )
+            lines = [
+                line.strip()
+                for line in self._reasoning_text.splitlines()
+                if line.strip()
+            ]
+            preview = [
+                Text(f"  {line[:_REASONING_LINE_WIDTH]}", style="mito.muted")
+                for line in lines[-_REASONING_PREVIEW_LINES:]
+            ]
+            if not preview:
+                return header
+            return Group(header, *preview)
         grid = Table.grid(padding=0)
         grid.add_row(
             Text("  ⎿ ", style="mito.muted"),

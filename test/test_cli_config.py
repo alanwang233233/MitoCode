@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from loguru import logger as loguru_logger
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -28,6 +29,7 @@ def _args(**over):
         api_key=None,
         base_url=None,
         timeout=None,
+        reasoning_effort=None,
         permission_mode="ask",
         mcp_config=None,
         no_mcp=False,
@@ -491,3 +493,74 @@ def test_blank_workspace_base_url_falls_through_to_environment(tmp_path):
     )
     assert cfg.base_url == "http://env"
     assert cfg.source == "secret"
+
+
+# ---------------------------------------------------------------------------
+# reasoning_effort resolution
+# ---------------------------------------------------------------------------
+
+
+def test_reasoning_effort_resolves_across_all_four_layers(tmp_path):
+    """flag > env > dotenv > secret 的优先级对 reasoning_effort 同样成立."""
+    _write_secret(tmp_path, '{"api_key":"s","model":"m","reasoning_effort":"low"}')
+    (tmp_path / DOTENV_FILENAME).write_text(
+        "MITOCODE_REASONING_EFFORT=medium\n", encoding="utf-8"
+    )
+    cfg = resolve_provider_config(_args(), tmp_path, environ={})
+    assert cfg.reasoning_effort == "medium"
+
+    cfg = resolve_provider_config(
+        _args(), tmp_path, environ={"MITOCODE_REASONING_EFFORT": "high"}
+    )
+    assert cfg.reasoning_effort == "high"
+
+    cfg = resolve_provider_config(
+        _args(reasoning_effort="minimal"),
+        tmp_path,
+        environ={"MITOCODE_REASONING_EFFORT": "high"},
+    )
+    assert cfg.reasoning_effort == "minimal"
+
+
+def test_reasoning_effort_normalized_and_absent_is_none(tmp_path):
+    """值被归一化为小写；所有层都缺省时为 None."""
+    (tmp_path / DOTENV_FILENAME).write_text(
+        "MITOCODE_REASONING_EFFORT=  HIGH  \n", encoding="utf-8"
+    )
+    cfg = resolve_provider_config(_args(api_key="k", model="m"), tmp_path, environ={})
+    assert cfg.reasoning_effort == "high"
+    (tmp_path / DOTENV_FILENAME).unlink()
+    cfg = resolve_provider_config(_args(api_key="k", model="m"), tmp_path, environ={})
+    assert cfg.reasoning_effort is None
+
+
+def test_unknown_tier_warns_but_is_accepted(tmp_path):
+    """未知档位记录 value-free 警告并照常接受透传."""
+    records: list = []
+    handler_id = loguru_logger.add(records.append, level="WARNING")
+    try:
+        cfg = resolve_provider_config(
+            _args(reasoning_effort="ultra", api_key="k", model="m"),
+            tmp_path,
+            environ={},
+        )
+    finally:
+        loguru_logger.remove(handler_id)
+    assert cfg.reasoning_effort == "ultra"
+    assert any("reasoning_effort" in str(record) for record in records)
+
+
+def test_known_tier_does_not_warn(tmp_path):
+    """已知档位不产生警告."""
+    records: list = []
+    handler_id = loguru_logger.add(records.append, level="WARNING")
+    try:
+        cfg = resolve_provider_config(
+            _args(reasoning_effort="high", api_key="k", model="m"),
+            tmp_path,
+            environ={},
+        )
+    finally:
+        loguru_logger.remove(handler_id)
+    assert cfg.reasoning_effort == "high"
+    assert not any("reasoning_effort" in str(record) for record in records)

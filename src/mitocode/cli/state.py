@@ -50,7 +50,7 @@ def _block_char_count(block: Any) -> int:
         exposes none of the known fields.
     """
     if isinstance(block, dict):
-        fields = ("message", "content", "arguments_string")
+        fields = ("message", "content", "arguments_string", "reasoning_content")
         return sum(
             len(value)
             for value in (block.get(name) for name in fields)
@@ -64,6 +64,9 @@ def _block_char_count(block: Any) -> int:
     content = getattr(block, "content", None)
     if isinstance(content, str):
         total += len(content)
+    reasoning = getattr(block, "reasoning_content", None)
+    if isinstance(reasoning, str):
+        total += len(reasoning)
     arguments = getattr(block, "arguments_string", None)
     if isinstance(arguments, str) and arguments:
         total += len(arguments)
