@@ -1010,6 +1010,74 @@ async def test_destroy_agent_child_already_detached_from_parent_is_removed():
 
 
 @pytest.mark.asyncio
+async def test_destroy_agent_while_running_cancels_child_task():
+    """销毁运行中的子会话 → 任务被真正打断，而不只是从注册表里消失."""
+    provider = _TextThenGateProvider()
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    parent = await orchestrator.create_session(name="p")
+    child = await orchestrator.create_session(
+        name="c", parent_id=parent.agent_id, provider=provider
+    )
+    _drain_events(orchestrator)
+
+    task = await orchestrator.send_message(child.agent_id, "hi")
+    await asyncio.wait_for(provider.started.wait(), timeout=2.0)
+    before = _drain_events(orchestrator)
+    assert any(
+        aid == child.agent_id and payload["type"] == "token" for aid, payload in before
+    ), "前置：子会话应已产出 token 并停在 gate 上"
+    assert child.state is AgentState.RUNNING, "前置：子会话任务应仍在运行"
+
+    await orchestrator.destroy_agent(child.agent_id)
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2.0)
+
+    assert (
+        task.cancelled() is True
+    ), "销毁必须取消运行中的任务，而非把它留在后台继续推送"
+    assert child.state is AgentState.CANCELLED, "被中断的会话状态应落到 CANCELLED"
+    assert (
+        orchestrator.get_session(child.agent_id) is None
+    ), "销毁后注册表不应残留子会话"
+    assert parent.sub_agent_ids == [], "销毁后父会话子列表应摘除该 id"
+    assert [node["id"] for node in orchestrator.get_tree_snapshot()] == [
+        parent.agent_id
+    ], "树快照应只剩父会话"
+    assert (
+        await orchestrator.send_message(child.agent_id, "again") is None
+    ), "销毁后再向该 id 发消息应返回 None"
+
+    after = _drain_events(orchestrator)
+    assert len(after) == 2, "销毁后应只有销毁自身与任务 finally 各推送一次树同步"
+    assert all(
+        aid == -1 and payload["type"] == "sync" for aid, payload in after
+    ), "销毁后到达队列的都应是树同步，不应再有该会话的运行时事件"
+    assert [payload["agents"] for _, payload in after] == [
+        [
+            {
+                "id": parent.agent_id,
+                "name": "p",
+                "description": "",
+                "parent_id": None,
+                "sub_agent": [],
+                "state": "idle",
+            }
+        ],
+        [
+            {
+                "id": parent.agent_id,
+                "name": "p",
+                "description": "",
+                "parent_id": None,
+                "sub_agent": [],
+                "state": "idle",
+            }
+        ],
+    ], "两次同步快照都应只含父会话且父会话保持 idle"
+
+
+@pytest.mark.asyncio
 async def test_cancel_agent_unknown_id_is_noop():
     """取消未知 id → 既有会话保持未取消且不产生事件."""
     orchestrator = AgentOrchestrator(default_provider=EchoProvider())
@@ -1114,6 +1182,39 @@ class _AlwaysFullQueue(asyncio.Queue):
         raise asyncio.QueueFull
 
 
+class _TextThenGateProvider(_SampleChatProvider):
+    """先交出首个 token、随后阻塞在 gate 的 provider，用于验证销毁会打断运行中的任务."""
+
+    def __init__(self):
+        self.stream = True
+        self.started = asyncio.Event()
+        self.gate = asyncio.Event()
+
+    @staticmethod
+    def get_model_list():
+        return ["gated-text-model"]
+
+    @classmethod
+    def get_settings_schema(cls):
+        return {"type": "object", "properties": {}, "additionalProperties": True}
+
+    @staticmethod
+    def check_settings_schema(settings):
+        return True
+
+    def init(self):
+        pass
+
+    async def chat(self, tools=None, messages=None, **kwargs):
+        async def _stream():
+            yield FakeChunk(content="working")
+            self.started.set()
+            await self.gate.wait()
+            yield FakeChunk(content="never", finish_reason="stop")
+
+        return _stream()
+
+
 @pytest.mark.asyncio
 async def test_push_tree_sync_swallows_queue_full():
     """事件队列已满 → _push_tree_sync 吞掉 QueueFull 且不写入任何事件."""
@@ -1211,7 +1312,28 @@ async def test_run_session_finally_keeps_foreign_task_slot():
     assert (
         orchestrator._tasks[session.agent_id] is foreign
     ), "任务槽属于别的任务时不应被本任务清空"
-    assert orchestrator.event_queue.qsize() >= 1, "finally 仍应推送一次树同步"
+
+    events = _drain_events(orchestrator)
+    assert len(events) == 2, "本次运行应只产出 turn_end 与其后 finally 推送的树同步"
+    agent_evt, payload = events[0]
+    assert (
+        agent_evt == session.agent_id and payload["type"] == "turn_end"
+    ), "第一条应是运行时事件经 EventBridge 适配后的 turn_end"
+    sync_evt, sync_payload = events[-1]
+    assert sync_evt == -1, "最后一条必须是 finally 推送的树同步（-1 标识）"
+    assert sync_payload == {
+        "type": "sync",
+        "agents": [
+            {
+                "id": session.agent_id,
+                "name": "guarded",
+                "description": "",
+                "parent_id": None,
+                "sub_agent": [],
+                "state": "finished",
+            }
+        ],
+    }, "finally 推送的同步快照应反映本会话已 finished"
 
 
 @pytest.mark.asyncio
