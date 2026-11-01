@@ -237,6 +237,8 @@ class EventPump:
             self._handle_sync(event)
         elif event_type == "token":
             self._handle_token(agent_id, event)
+        elif event_type == "reasoning":
+            self._handle_reasoning(agent_id, event)
         elif event_type == "tool_start":
             self._handle_tool_start(agent_id, event)
         elif event_type == "tool_result":
@@ -274,11 +276,30 @@ class EventPump:
         """
         if not self._is_main(agent_id):
             return
+        self._ui.end_reasoning()
         content = event.get("content")
         if not isinstance(content, str) or not content:
             return
         self._state.total_chars += len(content)
         self._ui.stream.feed(content)
+
+    def _handle_reasoning(self, agent_id: int, event: Mapping[str, Any]) -> None:
+        """Feed main-agent reasoning deltas to the UI; drop background ones.
+
+        Reasoning is display-only: it never touches the transcript stream or
+        the session history, and a background agent's reasoning is dropped
+        exactly like its prose.
+
+        Args:
+            agent_id: Id of the emitting agent.
+            event: ``reasoning`` event carrying a ``content`` delta.
+        """
+        if not self._is_main(agent_id):
+            return
+        content = event.get("content")
+        if not isinstance(content, str) or not content:
+            return
+        self._ui.feed_reasoning(content)
 
     def _handle_tool_start(self, agent_id: int, event: Mapping[str, Any]) -> None:
         """Render a tool header and remember the call's arguments.
@@ -302,6 +323,7 @@ class EventPump:
         self._calls[(agent_id, call_id)] = (name, args)
         call = format_tool_call(name, args, display_param, self._root())
         if self._is_main(agent_id):
+            self._ui.end_reasoning()
             self._state.tool_call_count += 1
             self._ui.begin_tool(call)
         else:
@@ -349,6 +371,7 @@ class EventPump:
         """
         self._forget_calls(agent_id)
         if self._is_main(agent_id):
+            self._ui.end_reasoning()
             self._ui.stream.flush()
             return
         self._ui.note(f"{self._prefix(agent_id)}finished")
@@ -361,6 +384,7 @@ class EventPump:
         """
         self._forget_calls(agent_id)
         if self._is_main(agent_id):
+            self._ui.end_reasoning()
             self._ui.stream.flush()
             self._ui.note("Interrupted.")
             return

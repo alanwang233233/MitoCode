@@ -452,6 +452,13 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
     def begin_tool(self, call: Text, prefix: str = "") -> None:
         """Flush assistant text, print a tool header and start its spinner.
 
+        A main-agent call (no *prefix*) owns the transient region: any
+        spinner is replaced by the tool spinner. A background call keeps the
+        main agent's thinking or reasoning region alive — its header and
+        result lines print above it — and only shows its own spinner when
+        nothing else is active, so background work can never break up a
+        main-agent thinking segment or its clock.
+
         Args:
             call: Header produced by
                 :func:`mitocode.cli.format.format_tool_call`.
@@ -459,8 +466,20 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
                 background agents.
         """
         self.stream.flush()
-        self.stop_thinking()
-        self._stop_live()
+        if prefix:
+            if self._live_kind not in (None, "tool"):
+                self.console.print(
+                    Text.assemble(
+                        ("● ", "mito.accent"),
+                        (prefix, "mito.muted"),
+                        call,
+                    )
+                )
+                return
+            self._stop_live()
+        else:
+            self.stop_thinking()
+            self._stop_live()
         self.console.print(
             Text.assemble(
                 ("● ", "mito.accent"),

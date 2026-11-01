@@ -445,3 +445,28 @@ def test_reasoning_region_without_prior_thinking_gets_fresh_clock():
     assert ui._live_kind == "reasoning"
     assert ui._live_started is not None
     ui.end_reasoning()
+
+
+def test_background_begin_tool_keeps_main_thinking_and_reasoning_region():
+    """后台工具头不抢占主会话的 thinking/reasoning 区域；空闲时仍给 spinner."""
+    ui, _ = _ui()
+
+    ui.feed_reasoning("thinking hard")
+    ui.begin_tool(_tool_line(), prefix="↳ bg ")
+    assert ui._live_kind == "reasoning"
+    ui.end_reasoning()
+
+    ui.start_thinking()
+    ui.begin_tool(_tool_line(), prefix="↳ bg ")
+    assert ui._live_kind == "thinking"
+    ui.stop_thinking()
+
+    ui.begin_tool(_tool_line(), prefix="↳ bg ")
+    assert ui._live_kind == "tool"
+    ui.finish_tool(Text("ok"))
+    assert ui._live_kind is None
+
+
+def _tool_line() -> Text:
+    """Build a minimal tool header for begin_tool calls."""
+    return Text("Read a.py")
