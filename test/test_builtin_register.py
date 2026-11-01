@@ -18,6 +18,7 @@ EXPECTED = {
     "Glob",
     "Grep",
     "Bash",
+    "Skill",
     "Agent",
     "ListAgent",
     "QueryAgent",
@@ -26,7 +27,7 @@ EXPECTED = {
 }
 
 
-def test_registers_all_eleven_tools():
+def test_registers_all_twelve_tools():
     manager = ToolManager()
     assert set(register_builtin_tools(manager)) == EXPECTED
 
@@ -83,11 +84,11 @@ def test_registration_is_idempotent():
     assert manager.tools_map() == before  # second call changes nothing
 
 
-def test_second_call_still_reports_all_eleven_attempted():
+def test_second_call_still_reports_all_twelve_attempted():
     manager = ToolManager()
     register_builtin_tools(manager)
     assert set(register_builtin_tools(manager)) == EXPECTED
-    assert len(manager.tools_map()) == 11  # no duplicates, no growth
+    assert len(manager.tools_map()) == 12  # no duplicates, no growth
 
 
 def test_registration_refuses_to_clobber_an_existing_registration():

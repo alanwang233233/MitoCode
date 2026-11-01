@@ -1,7 +1,7 @@
 """Custom exception hierarchy for MitoCode.
 
-All application errors derive from :class:`MitoCodeBaseError`, organized
-into workspace-related and tool-related branches.
+All application errors derive from :class:`MitoCodeBaseError`, organized into
+one branch per subsystem: workspace, tool, chat provider, MCP, and skills.
 """
 
 import builtins
@@ -108,3 +108,19 @@ class MitoCodeMcpConnectionError(MitoCodeMcpError):
 
 class MitoCodeMcpToolCallError(MitoCodeMcpError):
     """Raised when an MCP tool call fails or returns an error result."""
+
+
+class MitoCodeSkillError(MitoCodeBaseError):
+    """Base class for Agent Skill related errors."""
+
+
+class MitoCodeSkillDefinitionError(MitoCodeSkillError):
+    """Raised when a SKILL.md file is structurally broken or its frontmatter is invalid."""
+
+
+class MitoCodeSkillNotFoundError(MitoCodeSkillError):
+    """Raised when a skill name is looked up outside the manager's catalogue."""
+
+
+class MitoCodeSkillReadError(MitoCodeSkillError):
+    """Raised when a catalogued skill's SKILL.md cannot be read from disk."""

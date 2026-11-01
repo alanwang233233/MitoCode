@@ -630,6 +630,70 @@ async def _cmd_tools(ctx: CommandContext, args: List[str]) -> CommandResult:
     return CommandResult()
 
 
+@command(
+    "skills",
+    "/skills [refresh]",
+    "List installed skills, or re-scan their directories first with refresh.",
+)
+async def _cmd_skills(ctx: CommandContext, args: List[str]) -> CommandResult:
+    """Render the skills catalogue, or re-scan the roots and render it.
+
+    Args:
+        ctx: Command context.
+        args: Empty for the last discovery's catalogue, otherwise ``refresh``
+            to re-scan first.
+
+    Returns:
+        A default result.
+    """
+    state = ctx.state
+    manager = state.skills_manager
+    if manager is None:
+        ctx.ui.note("Skills are not available in this run.")
+        return CommandResult()
+
+    if args and args[0].lower() == "refresh":
+        if len(args) != 1:
+            ctx.ui.warn("Usage: /skills [refresh]")
+            return CommandResult()
+        try:
+            await manager.discover()
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            ctx.ui.error(f"Skills refresh failed: {exc}")
+            return CommandResult()
+    elif args:
+        ctx.ui.warn("Usage: /skills [refresh]")
+        return CommandResult()
+
+    skills = manager.list_skills()
+    issues = manager.issues()
+    if issues:
+        ctx.ui.warn(
+            f"{len(issues)} skill entries were skipped during discovery; "
+            "details are in the log."
+        )
+    if not skills:
+        # User-level discovery (~/.mitocode/skills) is temporarily disabled
+        # in bootstrap.skills_roots, so only the workspace path is advertised.
+        ctx.ui.note(
+            "No skills installed. Add a skill as a directory holding a "
+            "SKILL.md under .mitocode/skills in this workspace, then run "
+            "/skills refresh."
+        )
+        return CommandResult()
+
+    table = Table(box=None, show_header=True, header_style="bold", padding=(0, 2))
+    table.add_column("Skill", style="mito.accent", no_wrap=True)
+    table.add_column("Source")
+    table.add_column("Description")
+    for skill in skills:
+        table.add_row(
+            Text(skill.name), Text(skill.source or "—"), Text(skill.description)
+        )
+    ctx.ui.console.print(table)
+    return CommandResult()
+
+
 @command("mcp", "/mcp [refresh [name]]", "Show MCP servers or refresh their tools.")
 async def _cmd_mcp(ctx: CommandContext, args: List[str]) -> CommandResult:
     """Render MCP status, or reconnect servers and refresh session tools.

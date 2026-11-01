@@ -1,4 +1,4 @@
-"""One call that publishes the eleven built-in tools onto a ``ToolManager``.
+"""One call that publishes the twelve built-in tools onto a ``ToolManager``.
 
 The tool modules in this package each export plain coroutine functions --
 ``read``, ``bash``, ``spawn_agent`` and so on.  None of them knows what name
@@ -19,17 +19,17 @@ tools are published to the registry:
 
 Three behaviours are the point of the function, and each is deliberate.
 
-**Attempt all eleven; return all eleven.**  The returned list holds the
+**Attempt all twelve; return all twelve.**  The returned list holds the
 names *attempted*, not the names that landed.  A name skipped because it was
 already taken is still reported, so the caller always sees the full intent,
 and a skip is visible in the log -- never as a silently shrunken list that
-the caller would have to diff against a hard-coded eleven to notice.
+the caller would have to diff against a hard-coded twelve to notice.
 
 **Refuse to clobber.**  ``ToolManager.register`` overwrites by name
 silently, and the order between user tools and built-ins is not controlled:
 a user tool named ``Read`` registered first must survive, and so must ours
 when the order is reversed.  A name that already has a registration is
-skipped with a warning and the other ten still land.  Nothing here ever
+skipped with a warning and the other eleven still land.  Nothing here ever
 unregisters or replaces anything.
 
 **Schemas stay annotation-derived.**  ``parameters_schema`` is never passed:
@@ -80,11 +80,12 @@ from mitocode.core.tool.builtin.fs_tools import (
     write,
 )
 from mitocode.core.tool.builtin.shell_tools import bash
+from mitocode.core.tool.builtin.skill_tools import use_skill
 from mitocode.core.tool.tool_manager import ToolManager
 
 logger = loguru_logger.bind(name=__name__)
 
-#: The eleven built-in tools in registration order, each as ``(registered
+#: The twelve built-in tools in registration order, each as ``(registered
 #: name, function, human doc, agent doc, display action, display param)``.
 #: The order is the order the registry publishes them in.  The agent docs are
 #: written for a model that has never seen the workspace: each states what
@@ -196,6 +197,22 @@ _BUILTIN_TOOLS: Tuple[Tuple[str, Callable[..., Any], str, str, str, str], ...] =
         "data for you, not a tool failure.",
         "bash",
         "command",
+    ),
+    (
+        "Skill",
+        use_skill,
+        "Load an installed skill's full instructions by name.",
+        "Return the full instruction body of one installed skill, chosen by "
+        "name from the skills section of your instructions. A skill is a "
+        "packaged instruction set for a specific kind of task; when the "
+        "user's request matches a skill's description, load it with this "
+        "call and follow the returned instructions before acting. An "
+        "unknown name returns an error listing the skills that do exist, so "
+        "a misread name can be retried immediately, and a skill whose file "
+        "can no longer be read returns an explicit error rather than "
+        "raising. name is the bare skill name, without a path or extension.",
+        "skill",
+        "name",
     ),
     (
         "Agent",
@@ -322,14 +339,14 @@ def _resolve_string_annotations(func: Callable[..., Any]) -> None:
 def register_builtin_tools(
     tool_manager: ToolManager, context: Optional[ToolContext] = None
 ) -> list[str]:
-    """Register all eleven built-in tools on *tool_manager* in one call.
+    """Register all twelve built-in tools on *tool_manager* in one call.
 
     Every built-in in :data:`_BUILTIN_TOOLS` is attempted in order.  A name
     that already has a registration on *tool_manager* is skipped with a
     warning instead of being overwritten -- ``ToolManager.register``
     replaces by name silently, and the order between user tools and
     built-ins is not controlled, so a user tool named ``Read`` must survive
-    a registration that happens after it.  The other ten are registered
+    a registration that happens after it.  The other eleven are registered
     normally, and no name is ever unregistered or replaced here.
 
     Each tool's JSON Schema is derived from its function signature by the
@@ -353,7 +370,7 @@ def register_builtin_tools(
             creates a default at the first tool call.
 
     Returns:
-        The eleven attempted names in registration order -- including any
+        The twelve attempted names in registration order -- including any
         skipped because the name was already taken.  The list is therefore
         the caller's record of full intent rather than a report of what
         landed; a skip is visible only in the log.

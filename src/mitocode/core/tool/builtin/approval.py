@@ -128,7 +128,7 @@ class AlwaysAllow:  # pylint: disable=too-few-public-methods
     Why this is the default rather than a prompt: the approval seam exists so
     that the *policy* is pluggable, not so that shipping built-in tools blocks
     on a UI decision.  Landing an interactive dialog as a prerequisite for
-    ``Read``/``Write``/``Bash`` would couple eleven tools to a TUI that has not
+    ``Read``/``Write``/``Bash`` would couple twelve tools to a TUI that has not
     been designed yet, and would make the very first ``python -m mitocode``
     run interactive.  With ``AlwaysAllow`` installed the tools are fully usable
     today, the chokepoint is still exercised on every escape (so switching

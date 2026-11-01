@@ -23,6 +23,8 @@ from mitocode.cli.commands import COMMANDS, Command, CommandResult, dispatch
 from mitocode.cli.state import CliState, CommandContext
 from mitocode.cli.theme import MITOCODE_THEME
 from mitocode.cli.ui import CliUI
+from mitocode.core.skills.skill import SkillRoot
+from mitocode.core.skills.skills_manager import SkillsManager
 from mitocode.core.tool.tool_manager import ToolManager
 from mitocode.core.workspace.workspace import Workspace
 
@@ -34,6 +36,7 @@ EXPECTED_COMMANDS = {
     "clear",
     "agents",
     "tools",
+    "skills",
     "mcp",
     "permissions",
     "verbose",
@@ -265,6 +268,7 @@ def _ctx(  # pylint: disable=too-many-arguments
     workspace=None,
     mcp_manager=None,
     approver=None,
+    skills_manager=None,
 ):
     """Build a command context over an in-memory console.
 
@@ -275,6 +279,8 @@ def _ctx(  # pylint: disable=too-many-arguments
         workspace: Workspace fake or a real in-memory ``Workspace``.
         mcp_manager: MCP fake, or ``None`` when MCP is disabled.
         approver: Approver fake, or ``None``.
+        skills_manager: Skills manager fake or real, or ``None`` when the
+            skills feature is absent.
 
     Returns:
         ``(CommandContext, StringIO)`` where the buffer holds printed output.
@@ -301,6 +307,7 @@ def _ctx(  # pylint: disable=too-many-arguments
         provider=provider,
         orchestrator=active_orchestrator,
         mcp_manager=mcp_manager,
+        skills_manager=skills_manager,
         ui=ui,
         approver=approver,
         log_path=tmp_path / "cli.log",
@@ -382,6 +389,128 @@ async def test_tools_and_status_include_registry_and_model(tmp_path):
     text = buffer.getvalue()
     assert "Read" in text and "model-x" in text and "Main" in text
     assert "Read a file" in text
+
+
+def _write_skill(root, name, description="A test skill."):
+    """Create one skill directory under *root* with minimal valid frontmatter."""
+    entry = root / name
+    entry.mkdir(parents=True)
+    (entry / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\nBody.\n",
+        encoding="utf-8",
+    )
+    return entry
+
+
+async def _discovered_manager(root):
+    """Build a real manager over *root* and run one discovery."""
+    manager = SkillsManager([SkillRoot("workspace", root)])
+    await manager.discover()
+    return manager
+
+
+@pytest.mark.asyncio
+async def test_skills_command_lists_the_catalogue(tmp_path):
+    """Each discovered skill appears with its name, source and description."""
+    root = tmp_path / "skills"
+    _write_skill(root, "alpha", "Do alpha things.")
+    ctx, buffer = _ctx(tmp_path, skills_manager=await _discovered_manager(root))
+
+    await dispatch("/skills", ctx)
+
+    text = buffer.getvalue()
+    assert "alpha" in text
+    assert "Do alpha things." in text
+    assert "workspace" in text
+
+
+@pytest.mark.asyncio
+async def test_skills_command_without_manager_says_unavailable(tmp_path):
+    """No wired skills manager is reported in prose, not an exception."""
+    ctx, buffer = _ctx(tmp_path)
+
+    await dispatch("/skills", ctx)
+
+    assert "not available" in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_skills_command_refresh_rescans_before_listing(tmp_path):
+    """``/skills refresh`` re-scans, so skills added after startup appear."""
+    root = tmp_path / "skills"
+    root.mkdir(parents=True)
+    manager = SkillsManager([SkillRoot("workspace", root)])
+    await manager.discover()
+    ctx, buffer = _ctx(tmp_path, skills_manager=manager)
+
+    await dispatch("/skills", ctx)
+    assert "alpha" not in buffer.getvalue()
+
+    _write_skill(root, "alpha", "Arrived late.")
+    await dispatch("/skills refresh", ctx)
+    assert "alpha" in buffer.getvalue()
+    assert "Arrived late." in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_skills_command_rejects_unknown_argument(tmp_path):
+    """An unrecognised argument gets the usage line."""
+    ctx, buffer = _ctx(tmp_path, skills_manager=SkillsManager([]))
+
+    await dispatch("/skills bogus", ctx)
+
+    assert "Usage: /skills [refresh]" in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_skills_command_refresh_rejects_extra_arguments(tmp_path):
+    """Arguments after ``refresh`` get the usage line, not silent ignoring."""
+    ctx, buffer = _ctx(tmp_path, skills_manager=SkillsManager([]))
+
+    await dispatch("/skills refresh extra", ctx)
+
+    assert "Usage: /skills [refresh]" in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_skills_command_warns_about_skipped_entries(tmp_path):
+    """Discovery issues surface as a warning next to the table."""
+    root = tmp_path / "skills"
+    (root / "not-a-skill").mkdir(parents=True)
+    _write_skill(root, "alpha")
+    ctx, buffer = _ctx(tmp_path, skills_manager=await _discovered_manager(root))
+
+    await dispatch("/skills", ctx)
+
+    text = buffer.getvalue()
+    assert "skipped" in text
+    assert "alpha" in text
+
+
+@pytest.mark.asyncio
+async def test_skills_command_refresh_failure_is_reported_not_raised(tmp_path):
+    """A failing re-scan is reported through the UI and the REPL survives."""
+
+    class _ExplodingManager:
+        """Skills-manager stand-in whose discover() always raises."""
+
+        async def discover(self):
+            """Raise the scripted failure."""
+            raise RuntimeError("scan exploded")
+
+        def list_skills(self):
+            """Report an empty catalogue."""
+            return ()
+
+        def issues(self):
+            """Report no issues."""
+            return ()
+
+    ctx, buffer = _ctx(tmp_path, skills_manager=_ExplodingManager())
+
+    await dispatch("/skills refresh", ctx)
+
+    assert "Skills refresh failed" in buffer.getvalue()
 
 
 @pytest.mark.asyncio
@@ -651,6 +780,20 @@ async def test_init_failure_is_reported_not_raised(tmp_path):
     workspace.dump = lambda: (_ for _ in ()).throw(OSError("disk full"))
     await dispatch("/init", ctx)
     assert "disk full" in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_skills_command_warns_on_issues_even_with_empty_catalogue(tmp_path):
+    """A root holding only broken entries still shows the skipped warning."""
+    root = tmp_path / "skills"
+    (root / "broken").mkdir(parents=True)
+    ctx, buffer = _ctx(tmp_path, skills_manager=await _discovered_manager(root))
+
+    await dispatch("/skills", ctx)
+
+    text = buffer.getvalue()
+    assert "No skills installed" in text
+    assert "skipped" in text
 
 
 # ---------------------------------------------------------------------------

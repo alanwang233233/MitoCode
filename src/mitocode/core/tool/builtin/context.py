@@ -10,7 +10,7 @@ inside each tool body by :func:`current`.
 The context is process-wide rather than per-call, and that is a deliberate
 trade.  Threading it through every tool signature would mean every tool
 declares a first parameter that the model must never be asked to fill, and
-the eleven tools in this package already take their arguments straight from
+the twelve tools in this package already take their arguments straight from
 the model's function call.  The cost is that the module-level default is
 global mutable state: a test that calls :func:`set_current` must reset it, or
 every later test inherits a context pointing at some other test's temporary
@@ -89,6 +89,13 @@ class ToolContext:
             import the agent package, which would invert the one-way
             dependency ``tool_manager -> agent_session``.  It is attached after
             construction by :meth:`attach_orchestrator`.
+        skills_manager: Duck-typed handle to the
+            :class:`~mitocode.core.skills.skills_manager.SkillsManager` the
+            ``Skill`` tool serves bodies from, or ``None`` when the runner
+            has no skills feature -- which that tool reports in prose rather
+            than dereferencing.  ``Any`` rather than a concrete class, like
+            ``orchestrator``: the manager is discovered by the wiring layer
+            and this package stays independent of it.
         background: Registry of detached calls.  A fresh instance per context,
             built by ``default_factory`` rather than shared: handles are
             process-wide strings, so two contexts sharing one registry would
@@ -111,6 +118,7 @@ class ToolContext:
     tool_manager: Optional[ToolManager] = None
     approver: Approver = field(default_factory=AlwaysAllow)
     orchestrator: Any = None
+    skills_manager: Any = None
     background: BackgroundRegistry = field(default_factory=BackgroundRegistry)
     max_output_chars: int = 30_000
     max_sub_agent_depth: int = 4

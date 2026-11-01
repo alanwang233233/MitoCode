@@ -188,5 +188,8 @@ bubble_sort.py
 # MitoCode local state, credentials and logs (never commit)
 .mitocode/
 
+# Local git worktrees (feature work in isolation, lives inside the project tree)
+.worktrees/
+
 # Local process materials (research notes, not part of the codebase)
 过程性资料/

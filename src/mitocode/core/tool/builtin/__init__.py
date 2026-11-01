@@ -1,11 +1,12 @@
-"""Built-in tools for MitoCode: workspace-confined file, shell, and agent tools.
+"""Built-in tools for MitoCode: workspace-confined file, shell, skill, and
+agent tools.
 
 The package is assembled bottom-up: ``approval`` is the approval protocol,
 ``context`` holds the state every tool reads instead of reaching for
 globals, ``paths`` is the containment chokepoint, ``errors`` the one error
 boundary every tool returns through, ``call_dsl`` and ``background`` the
-plumbing behind the Background tools, and the four tool modules carry the
-eleven tool coroutines themselves.  ``register`` is the one call that
+plumbing behind the Background tools, and the five tool modules carry the
+twelve tool coroutines themselves.  ``register`` is the one call that
 publishes them all onto a ``ToolManager``.
 
 This module is the package's public surface: the names re-exported here are

@@ -22,7 +22,17 @@ import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, List, Optional, TypeVar, Union, cast
+from typing import (
+    TYPE_CHECKING,
+    Awaitable,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeVar,
+    Union,
+    cast,
+)
 
 from loguru import logger as loguru_logger
 
@@ -47,6 +57,8 @@ from mitocode.core.exception.mitocode_exception import (
 )
 from mitocode.core.mcp.mcp_config import McpServerConfig
 from mitocode.core.mcp.mcp_manager import McpManager
+from mitocode.core.skills.skill import Skill, SkillRoot
+from mitocode.core.skills.skills_manager import SkillsManager
 from mitocode.core.tool.builtin import ToolContext, register_builtin_tools
 from mitocode.core.tool.tool_manager import ToolManager
 from mitocode.core.workspace.migration import BasicMigration
@@ -61,6 +73,10 @@ CONFIG_FILENAME = "config.json"
 DEFAULT_MCP_CONFIG_RELATIVE_PATH = Path(MITOCODE_CONFIG_PATH) / "mcp.json"
 """Default MCP configuration file, relative to the workspace root."""
 
+SKILLS_DIR_NAME = "skills"
+"""Skill directories' name under a root: ``<workspace>/.mitocode/skills`` and
+``~/.mitocode/skills``."""
+
 SYSTEM_PROMPT_TEMPLATE = """\
 You are MitoCode, an interactive coding agent running in the user's terminal.
 You help with engineering tasks in the workspace at {workspace}.
@@ -74,6 +90,20 @@ You help with engineering tasks in the workspace at {workspace}.
 - If a task is ambiguous or destructive, ask before acting.
 """
 """Role instructions seeded into every CLI session, with a ``{workspace}`` slot."""
+
+SKILLS_PROMPT_SECTION = """
+
+## Skills
+
+Installed skills extend you with packaged, task-specific instruction sets.
+When the user's request matches a skill's description below, call the
+Skill tool with that skill's name to load its full instructions, then
+follow them before acting:
+
+{skills}
+"""
+"""Appended to the system prompt when at least one skill was discovered, with
+the ``- name: description`` catalogue in the ``{skills}`` slot."""
 
 _ResultT = TypeVar("_ResultT")
 
@@ -326,6 +356,9 @@ class Bootstrapped:  # pylint: disable=too-many-instance-attributes
         mcp_manager: Live MCP manager, or ``None`` when MCP is disabled or could
             not be configured.
         mcp_error: Message describing why MCP is off, or ``""``.
+        skills_manager: Skills manager over the workspace and user roots, with
+            its startup discovery already run.  Always present; its catalogue
+            may be empty.
     """
 
     args: CliArgs
@@ -337,21 +370,82 @@ class Bootstrapped:  # pylint: disable=too-many-instance-attributes
     orchestrator: AgentOrchestrator
     main_session: "AgentSession"
     mcp_manager: Optional[McpManager]
+    skills_manager: SkillsManager
     mcp_error: str = ""
 
 
-def build_system_prompt(workspace: Path) -> str:
+def build_system_prompt(workspace: Path, skills: Sequence[Skill] = ()) -> str:
     """Render the default system prompt for one workspace.
 
     Args:
         workspace: Workspace root. It is resolved first so the model always
             receives an absolute path, whatever the user typed.
+        skills: The discovered skill catalogue.  Empty — the default — leaves
+            the prompt byte-identical to the base template's render; a
+            non-empty catalogue appends the skills section naming each one.
 
     Returns:
         :data:`SYSTEM_PROMPT_TEMPLATE` with the absolute workspace path filled
-        into its ``{workspace}`` slot.
+        into its ``{workspace}`` slot, plus :data:`SKILLS_PROMPT_SECTION` when
+        *skills* is non-empty.
     """
-    return SYSTEM_PROMPT_TEMPLATE.format(workspace=str(Path(workspace).resolve()))
+    prompt = SYSTEM_PROMPT_TEMPLATE.format(workspace=str(Path(workspace).resolve()))
+    if not skills:
+        return prompt
+    # One line per skill, whatever a Skill value built outside the parser
+    # carries: a description with newlines would otherwise turn the catalogue
+    # into uncontrolled multi-line prompt text.
+    catalogue = "\n".join(
+        f"- {skill.name}: {' '.join(skill.description.split())}" for skill in skills
+    )
+    return prompt + SKILLS_PROMPT_SECTION.format(skills=catalogue)
+
+
+def skills_roots(workspace: Workspace) -> Tuple[SkillRoot, ...]:
+    """Return the skill roots one CLI run scans, in precedence order.
+
+    Currently only the workspace's own ``.mitocode/skills`` is scanned:
+    user-level discovery (``~/.mitocode/skills``) is **temporarily
+    disabled** — the root is commented out below rather than deleted, so
+    restoring it is a one-line uncomment (and reverting the companion test
+    in ``test_cli_bootstrap.py``).  The root needs no special handling once
+    restored: a missing directory contributes nothing.
+
+    Args:
+        workspace: Resolved workspace whose root the first scan derives from.
+
+    Returns:
+        The labelled roots in precedence order.
+    """
+    return (
+        SkillRoot(
+            label="workspace",
+            path=workspace.path / MITOCODE_CONFIG_PATH / SKILLS_DIR_NAME,
+        ),
+        # Temporarily disabled: user-level skill discovery is switched off.
+        # Restore this root (and the expected roots tuple in
+        # test_bootstrap_discovers_workspace_skills_only_for_now) to re-enable
+        # scanning ~/.mitocode/skills.
+        # SkillRoot(
+        #     label="user",
+        #     path=Path.home() / MITOCODE_CONFIG_PATH / SKILLS_DIR_NAME,
+        # ),
+    )
+
+
+def build_skills_manager(workspace: Workspace) -> SkillsManager:
+    """Build the skills manager over :func:`skills_roots`.
+
+    Construction performs no disk access; the caller runs
+    :meth:`~mitocode.core.skills.skills_manager.SkillsManager.discover`.
+
+    Args:
+        workspace: Resolved workspace the first root derives from.
+
+    Returns:
+        The manager, roots in precedence order.
+    """
+    return SkillsManager(list(skills_roots(workspace)))
 
 
 async def bootstrap(args: CliArgs, ui: CliUI, approver: CliApprover) -> Bootstrapped:
@@ -359,9 +453,11 @@ async def bootstrap(args: CliArgs, ui: CliUI, approver: CliApprover) -> Bootstra
 
     The order is a constraint, not a preference: the workspace has to exist
     before provider settings can be read from it, the tool registry has to exist
-    before the orchestrator that owns it, and MCP has to finish starting before
+    before the orchestrator that owns it, MCP has to finish starting before
     any :class:`~mitocode.core.agent.agent_session.AgentSession` is created
-    because a session snapshots the registry in its constructor.
+    because a session snapshots the registry in its constructor, and skills
+    have to finish being discovered before the orchestrator is built because
+    the system prompt carries their catalogue.
 
     A malformed *default* ``<workspace>/.mitocode/mcp.json`` only disables MCP
     and is reported through ``ui.warn``; a malformed explicit ``--mcp-config``
@@ -401,10 +497,20 @@ async def bootstrap(args: CliArgs, ui: CliUI, approver: CliApprover) -> Bootstra
     )
 
     try:
+        # Skill discovery sits inside the same guard as the orchestrator
+        # build: it is the step that makes the system prompt, so any failure
+        # here — however unreachable the per-entry isolation makes it — must
+        # not leave a live MCP manager orphaned behind a raising startup.
+        skills_manager = build_skills_manager(resolution.workspace)
+        await skills_manager.discover()
+        tool_context.skills_manager = skills_manager
+
         orchestrator = AgentOrchestrator(
             tool_manager=tool_manager,
             default_provider=provider,
-            system_prompt=build_system_prompt(resolution.workspace.path),
+            system_prompt=build_system_prompt(
+                resolution.workspace.path, skills=skills_manager.list_skills()
+            ),
             # resolve_provider_config validated the key as non-blank, so the
             # orchestrator can scrub the literal secret out of every provider
             # failure's log line and error event.
@@ -432,6 +538,7 @@ async def bootstrap(args: CliArgs, ui: CliUI, approver: CliApprover) -> Bootstra
         orchestrator=orchestrator,
         main_session=main_session,
         mcp_manager=mcp_manager,
+        skills_manager=skills_manager,
         mcp_error=mcp_error,
     )
 
@@ -583,11 +690,15 @@ def _scrub_secret(message: str, secret: str) -> str:
 __all__ = [
     "CONFIG_FILENAME",
     "DEFAULT_MCP_CONFIG_RELATIVE_PATH",
+    "SKILLS_DIR_NAME",
+    "SKILLS_PROMPT_SECTION",
     "SYSTEM_PROMPT_TEMPLATE",
     "Bootstrapped",
     "WorkspaceResolution",
     "bootstrap",
+    "build_skills_manager",
     "build_system_prompt",
     "load_mcp_servers",
     "resolve_workspace",
+    "skills_roots",
 ]
