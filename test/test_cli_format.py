@@ -193,6 +193,45 @@ def test_edit_result_shows_counts_and_diff(tmp_path):
     plain = _plain(text)
     assert "Updated a.py" in plain and "+1" in plain and "−1" in plain
     assert "-x = 1" in plain and "+x = 2" in plain
+    assert not any(line.strip() in ("---", "+++") for line in plain.splitlines())
+
+
+def test_edit_result_keeps_removed_sql_comment_line(tmp_path):
+    """A removed ``-- comment`` line is kept and counted, not read as a header."""
+    plain = _plain(
+        format_result(
+            "Edit",
+            {
+                "file_path": "q.sql",
+                "old_string": "-- comment\nSELECT 1",
+                "new_string": "SELECT 1",
+            },
+            "",
+            verbose=False,
+            root=tmp_path,
+        )
+    )
+    assert "(+0 −1)" in plain
+    assert "    --- comment" in plain.splitlines()
+
+
+def test_edit_result_keeps_added_plus_prefix_content_line(tmp_path):
+    """An added ``++ x`` line is kept and counted as an addition."""
+    plain = _plain(
+        format_result(
+            "Edit",
+            {
+                "file_path": "a.txt",
+                "old_string": "SELECT 1",
+                "new_string": "++ x\nSELECT 1",
+            },
+            "",
+            verbose=False,
+            root=tmp_path,
+        )
+    )
+    assert "(+1 −0)" in plain
+    assert "    +++ x" in plain.splitlines()
 
 
 def test_edit_result_indents_continuation_lines(tmp_path):

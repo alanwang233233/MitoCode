@@ -365,7 +365,9 @@ async def _cmd_help(ctx: CommandContext, args: List[str]) -> CommandResult:
     table.add_column("Command", style="mito.accent", no_wrap=True)
     table.add_column("Description")
     for entry in COMMANDS.values():
-        table.add_row(entry.usage, entry.description)
+        # Cell values are wrapped in Text: Rich parses plain str cells as
+        # console markup, which eats literal "[name]" in a usage string.
+        table.add_row(Text(entry.usage), Text(entry.description))
     ctx.ui.console.print(table)
     ctx.ui.console.print(Text("Shortcuts", style="bold mito.accent"))
     ctx.ui.console.print(
@@ -405,14 +407,14 @@ async def _cmd_status(ctx: CommandContext, args: List[str]) -> CommandResult:
     table = Table(box=None, show_header=False, padding=(0, 2))
     table.add_column("Field", style="mito.muted", no_wrap=True)
     table.add_column("Value")
-    table.add_row("session", f"#{state.main_id} {name}")
-    table.add_row("model", _model_name(state))
-    table.add_row("workspace", _workspace_path(state))
-    table.add_row("messages", str(len(getattr(session, "messages", []) or [])))
-    table.add_row("tokens", f"~{state.estimate_tokens()}")
-    table.add_row("tools", str(len(state.tool_manager.human_docs())))
-    table.add_row("agents", str(len(state.orchestrator.get_tree_snapshot())))
-    table.add_row("mcp", _mcp_summary(state))
+    table.add_row("session", Text(f"#{state.main_id} {name}"))
+    table.add_row("model", Text(_model_name(state)))
+    table.add_row("workspace", Text(_workspace_path(state)))
+    table.add_row("messages", Text(str(len(getattr(session, "messages", []) or []))))
+    table.add_row("tokens", Text(f"~{state.estimate_tokens()}"))
+    table.add_row("tools", Text(str(len(state.tool_manager.human_docs()))))
+    table.add_row("agents", Text(str(len(state.orchestrator.get_tree_snapshot()))))
+    table.add_row("mcp", Text(_mcp_summary(state)))
     ctx.ui.console.print(table)
     return CommandResult()
 
@@ -423,8 +425,9 @@ async def _cmd_model(ctx: CommandContext, args: List[str]) -> CommandResult:
 
     A numeric answer is an index into ``provider.model_list``; any other
     non-empty answer is a model name.  A name that the endpoint did not
-    advertise is used anyway, with a warning, so a configured model cannot
-    leave the user stuck on one the list omitted.
+    advertise is used anyway, with a warning, and appended to
+    ``provider.model_list`` (creating it when the provider reports none) so the
+    next turn's ``chat()`` accepts it instead of raising.
 
     Args:
         ctx: Command context.
@@ -467,8 +470,12 @@ async def _cmd_model(ctx: CommandContext, args: List[str]) -> CommandResult:
     else:
         chosen = answer
 
-    if models and chosen not in models:
+    if chosen not in models:
         ctx.ui.warn(f"'{chosen}' is not in the provider's model list; using it anyway.")
+        registered = list(getattr(provider, "model_list", None) or [])
+        if chosen not in registered:
+            registered.append(chosen)
+            provider.model_list = registered
     provider.default_model = chosen
     ctx.ui.note(f"Model set to {chosen}.")
     return CommandResult()
@@ -563,7 +570,7 @@ async def _cmd_tools(ctx: CommandContext, args: List[str]) -> CommandResult:
     table.add_column("Tool", style="mito.accent", no_wrap=True)
     table.add_column("Description")
     for name, description in docs.items():
-        table.add_row(name, description or "—")
+        table.add_row(Text(name), Text(description or "—"))
     ctx.ui.console.print(table)
     return CommandResult()
 
@@ -662,7 +669,12 @@ def _render_mcp_status(ctx: CommandContext) -> CommandResult:
             if isinstance(status, dict)
             else getattr(status, "tool_count", 0)
         )
-        table.add_row(name, str(entry_state), str(tool_count), str(error or ""))
+        table.add_row(
+            Text(name),
+            Text(str(entry_state)),
+            Text(str(tool_count)),
+            Text(str(error or "")),
+        )
     ctx.ui.console.print(table)
     return CommandResult()
 
@@ -710,9 +722,9 @@ async def _cmd_permissions(ctx: CommandContext, args: List[str]) -> CommandResul
     table.add_column("Detail")
     for entry in entries:
         if isinstance(entry, tuple) and len(entry) == 2:
-            table.add_row(str(entry[0]), str(entry[1]))
+            table.add_row(Text(str(entry[0])), Text(str(entry[1])))
         else:
-            table.add_row(str(entry), "")
+            table.add_row(Text(str(entry)), "")
     ctx.ui.console.print(table)
     return CommandResult()
 

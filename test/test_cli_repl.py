@@ -635,6 +635,81 @@ async def test_initial_prompt_runs_one_turn_before_reading_input(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_failing_initial_prompt_does_not_end_the_process(tmp_path, monkeypatch):
+    """A raised ``--initial-prompt`` turn is reported and the prompt still comes back."""
+    ui = RecordingUI(answers=["after failure", EOFError()])
+    _, repl, _, pump_task, _ = await _setup(
+        tmp_path, ui, [_text_turn("recovered")], initial_prompt="boom"
+    )
+
+    real_run_turn = repl.run_turn
+    submitted = []
+
+    async def _explode_on_initial(text):
+        """Raise on the initial prompt and delegate every later turn.
+
+        Args:
+            text: User message submitted for the turn.
+
+        Raises:
+            RuntimeError: On the first, initial-prompt call.
+        """
+        submitted.append(text)
+        if len(submitted) == 1:
+            raise RuntimeError("initial turn exploded")
+        await real_run_turn(text)
+
+    monkeypatch.setattr(repl, "run_turn", _explode_on_initial)
+    try:
+        code = await asyncio.wait_for(repl.run(), timeout=5)
+    finally:
+        await _stop(pump_task)
+
+    assert code == 0
+    assert any("Turn failed: initial turn exploded" in line for line in ui.errors)
+    assert submitted == ["boom", "after failure"]
+    assert "recovered" in "".join(ui.stream.lines)
+
+
+@pytest.mark.asyncio
+async def test_initial_prompt_slash_prefix_stays_a_turn(tmp_path, monkeypatch):
+    """A ``--initial-prompt`` starting with "/" is a turn, not a slash command."""
+    ui = RecordingUI(answers=[EOFError()])
+    state, repl, _, pump_task, _ = await _setup(
+        tmp_path, ui, [_text_turn("ran as a turn")], initial_prompt="/help"
+    )
+
+    dispatch_calls = []
+
+    async def _forbid_dispatch(text, ctx):
+        """Record any dispatch call; the loop must never route the prompt here.
+
+        Args:
+            text: The submitted line that would be dispatched.
+            ctx: The command context that would back the dispatch.
+
+        Returns:
+            A default result, unreachable in a passing run.
+        """
+        dispatch_calls.append(text)
+        from mitocode.cli.commands import CommandResult
+
+        return CommandResult()
+
+    monkeypatch.setattr(repl_module, "dispatch", _forbid_dispatch)
+    try:
+        code = await asyncio.wait_for(repl.run(), timeout=5)
+    finally:
+        await _stop(pump_task)
+
+    assert code == 0
+    assert dispatch_calls == []
+    assert ui.errors == []
+    assert state.turn_count == 1
+    assert "ran as a turn" in "".join(ui.stream.lines)
+
+
+@pytest.mark.asyncio
 async def test_blank_input_is_ignored(tmp_path):
     """Empty and whitespace-only lines never start a turn."""
     ui = RecordingUI(answers=["", "   ", EOFError()])

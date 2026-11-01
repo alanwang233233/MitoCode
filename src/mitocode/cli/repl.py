@@ -110,6 +110,12 @@ class Repl:  # pylint: disable=too-many-instance-attributes
         output printed while the user is typing is redrawn above the input line
         instead of shredding it.
 
+        The optional ``--initial-prompt`` message is submitted before the first
+        prompt through the same failure containment as a prompt turn: if it
+        raises an ordinary ``Exception``, the failure is logged and reported and
+        the loop continues, because a failed first request is not a reason to
+        kill the CLI.
+
         Returns:
             ``0`` for every clean exit path (EOF, ``/exit``, double ``Ctrl+C``).
         """
@@ -117,7 +123,7 @@ class Repl:  # pylint: disable=too-many-instance-attributes
 
         with patch_stdout(raw=True):
             if initial:
-                await self.run_turn(initial)
+                await self._run_turn_reported(initial)
             while not self._shutdown.is_set():
                 try:
                     line = await self.ui.read_prompt()
@@ -161,6 +167,20 @@ class Repl:  # pylint: disable=too-many-instance-attributes
             if result is not None and result.exit_requested:
                 self._shutdown.set()
             return
+        await self._run_turn_reported(text)
+
+    async def _run_turn_reported(self, text: str) -> None:
+        """Run one turn and report an ordinary failure instead of raising.
+
+        Shared by the ``--initial-prompt`` submission and the prompt loop's turn
+        branch so both give a failed request the same treatment: the traceback
+        is logged and one ``ui.error`` line is printed, while
+        ``KeyboardInterrupt`` and ``asyncio.CancelledError`` -- which are
+        ``BaseException`` -- keep propagating to their shutdown handlers.
+
+        Args:
+            text: User message to append to the main session.
+        """
         try:
             await self.run_turn(text)
         except Exception as exc:  # pylint: disable=broad-except

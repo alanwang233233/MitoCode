@@ -431,34 +431,38 @@ def _indented_text(body: str, style: str | None = None) -> Text:
     return text
 
 
-def _is_diff_header(line: str) -> bool:
-    """Return whether a unified-diff line is the ``---``/``+++`` file header.
+def _strip_diff_headers(diff_lines: list[str]) -> list[str]:
+    """Drop the ``--- ``/``+++ `` file headers from a unified diff.
 
-    Args:
-        line: One line of a unified diff.
-
-    Returns:
-        ``True`` for the two header lines, which carry no useful information
-        here because both sides are the same file.
-    """
-    return line.startswith("--- ") or line.startswith("+++ ")
-
-
-def _diff_counts(diff_lines: list[str]) -> tuple[int, int]:
-    """Count added and removed lines in a unified diff.
+    ``difflib.unified_diff`` always emits exactly the two file headers as the
+    first two lines, so they are removed positionally rather than by prefix: a
+    content line that merely starts with the same prefix -- a removed
+    ``-- comment`` SQL line becomes ``--- comment`` -- must stay in the body.
 
     Args:
         diff_lines: Lines produced by :func:`difflib.unified_diff`.
 
     Returns:
-        A ``(added, removed)`` pair, excluding the file headers.
+        Every line after the first two, or everything when the diff is too
+        short to carry headers.
     """
-    added = sum(
-        1 for line in diff_lines if line.startswith("+") and not line.startswith("+++ ")
-    )
-    removed = sum(
-        1 for line in diff_lines if line.startswith("-") and not line.startswith("--- ")
-    )
+    return diff_lines[2:]
+
+
+def _diff_counts(body: list[str]) -> tuple[int, int]:
+    """Count added and removed lines in a unified-diff body.
+
+    Args:
+        body: Diff lines with the two file headers already removed, as
+            returned by :func:`_strip_diff_headers`.
+
+    Returns:
+        A ``(added, removed)`` pair counting body lines by their leading
+        ``+``/``-`` prefix.  Hunk headers (``@@``) and context lines count as
+        neither.
+    """
+    added = sum(1 for line in body if line.startswith("+"))
+    removed = sum(1 for line in body if line.startswith("-"))
     return added, removed
 
 
@@ -483,8 +487,8 @@ def _format_edit_result(args: Mapping[str, Any], root: Path, *, verbose: bool) -
     diff_lines = list(
         difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=2)
     )
-    added, removed = _diff_counts(diff_lines)
-    body = [line for line in diff_lines if not _is_diff_header(line)]
+    body = _strip_diff_headers(diff_lines)
+    added, removed = _diff_counts(body)
 
     shown = body if verbose else body[:DIFF_PREVIEW_MAX_LINES]
     dropped = len(body) - len(shown)
@@ -494,9 +498,11 @@ def _format_edit_result(args: Mapping[str, Any], root: Path, *, verbose: bool) -
     for line in shown:
         text.append("\n")
         text.append(CONTINUATION_INDENT)
-        if line.startswith("+") and not line.startswith("+++ "):
+        # The file headers were stripped positionally, so a body line starting
+        # with "+" or "-" is always model content, never a header.
+        if line.startswith("+"):
             text.append(line, style="mito.diff.add")
-        elif line.startswith("-") and not line.startswith("--- "):
+        elif line.startswith("-"):
             text.append(line, style="mito.diff.remove")
         elif line.startswith("@@"):
             text.append(line, style="mito.muted")

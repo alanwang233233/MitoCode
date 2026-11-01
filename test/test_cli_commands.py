@@ -446,6 +446,46 @@ async def test_model_rejects_bad_number_and_empty_answer(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_model_switch_registers_unlisted_model(tmp_path):
+    """An unlisted name is added to ``model_list`` so ``chat()`` accepts it."""
+    ctx, buffer = _ctx(tmp_path)
+
+    await dispatch("/model model-z", ctx)
+    await dispatch("/model model-z", ctx)
+
+    provider = ctx.state.provider
+    assert provider.default_model == "model-z"
+    assert provider.model_list == ["model-x", "model-y", "model-z"]
+    assert buffer.getvalue().count("not in the provider's model list") == 1
+    assert "Model set to model-z." in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_model_switch_from_empty_or_missing_list_registers_choice(tmp_path):
+    """A choice against an empty or missing list becomes the whole list."""
+    for starting_list in ([], None):
+        ctx, buffer = _ctx(tmp_path)
+        ctx.state.provider.model_list = starting_list
+
+        await dispatch("/model foo", ctx)
+
+        assert ctx.state.provider.default_model == "foo"
+        assert ctx.state.provider.model_list == ["foo"]
+        assert "not in the provider's model list" in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_model_number_pick_leaves_listed_models_unchanged(tmp_path):
+    """Picking a listed number never rewrites ``model_list``."""
+    ctx, _ = _ctx(tmp_path, answers=["2"])
+
+    await dispatch("/model", ctx)
+
+    assert ctx.state.provider.default_model == "model-y"
+    assert ctx.state.provider.model_list == ["model-x", "model-y"]
+
+
+@pytest.mark.asyncio
 async def test_mcp_refresh_calls_manager_and_every_session(tmp_path):
     session = _FakeSession()
     orchestrator = _FakeOrchestrator(sessions={0: session})
@@ -496,6 +536,47 @@ async def test_verbose_toggles_state_and_ui(tmp_path):
     await dispatch("/verbose", ctx)
     assert ctx.state.verbose is False and ctx.ui.verbose is False
     assert "Verbose" in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_help_shows_usage_brackets_verbatim(tmp_path):
+    """Table cells render usage brackets instead of parsing them as markup."""
+    ctx, buffer = _ctx(tmp_path)
+
+    await dispatch("/help", ctx)
+
+    text = buffer.getvalue()
+    assert "/model [name]" in text
+    assert "/mcp [refresh [name]]" in text
+    assert "/permissions [reset]" in text
+    assert "Command failed" not in text
+
+
+@pytest.mark.asyncio
+async def test_status_renders_bracketed_model_verbatim(tmp_path):
+    """A model name holding a closing bracket is not parsed as markup."""
+    ctx, buffer = _ctx(tmp_path)
+    ctx.state.provider.default_model = "model[/x]"
+
+    await dispatch("/status", ctx)
+
+    text = buffer.getvalue()
+    assert "model[/x]" in text
+    assert "Command failed" not in text
+
+
+@pytest.mark.asyncio
+async def test_permissions_renders_bracketed_cache_entries_verbatim(tmp_path):
+    """A cached command containing ``[/tmp/x]`` shows verbatim, without raising."""
+    approver = _FakeApprover()
+    approver.cached = [("Bash", 'echo "[/tmp/x]"')]
+    ctx, buffer = _ctx(tmp_path, approver=approver)
+
+    await dispatch("/permissions", ctx)
+
+    text = buffer.getvalue()
+    assert "[/tmp/x]" in text
+    assert "Command failed" not in text
 
 
 @pytest.mark.asyncio
