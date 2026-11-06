@@ -9,7 +9,7 @@ returns an ordinary :class:`CommandResult` so the REPL keeps running.
 Two rules keep commands from taking down the REPL.  Handlers that address an
 agent by id verify the id and warn instead of indexing a missing session, and
 every handler that can fail for a recoverable reason (a bad model number, an
-applied prompt answer, a workspace that cannot be written) reports through
+applied prompt answer) reports through
 :class:`~mitocode.cli.ui.CliUI` rather than raising.  A command's failures are
 never a reason to exit: only ``/exit`` and ``/quit`` return
 ``exit_requested=True``.
@@ -22,9 +22,7 @@ needs a terminal or a network connection.
 
 from __future__ import annotations
 
-import inspect
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 from rich.table import Table
@@ -325,24 +323,6 @@ def _last_assistant_text(session: Any) -> Optional[str]:
                 return message[:MAX_AGENT_MESSAGE_CHARS] + "…"
             return message
     return None
-
-
-async def _resolve(value: Any) -> Any:
-    """Await *value* when it is awaitable, otherwise return it.
-
-    ``Workspace.reload``/``dump`` return a coroutine inside a running event
-    loop and a plain value outside one; handlers always run inside an event
-    loop but spelling the union out keeps both shapes working.
-
-    Args:
-        value: Plain result or awaitable.
-
-    Returns:
-        The resolved value.
-    """
-    if inspect.isawaitable(value):
-        return await value
-    return value
 
 
 # ---------------------------------------------------------------------------
@@ -673,8 +653,6 @@ async def _cmd_skills(ctx: CommandContext, args: List[str]) -> CommandResult:
             "details are in the log."
         )
     if not skills:
-        # User-level discovery (~/.mitocode/skills) is temporarily disabled
-        # in bootstrap.skills_roots, so only the workspace path is advertised.
         ctx.ui.note(
             "No skills installed. Add a skill as a directory holding a "
             "SKILL.md under .mitocode/skills in this workspace, then run "
@@ -880,50 +858,6 @@ async def _cmd_cost(ctx: CommandContext, args: List[str]) -> CommandResult:
     """
     del args
     ctx.ui.note(f"Approximate tokens: ~{ctx.state.estimate_tokens()}")
-    return CommandResult()
-
-
-@command("init", "/init", "Persist the in-memory workspace configuration.")
-async def _cmd_init(ctx: CommandContext, args: List[str]) -> CommandResult:
-    """Write the workspace to disk, or reload an already initialized one.
-
-    Args:
-        ctx: Command context.
-        args: Unused extra arguments.
-
-    Returns:
-        A default result.
-    """
-    del args
-    state = ctx.state
-    workspace = state.workspace
-    path = Path(_workspace_path(state))
-
-    if state.workspace_initialized:
-        reload = getattr(workspace, "reload", None)
-        if callable(reload):
-            try:
-                await _resolve(reload())
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                ctx.ui.error(f"Could not reload the workspace: {exc}")
-                return CommandResult()
-        ctx.ui.note(f"Workspace already initialized at {path}.")
-        return CommandResult()
-
-    config_path = getattr(workspace, "config_path", None)
-    try:
-        if isinstance(config_path, Path):
-            config_path.mkdir(parents=True, exist_ok=True)
-        result = await _resolve(workspace.dump())
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-        ctx.ui.error(f"Could not initialize the workspace: {exc}")
-        return CommandResult()
-
-    if result:
-        state.workspace_initialized = True
-        ctx.ui.note(f"Workspace initialized at {path}.")
-    else:
-        ctx.ui.warn("Workspace was not initialized.")
     return CommandResult()
 
 

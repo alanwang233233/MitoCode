@@ -87,7 +87,7 @@ class CliState:  # pylint: disable=too-many-instance-attributes
     Attributes:
         args: Parsed command line arguments; ``Repl`` reads
             ``args.initial_prompt`` from here.
-        workspace: Workspace the agent operates in.  ``/init`` persists it.
+        workspace: Workspace the agent operates in.
         tool_manager: Registry backing ``/tools`` and MCP refreshes.
         provider: Chat provider; ``/model`` reads and writes its
             ``default_model``.
@@ -102,8 +102,6 @@ class CliState:  # pylint: disable=too-many-instance-attributes
             print.  ``CommandContext`` carries the same instance.
         approver: Approval policy/cache, or ``None`` when approvals are not
             interactive.  ``CommandContext`` carries the same instance.
-        workspace_initialized: Whether ``.mitocode/config.json`` exists on
-            disk; ``/init`` flips it after a successful dump.
         log_path: File receiving the CLI's logs, shown by ``/log``.
         main_id: Agent id of the interactive main session.  ``/clear`` replaces
             it with the id of the new session.
@@ -128,7 +126,6 @@ class CliState:  # pylint: disable=too-many-instance-attributes
     skills_manager: Optional["SkillsManager"] = None
     ui: Optional["CliUI"] = None
     approver: Optional["CliApprover"] = None
-    workspace_initialized: bool = False
     log_path: Path = field(default_factory=lambda: Path("cli.log"))
     main_id: int = 0
     turn_count: int = 0

@@ -24,7 +24,6 @@ from mitocode.cli.format import format_tool_call
 from mitocode.cli.stream import StreamingRenderer
 from mitocode.cli.theme import MITOCODE_THEME
 from mitocode.cli.ui import (
-    DEFAULT_HISTORY_PATH,
     PROMPT_MESSAGE,
     SLASH_COMMANDS,
     BannerInfo,
@@ -85,14 +84,13 @@ def _ui(**kwargs) -> tuple[CliUI, StringIO]:
         force_terminal=False,
         theme=MITOCODE_THEME,
     )
+    kwargs.setdefault("history_path", Path("cli-history"))
     return CliUI(console, **kwargs), buffer
 
 
 def test_banner_and_tool_lines_render(tmp_path):
     ui, buffer = _ui()
-    ui.show_banner(
-        BannerInfo("0.1.0", "model-x", tmp_path, False, 11, {"fs": "connected"})
-    )
+    ui.show_banner(BannerInfo("0.1.0", "model-x", tmp_path, 11, {"fs": "connected"}))
     ui.begin_tool(
         format_tool_call("Read", {"file_path": "a.py"}, "file_path", tmp_path)
     )
@@ -102,27 +100,20 @@ def test_banner_and_tool_lines_render(tmp_path):
     assert "12 lines" in text
 
 
-def test_banner_shows_version_workspace_tools_and_initialized_state(tmp_path):
+def test_banner_shows_version_workspace_and_tools(tmp_path):
     ui, buffer = _ui()
-    ui.show_banner(BannerInfo("0.1.0", "model-x", tmp_path, True, 3, {}))
+    ui.show_banner(BannerInfo("0.1.0", "model-x", tmp_path, 3, {}))
     text = buffer.getvalue()
     assert "◆ MitoCode" in text and "v0.1.0" in text
     assert "workspace" in text and tmp_path.name in text
     assert "3 built-in" in text and "0 MCP" in text
     assert "none" in text
-    assert "(not initialized)" not in text
-
-
-def test_banner_marks_uninitialized_workspace(tmp_path):
-    ui, buffer = _ui()
-    ui.show_banner(BannerInfo("0.1.0", "m", tmp_path, False, 1, {}))
-    assert "(not initialized)" in buffer.getvalue()
 
 
 def test_banner_lists_every_mcp_state(tmp_path):
     ui, buffer = _ui()
     servers = {"github": "connected", "filesystem": "failed", "local": "starting"}
-    ui.show_banner(BannerInfo("0.1.0", "m", tmp_path, True, 1, servers))
+    ui.show_banner(BannerInfo("0.1.0", "m", tmp_path, 1, servers))
     text = buffer.getvalue()
     assert "● github connected" in text
     assert "● filesystem failed" in text
@@ -180,7 +171,7 @@ def test_finish_turn_uses_elapsed_and_token_formatters():
 
 def test_clear_screen_prints_one_line_status(tmp_path):
     ui, buffer = _ui()
-    ui.show_banner(BannerInfo("0.1.0", "model-x", tmp_path, True, 1, {}))
+    ui.show_banner(BannerInfo("0.1.0", "model-x", tmp_path, 1, {}))
     ui.clear_screen()
     lines = [line for line in buffer.getvalue().splitlines() if line.strip()]
     assert lines[-1].strip().startswith("model-x · ")
@@ -193,7 +184,7 @@ def test_constructor_defaults_and_public_attributes(tmp_path):
     assert ui.verbose is True
     assert ui.prompt_active is False
     assert isinstance(ui.stream, StreamingRenderer)
-    assert DEFAULT_HISTORY_PATH == Path.home() / ".mitocode" / "history"
+    assert ui._history_path == tmp_path / "h"
 
 
 @pytest.mark.asyncio
@@ -382,12 +373,14 @@ def test_alt_enter_and_ctrl_j_insert_newlines_and_ctrl_l_clears():
 
 def test_build_prompt_session_sets_history_completion_and_toolbar(tmp_path):
     ui, _ = _ui()
-    ui.show_banner(BannerInfo("0.1.0", "model-x", tmp_path, True, 1, {}))
+    ui.show_banner(BannerInfo("0.1.0", "model-x", tmp_path, 1, {}))
     history_path = tmp_path / ".mitocode" / "history"
     session = ui.build_prompt_session(history_path)
     assert isinstance(session, PromptSession)
     assert history_path.parent.is_dir()
     assert history_path.parent.stat().st_mode & 0o077 == 0
+    assert history_path.is_file()
+    assert history_path.stat().st_mode & 0o077 == 0
     assert "/help" in session.completer.words
     toolbar = session.bottom_toolbar
     rendered = toolbar() if callable(toolbar) else toolbar

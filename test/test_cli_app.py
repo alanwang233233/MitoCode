@@ -11,17 +11,27 @@ import asyncio
 import os
 import signal
 import sys
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
+from rich.console import Console
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mitocode.cli import app as app_module
 from mitocode.cli.args import CliArgs
 from mitocode.cli.errors import MitoCodeCliConfigError
+from mitocode.cli.theme import MITOCODE_THEME
 from mitocode.core.exception.mitocode_exception import MitoCodeBaseError
 from mitocode.core.tool.tool_manager import ToolManager
 from mitocode.core.workspace.workspace import Workspace
+
+# The startup-consent/setup gates are bypassed for every test in this module;
+# the two tests that exercise the real functions resolve the original
+# implementation through this alias before the autouse fixture patches it.
+_REAL_ENSURE_PROVIDER_SETTINGS = app_module._ensure_provider_settings
 
 
 def _args(**overrides):
@@ -34,6 +44,25 @@ def _args(**overrides):
         The parsed arguments.
     """
     return CliArgs(workspace=Path("/tmp/mitocode-app-test"), **overrides)
+
+
+@pytest.fixture(autouse=True)
+def _bypass_workspace_and_provider_setup(monkeypatch):
+    """Skip the interactive consent/setup gates for every startup test.
+
+    The interactive prompts are covered in their own modules; here they would
+    otherwise call ``Confirm.ask`` and read the terminal.
+    """
+    monkeypatch.setattr(
+        app_module,
+        "ensure_workspace",
+        lambda workspace_path, *, confirm: True,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "_ensure_provider_settings",
+        lambda workspace, console: None,
+    )
 
 
 def _boot(
@@ -71,9 +100,7 @@ def _boot(
     )
     return SimpleNamespace(
         args=_args(),
-        resolution=SimpleNamespace(
-            workspace=workspace, initialized=True, migrated_from=None
-        ),
+        resolution=SimpleNamespace(workspace=workspace, migrated_from=None),
         provider_config=SimpleNamespace(
             model="model-x", base_url=None, timeout=60.0, source="flags"
         ),
@@ -224,7 +251,6 @@ def test_state_is_built_from_bootstrapped_components(monkeypatch, tmp_path):
     assert isinstance(state, app_module.CliState)
     assert state.args.verbose is True
     assert state.main_id == 0
-    assert state.workspace_initialized is True
     assert state.log_path == tmp_path / "cli.log"
     assert state.mcp_manager is boot.mcp_manager
     assert captured["approver"].policy.value == "ask"
@@ -395,9 +421,10 @@ def test_banner_failure_still_stops_mcp(monkeypatch, tmp_path, capsys):
     class ExplodingBannerUI:
         """UI whose banner rendering fails after bootstrap succeeded."""
 
-        def __init__(self, console, verbose=False):
+        def __init__(self, console, *, history_path=None, verbose=False):
             self.console = console
             self.verbose = verbose
+            self.history_path = history_path
 
         def show_banner(self, info):
             raise RuntimeError("banner failed")
@@ -480,3 +507,125 @@ def test_repl_constructor_failure_cancels_pump_and_stops_mcp(monkeypatch, tmp_pa
     assert stopped == ["stop"]
     assert len(created) == 1
     assert created[0].cancelled
+
+
+def test_first_run_prompts_and_writes_provider_file(monkeypatch, tmp_path):
+    """A missing provider file is collected through the setup prompts."""
+
+    recorded = {}
+
+    def fake_ask(console):
+        recorded.update(values={"api_key": "k", "model": "m"})
+        return recorded["values"]
+
+    def fake_write(workspace, values):
+        recorded["workspace"] = workspace
+        recorded["written"] = values
+        return tmp_path / ".mitocode" / "secret" / "provider.json"
+
+    monkeypatch.setattr(app_module, "ask_provider_settings", fake_ask)
+    monkeypatch.setattr(app_module, "write_secret_file", fake_write)
+    monkeypatch.setattr(
+        app_module, "_ensure_provider_settings", _REAL_ENSURE_PROVIDER_SETTINGS
+    )
+
+    app_module._ensure_provider_settings(
+        tmp_path, Console(file=StringIO(), force_terminal=False)
+    )
+
+    assert recorded["workspace"] == tmp_path
+    assert recorded["written"] == {"api_key": "k", "model": "m"}
+
+
+def test_existing_provider_file_is_left_untouched(monkeypatch, tmp_path):
+    secret = tmp_path / ".mitocode" / "secret" / "provider.json"
+    secret.parent.mkdir(parents=True)
+    secret.write_text('{"api_key":"k","model":"m"}', encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        app_module, "ask_provider_settings", lambda console: calls.append(console)
+    )
+    monkeypatch.setattr(
+        app_module, "write_secret_file", lambda workspace, values: calls.append(values)
+    )
+    monkeypatch.setattr(
+        app_module, "_ensure_provider_settings", _REAL_ENSURE_PROVIDER_SETTINGS
+    )
+
+    app_module._ensure_provider_settings(
+        tmp_path, Console(file=StringIO(), force_terminal=False)
+    )
+
+    assert calls == []
+
+
+def test_confirm_workspace_renders_panel_and_asks(monkeypatch):
+    buffer = StringIO()
+    console = Console(
+        file=buffer, width=100, force_terminal=False, theme=MITOCODE_THEME
+    )
+    monkeypatch.setattr(
+        app_module.Confirm,
+        "ask",
+        lambda prompt, *, console, default: default,
+    )
+
+    assert app_module._confirm_workspace(console, Path("/tmp/here")) is True
+    output = buffer.getvalue()
+    assert "Workspace setup" in output
+    assert "/tmp/here" in output
+
+
+def test_workspace_prompt_declined_returns_1(monkeypatch, capsys):
+    logged = []
+
+    def fake_logging(**kwargs):
+        logged.append(kwargs)
+        return Path("unused")
+
+    monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
+    monkeypatch.setattr(app_module, "ensure_workspace", lambda path, *, confirm: False)
+    monkeypatch.setattr(app_module, "configure_logging", fake_logging)
+
+    assert app_module.main([]) == 1
+    assert logged == []
+    assert "Workspace was not created" in capsys.readouterr().out
+
+
+def test_provider_setup_cancelled_returns_1(monkeypatch, capsys):
+    def fake_ensure(workspace, console):
+        raise EOFError()
+
+    monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
+    monkeypatch.setattr(app_module, "ensure_workspace", lambda path, *, confirm: True)
+    monkeypatch.setattr(app_module, "_ensure_provider_settings", fake_ensure)
+
+    assert app_module.main([]) == 1
+    assert "Provider setup was cancelled" in capsys.readouterr().out
+
+
+def test_provider_setup_error_returns_1(monkeypatch, capsys):
+    def fake_ensure(workspace, console):
+        raise MitoCodeCliConfigError("cannot write provider file")
+
+    monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
+    monkeypatch.setattr(app_module, "ensure_workspace", lambda path, *, confirm: True)
+    monkeypatch.setattr(app_module, "_ensure_provider_settings", fake_ensure)
+
+    assert app_module.main([]) == 1
+    assert "cannot write provider file" in capsys.readouterr().err
+
+
+def test_log_directory_failure_returns_1(monkeypatch, capsys):
+    def fake_logging(**kwargs):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
+    monkeypatch.setattr(app_module, "ensure_workspace", lambda path, *, confirm: True)
+    monkeypatch.setattr(
+        app_module, "_ensure_provider_settings", lambda workspace, console: None
+    )
+    monkeypatch.setattr(app_module, "configure_logging", fake_logging)
+
+    assert app_module.main([]) == 1
+    assert "log directory" in capsys.readouterr().err.lower()

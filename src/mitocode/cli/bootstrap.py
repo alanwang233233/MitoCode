@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Awaitable,
+    Callable,
     List,
     Optional,
     Sequence,
@@ -52,6 +53,7 @@ from mitocode.core.exception.mitocode_exception import (
     MitoCodeAppTooOldError,
     MitoCodeMcpConfigError,
     MitoCodeMigrateError,
+    MitoCodeWorkspaceDumpError,
     MitoCodeWorkspaceInitError,
     MitoCodeWorkspaceTooOldError,
 )
@@ -74,8 +76,8 @@ DEFAULT_MCP_CONFIG_RELATIVE_PATH = Path(MITOCODE_CONFIG_PATH) / "mcp.json"
 """Default MCP configuration file, relative to the workspace root."""
 
 SKILLS_DIR_NAME = "skills"
-"""Skill directories' name under a root: ``<workspace>/.mitocode/skills`` and
-``~/.mitocode/skills``."""
+"""Skill directories' name under the workspace root:
+``<workspace>/.mitocode/skills``."""
 
 SYSTEM_PROMPT_TEMPLATE = """\
 You are MitoCode, an interactive coding agent running in the user's terminal.
@@ -133,47 +135,98 @@ class WorkspaceResolution:
     """Outcome of resolving the workspace at startup.
 
     Attributes:
-        workspace: The loaded workspace. Always present, so every ``ToolContext``
-            gets a root directory boundary even when nothing was on disk.
-        initialized: Whether a ``.mitocode/config.json`` existed. ``False`` means
-            the workspace is in memory only and ``/init`` still has to write it.
+        workspace: The loaded workspace; always present, so every
+            ``ToolContext`` gets a root directory boundary.
         migrated_from: Configuration version before an automatic migration, or
             ``None`` when no migration happened.
     """
 
     workspace: Workspace
-    initialized: bool
     migrated_from: Optional[int] = None
+
+
+def ensure_workspace(
+    workspace_path: Union[str, Path], *, confirm: Callable[[Path], bool]
+) -> bool:
+    """Create the workspace configuration when it is missing.
+
+    Called before logging is configured, so that a declined prompt leaves
+    nothing on disk. An existing ``config.json`` is left untouched; a missing
+    one is created only after *confirm* agrees, so a read-only checkout can
+    still decline cleanly.
+
+    Args:
+        workspace_path: Workspace root the CLI was pointed at.
+        confirm: Receives the workspace root and returns whether to create it.
+
+    Returns:
+        ``True`` when a usable workspace configuration exists after the call
+        (already there or just created), ``False`` when the user declined.
+
+    Raises:
+        MitoCodeCliConfigError: The workspace directory does not exist or the
+            configuration cannot be written. Messages name the path and never
+            the contents.
+    """
+    root = Path(workspace_path)
+    if not root.is_dir():
+        raise MitoCodeCliConfigError(
+            f"The workspace directory '{root}' does not exist."
+        )
+    config_file = root / MITOCODE_CONFIG_PATH / CONFIG_FILENAME
+    if config_file.is_file():
+        return True
+    if not confirm(root):
+        return False
+
+    config_dir = root / MITOCODE_CONFIG_PATH
+    try:
+        # Encrypted or shared content never lives here, but the directory also
+        # holds logs, history and credentials, so a newly created one starts
+        # private. An existing one keeps whatever mode the user chose.
+        config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        workspace = Workspace(root, root.name, APP_VERSION)
+        result = workspace.dump()
+        if asyncio.iscoroutine(result):
+            result = asyncio.run(result)
+    except (OSError, MitoCodeWorkspaceDumpError) as exc:
+        raise MitoCodeCliConfigError(
+            f"Cannot create the workspace configuration at '{config_dir}': "
+            f"{getattr(exc, 'strerror', None) or 'I/O error'}."
+        ) from exc
+    if not result:
+        raise MitoCodeCliConfigError(
+            f"Cannot create the workspace configuration at '{config_dir}'."
+        )
+    return True
 
 
 async def resolve_workspace(path: Path) -> WorkspaceResolution:
     """Load the workspace at *path*, migrating an outdated configuration.
 
-    A workspace without ``.mitocode/config.json`` is returned as an in-memory
-    :class:`Workspace` at the current application version; nothing is written to
-    disk, which keeps a read-only checkout usable and leaves initialization to
-    the explicit ``/init`` command.
+    :func:`ensure_workspace` has already guaranteed that
+    ``.mitocode/config.json`` exists when the CLI calls this, so a missing file
+    is a startup error rather than an in-memory workspace.
 
     Args:
         path: Workspace root directory.
 
     Returns:
-        The resolution describing the workspace, whether it came from disk and
-        which version it was migrated from.
+        The resolution describing the workspace and which version it was
+        migrated from.
 
     Raises:
-        MitoCodeCliConfigError: The configuration is unreadable, invalid, written
-            by a newer MitoCode, or could not be migrated. The message names the
-            configuration file but never its contents.
+        MitoCodeCliConfigError: The configuration is missing, unreadable,
+            invalid, written by a newer MitoCode, or could not be migrated.
+            The message names the configuration file but never its contents.
     """
     workspace_path = Path(path)
     config_file = workspace_path / MITOCODE_CONFIG_PATH / CONFIG_FILENAME
 
     if not config_file.is_file():
-        return WorkspaceResolution(
-            workspace=Workspace(workspace_path, workspace_path.name, APP_VERSION),
-            initialized=False,
-            migrated_from=None,
+        raise _config_error(
+            config_file,
+            "it does not exist; create a workspace and run mitocode again",
         )
 
     try:
@@ -192,9 +245,7 @@ async def resolve_workspace(path: Path) -> WorkspaceResolution:
             "it is unreadable, not valid JSON, or missing required fields",
         ) from exc
 
-    return WorkspaceResolution(
-        workspace=workspace, initialized=True, migrated_from=None
-    )
+    return WorkspaceResolution(workspace=workspace, migrated_from=None)
 
 
 async def _migrate_workspace(
@@ -233,9 +284,7 @@ async def _migrate_workspace(
         previous_version,
         APP_VERSION,
     )
-    return WorkspaceResolution(
-        workspace=workspace, initialized=True, migrated_from=previous_version
-    )
+    return WorkspaceResolution(workspace=workspace, migrated_from=previous_version)
 
 
 def _config_version(config_file: Path) -> Optional[int]:
@@ -344,7 +393,7 @@ class Bootstrapped:  # pylint: disable=too-many-instance-attributes
 
     Attributes:
         args: The parsed command line arguments the run started with.
-        resolution: Workspace resolution, including whether it was initialized.
+        resolution: Workspace resolution and any automatic version migration.
         provider_config: Validated provider settings, secret value excluded from
             ``repr``.
         tool_manager: Registry holding the built-in and MCP tools.
@@ -402,17 +451,13 @@ def build_system_prompt(workspace: Path, skills: Sequence[Skill] = ()) -> str:
 
 
 def skills_roots(workspace: Workspace) -> Tuple[SkillRoot, ...]:
-    """Return the skill roots one CLI run scans, in precedence order.
+    """Return the skill roots one CLI run scans.
 
-    Currently only the workspace's own ``.mitocode/skills`` is scanned:
-    user-level discovery (``~/.mitocode/skills``) is **temporarily
-    disabled** — the root is commented out below rather than deleted, so
-    restoring it is a one-line uncomment (and reverting the companion test
-    in ``test_cli_bootstrap.py``).  The root needs no special handling once
-    restored: a missing directory contributes nothing.
+    Only the workspace's own ``.mitocode/skills`` is scanned. A missing
+    directory contributes nothing.
 
     Args:
-        workspace: Resolved workspace whose root the first scan derives from.
+        workspace: Resolved workspace whose root the scan derives from.
 
     Returns:
         The labelled roots in precedence order.
@@ -422,14 +467,6 @@ def skills_roots(workspace: Workspace) -> Tuple[SkillRoot, ...]:
             label="workspace",
             path=workspace.path / MITOCODE_CONFIG_PATH / SKILLS_DIR_NAME,
         ),
-        # Temporarily disabled: user-level skill discovery is switched off.
-        # Restore this root (and the expected roots tuple in
-        # test_bootstrap_discovers_workspace_skills_only_for_now) to re-enable
-        # scanning ~/.mitocode/skills.
-        # SkillRoot(
-        #     label="user",
-        #     path=Path.home() / MITOCODE_CONFIG_PATH / SKILLS_DIR_NAME,
-        # ),
     )
 
 
@@ -478,12 +515,12 @@ async def bootstrap(args: CliArgs, ui: CliUI, approver: CliApprover) -> Bootstra
     """
     resolution = await resolve_workspace(args.workspace)
     loguru_logger.debug(
-        "Workspace resolved at {} (initialized={})",
+        "Workspace resolved at {} (migrated_from={})",
         resolution.workspace.path,
-        resolution.initialized,
+        resolution.migrated_from,
     )
 
-    provider_config = resolve_provider_config(args, resolution.workspace.path)
+    provider_config = resolve_provider_config(resolution.workspace.path)
 
     tool_manager = ToolManager()
     tool_context = ToolContext(workspace=resolution.workspace, approver=approver)
@@ -698,6 +735,7 @@ __all__ = [
     "bootstrap",
     "build_skills_manager",
     "build_system_prompt",
+    "ensure_workspace",
     "load_mcp_servers",
     "resolve_workspace",
     "skills_roots",

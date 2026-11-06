@@ -7,6 +7,7 @@ the design fixes: MCP must start before the first agent session exists, because
 """
 
 import asyncio
+import json
 import os
 import sys
 from io import StringIO
@@ -92,7 +93,7 @@ class _RecordingUI(CliUI):
     """A real :class:`CliUI` that also keeps its warnings and errors."""
 
     def __init__(self, console: Console) -> None:
-        super().__init__(console)
+        super().__init__(console, history_path=Path("cli-history"))
         self.warnings: list[str] = []
         self.errors: list[str] = []
 
@@ -129,10 +130,6 @@ def _args(**over) -> CliArgs:
     """
     base = dict(
         workspace=Path("."),
-        model=None,
-        api_key=None,
-        base_url=None,
-        timeout=60.0,
         permission_mode="ask",
         mcp_config=None,
         no_mcp=False,
@@ -142,6 +139,36 @@ def _args(**over) -> CliArgs:
         show_help=False,
         show_version=False,
     )
+    base.update(over)
+    return CliArgs(**base)
+
+
+def _provider_args(root: Path, provider=None, **over) -> CliArgs:
+    """Write the credential file the CLI now requires and build the arguments.
+
+    Also writes a minimal workspace configuration, because :func:`bootstrap`
+    cannot run without one.
+
+    Args:
+        root: Workspace root receiving
+            ``.mitocode/secret/provider.json`` and ``.mitocode/config.json``.
+        provider: Fields to merge over the default
+            ``{"api_key": "k", "model": "m"}`` credential document.
+        **over: Fields to override on the arguments.
+
+    Returns:
+        The arguments pointing at *root*.
+    """
+    payload = {"api_key": "k", "model": "m"}
+    payload.update(provider or {})
+    path = root / ".mitocode" / "secret" / "provider.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    (path.parent.parent / "config.json").write_text(
+        json.dumps({"version": 2, "name": root.name, "description": ""}),
+        encoding="utf-8",
+    )
+    base = dict(workspace=root)
     base.update(over)
     return CliArgs(**base)
 
@@ -247,47 +274,32 @@ def test_build_system_prompt_renders_one_line_per_skill(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_discovers_workspace_skills_only_for_now(tmp_path, monkeypatch):
-    """bootstrap serves the workspace root only, with the user root disabled.
+async def test_bootstrap_discovers_workspace_skills_only(tmp_path, monkeypatch):
+    """bootstrap scans the workspace skills root only.
 
-    User-level discovery (``~/.mitocode/skills``) is deliberately switched
-    off for now in :func:`bootstrap.skills_roots` — restore the commented
-    root there and this test's expected tuple together.  The HOME
-    monkeypatch proves a populated user directory stays unscanned rather
-    than merely absent.
+    The user-level ``~/.mitocode/skills`` root is not part of the roots at
+    all, so nothing outside the workspace is scanned.
     """
     ORDERS.clear()
     _patch(monkeypatch)
-    home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
     skill_dir = tmp_path / ".mitocode" / "skills" / "alpha"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         "---\nname: alpha\ndescription: Do alpha things.\n---\nBody.\n",
         encoding="utf-8",
     )
-    user_skill_dir = home / ".mitocode" / "skills" / "user-skill"
-    user_skill_dir.mkdir(parents=True)
-    (user_skill_dir / "SKILL.md").write_text(
-        "---\nname: user-skill\ndescription: Must not be discovered.\n---\nBody.\n",
-        encoding="utf-8",
-    )
     ui = _ui()
 
-    result = await bootstrap(
-        _args(workspace=tmp_path, model="m", api_key="k"), ui, CliApprover(ui)
-    )
+    result = await bootstrap(_provider_args(tmp_path), ui, CliApprover(ui))
 
     assert result.skills_manager.roots() == (
         SkillRoot("workspace", tmp_path / ".mitocode" / "skills"),
     )
     assert result.skills_manager.get("alpha") is not None
-    assert result.skills_manager.get("user-skill") is None
     assert result.tool_context.skills_manager is result.skills_manager
     prompt = result.orchestrator.kw["system_prompt"]
     assert "## Skills" in prompt
     assert "- alpha: Do alpha things." in prompt
-    assert "user-skill" not in prompt
 
 
 @pytest.mark.asyncio
@@ -297,12 +309,9 @@ async def test_bootstrap_without_any_skills_leaves_the_prompt_alone(
     """With no skill installed anywhere, neither prompt nor context changes."""
     ORDERS.clear()
     _patch(monkeypatch)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     ui = _ui()
 
-    result = await bootstrap(
-        _args(workspace=tmp_path, model="m", api_key="k"), ui, CliApprover(ui)
-    )
+    result = await bootstrap(_provider_args(tmp_path), ui, CliApprover(ui))
 
     assert "## Skills" not in result.orchestrator.kw["system_prompt"]
     assert result.orchestrator.kw["system_prompt"].startswith("You are MitoCode")
@@ -317,7 +326,7 @@ async def test_mcp_starts_before_session_and_model_is_union(tmp_path, monkeypatc
     ui = _ui()
 
     result = await bootstrap(
-        _args(workspace=tmp_path, model="my-model", api_key="k"),
+        _provider_args(tmp_path, provider={"model": "my-model"}),
         ui,
         CliApprover(ui),
     )
@@ -361,7 +370,7 @@ async def test_model_absent_from_live_list_is_appended_with_warning(
     ui = _ui()
 
     result = await bootstrap(
-        _args(workspace=tmp_path, model="my-model", api_key="k"),
+        _provider_args(tmp_path, provider={"model": "my-model"}),
         ui,
         CliApprover(ui),
     )
@@ -387,7 +396,7 @@ async def test_model_present_in_live_list_is_not_duplicated(tmp_path, monkeypatc
     ui = _ui()
 
     result = await bootstrap(
-        _args(workspace=tmp_path, model="my-model", api_key="k"),
+        _provider_args(tmp_path, provider={"model": "my-model"}),
         ui,
         CliApprover(ui),
     )
@@ -403,9 +412,7 @@ async def test_broken_default_mcp_is_non_fatal(tmp_path, monkeypatch):
     _write_mcp(tmp_path, "{}")
     ui = _ui()
 
-    result = await bootstrap(
-        _args(workspace=tmp_path, model="m", api_key="k"), ui, CliApprover(ui)
-    )
+    result = await bootstrap(_provider_args(tmp_path), ui, CliApprover(ui))
 
     assert result.mcp_manager is None
     assert result.mcp_error
@@ -422,12 +429,7 @@ async def test_explicit_broken_mcp_is_fatal(tmp_path, monkeypatch):
 
     with pytest.raises(MitoCodeCliConfigError) as excinfo:
         await bootstrap(
-            _args(
-                workspace=tmp_path,
-                model="m",
-                api_key="k",
-                mcp_config=explicit,
-            ),
+            _provider_args(tmp_path, mcp_config=explicit),
             ui,
             CliApprover(ui),
         )
@@ -444,7 +446,7 @@ async def test_no_mcp_flag_creates_no_manager(tmp_path, monkeypatch):
     ui = _ui()
 
     result = await bootstrap(
-        _args(workspace=tmp_path, model="m", api_key="k", no_mcp=True),
+        _provider_args(tmp_path, no_mcp=True),
         ui,
         CliApprover(ui),
     )
@@ -461,9 +463,7 @@ async def test_missing_default_mcp_creates_no_manager(tmp_path, monkeypatch):
     (tmp_path / ".mitocode").mkdir()
     ui = _ui()
 
-    result = await bootstrap(
-        _args(workspace=tmp_path, model="m", api_key="k"), ui, CliApprover(ui)
-    )
+    result = await bootstrap(_provider_args(tmp_path), ui, CliApprover(ui))
 
     assert result.mcp_manager is None
     assert result.mcp_error == ""
@@ -486,7 +486,7 @@ async def test_provider_failure_becomes_config_error_with_scrubbed_key(
 
     with pytest.raises(MitoCodeCliConfigError) as excinfo:
         await bootstrap(
-            _args(workspace=tmp_path, model="m", api_key="super-secret"),
+            _provider_args(tmp_path, provider={"api_key": "super-secret"}),
             ui,
             CliApprover(ui),
         )
@@ -521,7 +521,7 @@ async def test_session_failure_after_mcp_start_stops_the_manager(tmp_path, monke
 
     with pytest.raises(RuntimeError, match="session creation failed"):
         await bootstrap(
-            _args(workspace=tmp_path, model="m", api_key="k"),
+            _provider_args(tmp_path),
             ui,
             CliApprover(ui),
         )
@@ -638,9 +638,7 @@ async def test_config_error_path_never_constructs_or_stops_a_manager(
     ui = _ui()
     known = len(_FakeMcp.instances)
 
-    result = await bootstrap(
-        _args(workspace=tmp_path, model="m", api_key="k"), ui, CliApprover(ui)
-    )
+    result = await bootstrap(_provider_args(tmp_path), ui, CliApprover(ui))
 
     assert result.mcp_manager is None
     assert result.mcp_error
@@ -660,12 +658,7 @@ async def test_explicit_config_error_propagates_without_stopping(tmp_path, monke
 
     with pytest.raises(MitoCodeCliConfigError):
         await bootstrap(
-            _args(
-                workspace=tmp_path,
-                model="m",
-                api_key="k",
-                mcp_config=explicit,
-            ),
+            _provider_args(tmp_path, mcp_config=explicit),
             ui,
             CliApprover(ui),
         )
@@ -687,9 +680,7 @@ async def test_bootstrap_passes_provider_api_key_for_redaction(tmp_path, monkeyp
     (tmp_path / ".mitocode").mkdir()
     ui = _ui()
 
-    result = await bootstrap(
-        _args(workspace=tmp_path, model="m", api_key="k"), ui, CliApprover(ui)
-    )
+    result = await bootstrap(_provider_args(tmp_path), ui, CliApprover(ui))
 
     assert result.orchestrator.kw["redact_secrets"] == (
         "k",
@@ -705,8 +696,8 @@ async def test_unknown_effort_tier_warns_at_startup(tmp_path, monkeypatch):
     ui = _ui()
 
     result = await bootstrap(
-        _args(
-            workspace=tmp_path, model="my-model", api_key="k", reasoning_effort="ultra"
+        _provider_args(
+            tmp_path, provider={"model": "my-model", "reasoning_effort": "ultra"}
         ),
         ui,
         CliApprover(ui),
@@ -725,8 +716,8 @@ async def test_known_effort_tier_is_silent(tmp_path, monkeypatch):
     ui = _ui()
 
     result = await bootstrap(
-        _args(
-            workspace=tmp_path, model="my-model", api_key="k", reasoning_effort="high"
+        _provider_args(
+            tmp_path, provider={"model": "my-model", "reasoning_effort": "high"}
         ),
         ui,
         CliApprover(ui),
@@ -745,7 +736,7 @@ async def test_unset_effort_passes_none_in_settings(tmp_path, monkeypatch):
     ui = _ui()
 
     result = await bootstrap(
-        _args(workspace=tmp_path, model="my-model", api_key="k"),
+        _provider_args(tmp_path, provider={"model": "my-model"}),
         ui,
         CliApprover(ui),
     )

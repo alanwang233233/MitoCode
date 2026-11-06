@@ -11,7 +11,6 @@ from loguru import logger
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mitocode.cli.logging_setup import (
-    DEFAULT_LOG_SUBDIR,
     LOG_FILENAME,
     LOG_LEVEL,
     RETENTION,
@@ -56,17 +55,9 @@ def test_configure_logging_removes_previous_sinks(tmp_path):
     assert "after-takeover" not in stale.read_text(encoding="utf-8")
 
 
-def test_default_log_dir_lives_under_home(monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(tmp_path))
-
-    path = configure_logging()
-    logger.info("default-path-line")
-    logger.complete()
-
-    expected_dir = tmp_path / ".mitocode" / "logs"
-    assert path == expected_dir / LOG_FILENAME
-    assert path.is_file()
-    assert "default-path-line" in path.read_text(encoding="utf-8")
+def test_log_dir_is_required(tmp_path):
+    with pytest.raises(TypeError):
+        configure_logging()
 
 
 def test_creates_missing_log_directory_with_private_mode(tmp_path):
@@ -158,4 +149,3 @@ def test_configuration_constants():
     assert LOG_LEVEL == "DEBUG"
     assert ROTATION == "10 MB"
     assert RETENTION == 5
-    assert DEFAULT_LOG_SUBDIR == Path(".mitocode") / "logs"

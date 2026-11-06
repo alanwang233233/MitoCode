@@ -41,9 +41,6 @@ from rich.text import Text
 from mitocode.cli.format import format_elapsed, format_tokens
 from mitocode.cli.stream import StreamingRenderer
 
-DEFAULT_HISTORY_PATH = Path.home() / ".mitocode" / "history"
-"""Where prompt history is stored when the caller does not override it."""
-
 PROMPT_MESSAGE = "❯ "
 """Message shown for the main input prompt."""
 
@@ -62,7 +59,6 @@ SLASH_COMMANDS: tuple[str, ...] = (
     "permissions",
     "verbose",
     "cost",
-    "init",
     "log",
     "exit",
     "quit",
@@ -102,7 +98,6 @@ class BannerInfo:
         version: MitoCode version string, shown with a ``v`` prefix.
         model: Model the provider will use for this session.
         workspace: Workspace root the agent operates in.
-        initialized: Whether ``.mitocode/config.json`` already exists.
         tool_count: Number of registered built-in tools.
         mcp: MCP server name to state, rendered as coloured dots.
     """
@@ -110,7 +105,6 @@ class BannerInfo:
     version: str
     model: str
     workspace: Path
-    initialized: bool
     tool_count: int
     mcp: Dict[str, str] = field(default_factory=dict)
 
@@ -249,19 +243,19 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
         self,
         console: Console,
         *,
+        history_path: Path,
         verbose: bool = False,
         prompt_session: Optional[Any] = None,
-        history_path: Optional[Path] = None,
     ) -> None:
         """Initialise the UI.
 
         Args:
             console: Console that receives all output.
+            history_path: File that receives prompt history, always inside the
+                workspace; there is no home-directory fallback.
             verbose: Show complete tool output instead of previews.
             prompt_session: Pre-built prompt session; tests inject a fake. When
                 ``None``, :meth:`build_prompt_session` is called on first use.
-            history_path: Prompt history file override; defaults to
-                :data:`DEFAULT_HISTORY_PATH` when a session is built lazily.
         """
         self.console = console
         self.verbose = verbose
@@ -269,7 +263,7 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
         self.prompt_active = False
         self.agent_count = 1
         self._prompt_session = prompt_session
-        self._history_path = history_path or DEFAULT_HISTORY_PATH
+        self._history_path = history_path
         self._banner_info: Optional[BannerInfo] = None
         self._live: Optional[Live] = None
         self._live_kind: Optional[str] = None
@@ -290,11 +284,7 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
         """
         self._banner_info = info
 
-        suffix = "" if info.initialized else " (not initialized)"
-        workspace = _workspace_label(
-            info.workspace, limit=_WORKSPACE_LIMIT - len(suffix)
-        )
-        workspace += suffix
+        workspace = _workspace_label(info.workspace, limit=_WORKSPACE_LIMIT)
 
         lines: List[Text] = [
             Text.assemble(
@@ -693,10 +683,11 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
     def build_prompt_session(self, history_path: Optional[Path] = None) -> Any:
         """Build the real ``PromptSession`` used for input.
 
-        The history directory is created with ``0o700`` because prompt history
-        can contain file paths and pasted content. A directory that cannot be
-        created or tightened degrades to an in-memory-free session rather than
-        failing startup.
+        The history directory is created with ``0o700`` and the file itself
+        with ``0o600`` because prompt history can contain file paths and pasted
+        content. A directory or file that cannot be created or tightened
+        degrades to a session that keeps history in memory rather than failing
+        startup.
 
         Args:
             history_path: History file override; defaults to the instance's
@@ -711,6 +702,8 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
         try:
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             path.parent.chmod(0o700)
+            path.touch(mode=0o600, exist_ok=True)
+            path.chmod(0o600)
         except OSError:
             pass
         return PromptSession(
@@ -791,7 +784,6 @@ class CliUI:  # pylint: disable=too-many-instance-attributes
 __all__ = [
     "BANNER_HINT",
     "CliUI",
-    "DEFAULT_HISTORY_PATH",
     "PROMPT_MESSAGE",
     "SLASH_COMMANDS",
     "BannerInfo",

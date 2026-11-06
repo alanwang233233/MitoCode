@@ -17,7 +17,6 @@ from rich.console import Console
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from mitocode import APP_VERSION
 from mitocode.cli.args import CliArgs
 from mitocode.cli.commands import COMMANDS, Command, CommandResult, dispatch
 from mitocode.cli.state import CliState, CommandContext
@@ -41,7 +40,6 @@ EXPECTED_COMMANDS = {
     "permissions",
     "verbose",
     "cost",
-    "init",
     "log",
     "exit",
     "quit",
@@ -290,7 +288,7 @@ def _ctx(  # pylint: disable=too-many-arguments
         file=buffer, width=200, force_terminal=False, theme=MITOCODE_THEME
     )
     prompt = _FakePromptSession(answers or [])
-    ui = CliUI(console, prompt_session=prompt)
+    ui = CliUI(console, prompt_session=prompt, history_path=tmp_path / "h")
     provider = SimpleNamespace(
         default_model="model-x", model_list=["model-x", "model-y"]
     )
@@ -738,48 +736,6 @@ async def test_estimate_tokens_counts_message_and_tool_text(tmp_path):
     ctx = _ctx(tmp_path, orchestrator=_FakeOrchestrator(sessions={0: session}))[0]
 
     assert ctx.state.estimate_tokens() == 8
-
-
-@pytest.mark.asyncio
-async def test_init_persists_an_in_memory_workspace(tmp_path):
-    workspace = Workspace(tmp_path, tmp_path.name, APP_VERSION)
-    ctx, buffer = _ctx(tmp_path, workspace=workspace)
-
-    await dispatch("/init", ctx)
-
-    assert ctx.state.workspace_initialized is True
-    assert (tmp_path / ".mitocode" / "config.json").is_file()
-    assert "initialized" in buffer.getvalue().lower()
-
-
-@pytest.mark.asyncio
-async def test_init_on_existing_workspace_reloads_instead_of_dumping(tmp_path):
-    workspace = _AsyncWorkspace(tmp_path)
-    ctx, buffer = _ctx(tmp_path, workspace=workspace)
-    ctx.state.workspace_initialized = True
-
-    await dispatch("/init", ctx)
-
-    assert workspace.dump_calls == 0
-    assert workspace.reload_calls == 1
-    assert "already initialized" in buffer.getvalue().lower()
-
-
-@pytest.mark.asyncio
-async def test_init_failure_is_reported_not_raised(tmp_path):
-    workspace = _AsyncWorkspace(tmp_path)
-    workspace.dump_result = False
-    ctx, buffer = _ctx(tmp_path, workspace=workspace)
-
-    await dispatch("/init", ctx)
-
-    assert ctx.state.workspace_initialized is False
-    assert "not initialized" in buffer.getvalue().lower()
-
-    workspace.dump_result = True
-    workspace.dump = lambda: (_ for _ in ()).throw(OSError("disk full"))
-    await dispatch("/init", ctx)
-    assert "disk full" in buffer.getvalue()
 
 
 @pytest.mark.asyncio

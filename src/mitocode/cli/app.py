@@ -10,9 +10,12 @@ The startup order is a constraint, not a preference:
 
 1. arguments, version/help and the terminal check (no logging yet, so a
    non-interactive invocation never touches the log directory);
-2. logging takeover, then the console, UI, approver and :func:`bootstrap`, which
-   resolves the workspace, registers tools, starts MCP and creates the main
-   session;
+2. workspace confirmation (when ``.mitocode/config.json`` is missing) and
+   logging takeover, in that order: a declined workspace must not create the
+   log directory, and every log lives inside the workspace;
+3. provider setup (interactive when the credential file is missing), then the
+   console's UI, approver and :func:`bootstrap`, which resolves the workspace,
+   registers tools, starts MCP and creates the main session;
 3. state, event pump task and REPL, in that order, because the pump must be
    consuming events before the first turn can produce any;
 4. ``SIGINT`` is routed to :meth:`Repl.handle_sigint` when the platform supports
@@ -38,17 +41,29 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+from pathlib import Path
 from typing import Any, NoReturn, Optional, Sequence
 
 from loguru import logger as loguru_logger
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Confirm
 from rich.text import Text
 
+from mitocode import MITOCODE_CONFIG_PATH
 from mitocode.cli.approval import ApprovalPolicy, CliApprover
 from mitocode.cli.args import CliArgs, parse_args, render_help, version_string
-from mitocode.cli.bootstrap import Bootstrapped, bootstrap
-from mitocode.cli.errors import MitoCodeCliError
+from mitocode.cli.bootstrap import Bootstrapped, bootstrap, ensure_workspace
+from mitocode.cli.config import (
+    ask_provider_settings,
+    secret_path,
+    write_secret_file,
+)
+from mitocode.cli.errors import (
+    MitoCodeCliConfigError,
+    MitoCodeCliError,
+    MitoCodeCliError,
+)
 from mitocode.cli.logging_setup import configure_logging
 from mitocode.cli.pump import EventPump
 from mitocode.cli.repl import Repl
@@ -168,7 +183,6 @@ def _banner_info(boot: Bootstrapped) -> BannerInfo:
         version=_display_version(),
         model=boot.provider_config.model,
         workspace=boot.resolution.workspace.path,
-        initialized=boot.resolution.initialized,
         tool_count=builtin_count,
         mcp=mcp_states,
     )
@@ -209,7 +223,11 @@ async def _amain(args: CliArgs, log_path: Any, console: Console) -> int:
         MitoCodeBaseError: A workspace, provider or MCP error aborted startup.
         KeyboardInterrupt: The user interrupted startup.
     """
-    ui = CliUI(console, verbose=args.verbose)
+    ui = CliUI(
+        console,
+        verbose=args.verbose,
+        history_path=Path(args.workspace) / MITOCODE_CONFIG_PATH / "history",
+    )
     approver = CliApprover(ui, ApprovalPolicy(args.permission_mode))
     boot = await bootstrap(args, ui, approver)
 
@@ -229,7 +247,6 @@ async def _amain(args: CliArgs, log_path: Any, console: Console) -> int:
             skills_manager=boot.skills_manager,
             ui=ui,
             approver=approver,
-            workspace_initialized=boot.resolution.initialized,
             log_path=log_path,
             main_id=boot.main_session.agent_id,
             mcp_error=boot.mcp_error,
@@ -255,16 +272,76 @@ async def _amain(args: CliArgs, log_path: Any, console: Console) -> int:
             ui.note(f"Log file: {log_path}")
 
 
+def _confirm_workspace(console: Console, workspace: Path) -> bool:
+    """Ask whether a missing workspace configuration should be created.
+
+    Args:
+        console: Console the panel and the question are printed to.
+        workspace: Workspace root the CLI was pointed at.
+
+    Returns:
+        ``True`` when the user agrees to create the workspace.
+    """
+    config_dir = Path(workspace) / MITOCODE_CONFIG_PATH
+    console.print(
+        Panel(
+            Text.assemble(
+                ("This directory has no MitoCode workspace yet.\n\n", ""),
+                ("Workspace state will live in ", "mito.muted"),
+                (str(config_dir), "mito.accent"),
+                (".", "mito.muted"),
+            ),
+            title="Workspace setup",
+            border_style="mito.accent",
+            expand=False,
+        )
+    )
+    return Confirm.ask("Create the workspace here?", console=console, default=True)
+
+
+def _ensure_provider_settings(workspace: Path, console: Console) -> None:
+    """Create the provider credential file when one is missing.
+
+    Only a missing file triggers the prompts. An existing but unusable file is
+    left untouched: overwriting it could destroy a credential the user can
+    still repair by hand, and the resolver reports the specific problem.
+
+    Args:
+        workspace: Workspace root that receives the credential file.
+        console: Console used for the setup panel and prompts.
+
+    Raises:
+        EOFError: The user cancelled the prompts with ``Ctrl+D``.
+        MitoCodeCliConfigError: The file cannot be written.
+    """
+    path = secret_path(workspace)
+    if path.is_file():
+        return
+    values = ask_provider_settings(console)
+    written = write_secret_file(workspace, values)
+    loguru_logger.debug("Provider configuration written to {}", written)
+
+
 def _start(argv: Sequence[str] | None) -> int:
     """Parse arguments and run one session.
+
+    The workspace and provider checks happen before logging is configured, so
+    declining either leaves nothing on disk. Logging then targets the
+    workspace's own ``.mitocode/logs``; there is no home-directory fallback.
 
     Args:
         argv: Argument list without the program name, or ``None`` for
             :data:`sys.argv`.
 
     Returns:
-        ``0`` for version, help or a clean session, or ``2`` without a
+        ``0`` for version, help or a clean session, ``1`` when the user
+        declines the workspace or cancels provider setup, or ``2`` without a
         terminal.
+
+    Raises:
+        MitoCodeCliConfigError: The workspace cannot be created, the log
+            directory cannot be created, or the provider file cannot be
+            written.
     """
     args = parse_args(argv)
 
@@ -283,8 +360,32 @@ def _start(argv: Sequence[str] | None) -> int:
         )
         return NON_INTERACTIVE_EXIT_CODE
 
-    log_path = configure_logging(debug=args.debug)
-    return asyncio.run(_amain(args, log_path, Console(theme=MITOCODE_THEME)))
+    console = Console(theme=MITOCODE_THEME)
+    workspace_path = Path(args.workspace)
+    if not ensure_workspace(
+        workspace_path, confirm=lambda path: _confirm_workspace(console, path)
+    ):
+        console.print(Text("  Workspace was not created; exiting.", style="mito.muted"))
+        return FAILURE_EXIT_CODE
+
+    log_dir = workspace_path / MITOCODE_CONFIG_PATH / "logs"
+    try:
+        log_path = configure_logging(debug=args.debug, log_dir=log_dir)
+    except OSError as exc:
+        raise MitoCodeCliConfigError(
+            f"Cannot create the log directory at '{log_dir}': "
+            f"{exc.strerror or 'I/O error'}."
+        ) from exc
+
+    try:
+        _ensure_provider_settings(workspace_path, console)
+    except EOFError:
+        console.print(
+            Text("  Provider setup was cancelled; exiting.", style="mito.muted")
+        )
+        return FAILURE_EXIT_CODE
+
+    return asyncio.run(_amain(args, log_path, console))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
