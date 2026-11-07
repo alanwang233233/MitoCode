@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 from rich.table import Table
@@ -38,6 +39,7 @@ from mitocode.cli.demo import DemoPlayer, TerminalKeySource
 from mitocode.cli.sessions import (
     SessionLoadError,
     SessionStore,
+    display_messages_from_record,
     select_session,
 )
 from mitocode.cli.state import CommandContext
@@ -694,6 +696,10 @@ async def _cmd_sessions(ctx: CommandContext, args: List[str]) -> CommandResult:
 async def _cmd_demo(ctx: CommandContext, args: List[str]) -> CommandResult:
     """Replay one saved session with synthetic pacing, read-only.
 
+    The demo never opens the replayed session: the current one stays live and
+    stays current, so after the "press any key" hold the prompt returns to
+    exactly the conversation the user left.
+
     Args:
         ctx: Command context.
         args: Unused extra arguments.
@@ -721,6 +727,7 @@ async def _cmd_demo(ctx: CommandContext, args: List[str]) -> CommandResult:
     choice = await select_session(state.ui, summaries, allow_new=False)
     if choice == manager.current_session_id:
         session = state.main_session()
+        title = manager.current_title
     else:
         try:
             record = store.load(choice)
@@ -729,10 +736,10 @@ async def _cmd_demo(ctx: CommandContext, args: List[str]) -> CommandResult:
                 f"Session could not be loaded; staying on the current one. ({exc})"
             )
             return CommandResult()
-        if not await manager.switch_to(record):
-            ctx.ui.warn("Session could not be restored; staying on the current one.")
-            return CommandResult()
-        session = state.main_session()
+        # A display session built straight from the record: the orchestrator
+        # is never involved, so the current session cannot be disturbed.
+        session = SimpleNamespace(messages=display_messages_from_record(record))
+        title = str(record.get("title", "") or "New Session")
 
     pump = getattr(state, "pump", None)
     if pump is not None:
@@ -740,7 +747,7 @@ async def _cmd_demo(ctx: CommandContext, args: List[str]) -> CommandResult:
     player = DemoPlayer(
         state.ui,
         session,
-        title=manager.current_title,
+        title=title,
         key_source=TerminalKeySource(),
         tool_manager=state.tool_manager,
         root=Path(_workspace_path(state)),

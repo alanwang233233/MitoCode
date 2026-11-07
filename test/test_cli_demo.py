@@ -68,31 +68,31 @@ def _ui(history_path: Path = Path("cli-history")) -> "tuple[CliUI, StringIO]":
 # ---------------------------------------------------------------------------
 
 
-def test_demo_speeds_constant_and_default_index_is_4x():
-    """速度档位常量固定，默认索引 3 即 4x."""
+def test_demo_speeds_constant_and_default_index_is_1x():
+    """速度档位常量固定，默认索引 1 即 1x."""
     assert DEMO_SPEEDS == (0.5, 1, 2, 4, 8, 16)
     controls = DemoControls()
-    assert controls.speed_index == 3
-    assert controls.speed == 4
+    assert controls.speed_index == 1
+    assert controls.speed == 1
 
 
 def test_demo_controls_defaults():
-    """初始状态：未暂停、未退出、默认速度."""
+    """初始状态：未暂停、未退出、默认 1x."""
     controls = DemoControls()
     assert controls.paused is False
     assert controls.quit_requested is False
-    assert controls.speed == 4
+    assert controls.speed == 1
 
 
 def test_demo_controls_right_moves_up_and_stops_at_boundary():
     """right 逐档升速，到 16x 后不越界."""
     controls = DemoControls()
     controls.handle_key("right")
-    assert controls.speed == 8
+    assert controls.speed == 2
     controls.handle_key("right")
-    assert controls.speed == 16
-    controls.handle_key("right")
-    controls.handle_key("right")
+    assert controls.speed == 4
+    for _ in range(4):
+        controls.handle_key("right")
     assert controls.speed == 16
 
 
@@ -100,11 +100,7 @@ def test_demo_controls_left_moves_down_and_stops_at_boundary():
     """left 逐档降速，到 0.5x 后不越界."""
     controls = DemoControls()
     controls.handle_key("left")
-    assert controls.speed == 2
-    controls.handle_key("left")
-    controls.handle_key("left")
     assert controls.speed == 0.5
-    controls.handle_key("left")
     controls.handle_key("left")
     assert controls.speed == 0.5
 
@@ -131,7 +127,7 @@ def test_demo_controls_ignores_unknown_keys():
     controls = DemoControls()
     for key in (None, "x", "Q", "enter"):
         controls.handle_key(key)
-    assert controls.speed == 4
+    assert controls.speed == 1
     assert controls.paused is False
     assert controls.quit_requested is False
 
@@ -140,15 +136,14 @@ def test_demo_controls_change_note_reports_speed_change():
     """调速后 change_note 返回一次 Speed note，再次调用为空."""
     controls = DemoControls()
     controls.handle_key("right")
-    assert controls.change_note() == "Speed 8x"
+    assert controls.change_note() == "Speed 2x"
     assert controls.change_note() == ""
 
 
 def test_demo_controls_change_note_reports_half_speed():
     """0.5x 档的 note 显示为 Speed 0.5x."""
     controls = DemoControls()
-    for _ in range(3):
-        controls.handle_key("left")
+    controls.handle_key("left")
     assert controls.speed == 0.5
     assert controls.change_note() == "Speed 0.5x"
 
@@ -166,10 +161,10 @@ def test_demo_controls_change_note_reports_pause_and_resume():
 def test_demo_controls_change_note_empty_without_change():
     """到边界调速无变化时不产生 note."""
     controls = DemoControls()
-    controls.handle_key("right")  # 8
-    assert controls.change_note() != ""
-    controls.handle_key("right")  # 16
-    assert controls.change_note() != ""
+    for _ in range(5):  # 1x -> 16x，最后一次在边界上无变化
+        controls.handle_key("right")
+        assert controls.change_note() != "" or controls.speed == 16
+    assert controls.speed == 16
     controls.handle_key("right")  # boundary, no change
     assert controls.change_note() == ""
     controls2 = DemoControls()
@@ -333,11 +328,17 @@ def _player(
         ``(player, session)`` so tests can assert read-only behaviour.
     """
     session = SimpleNamespace(messages=blocks, orchestrator=orchestrator)
+    if key_source is None:
+        # The player now holds the console behind a "press any key" prompt
+        # after playback; append the confirmation key so tests return
+        # immediately instead of exhausting the poll budget.
+        keys = list(keys) + ["x"]
+        key_source = FakeKeySource(keys)
     player = DemoPlayer(
         ui,
         session,
         title=title,
-        key_source=key_source or FakeKeySource(list(keys)),
+        key_source=key_source,
         tool_manager=tool_manager,
         root=root,
         sleeper=sleeper,
@@ -480,29 +481,50 @@ async def test_demo_player_is_read_only(tmp_path):
 
 @pytest.mark.asyncio
 async def test_demo_player_header_note_shows_title_and_hints(tmp_path):
-    """头部 note 含标题、默认 4x 与按键提示."""
+    """头部 note 含标题、默认 1x 与按键提示."""
     ui, buffer = _ui(tmp_path / "history")
     blocks = [_PlainTextMessageBlock("user", "hi")]
     player, _session = _player(ui, blocks, [], title="My Demo", root=tmp_path)
     await player.run()
-    assert 'Demo · "My Demo" · 4x · ←/→ speed · space pause · q quit' in (
+    assert 'Demo · "My Demo" · 1x · ←/→ speed · space pause · q quit' in (
         buffer.getvalue()
     )
 
 
 @pytest.mark.asyncio
 async def test_demo_player_right_key_prints_speed_note_and_updates_tick(tmp_path):
-    """right 调速打印 Speed 8x，后续 poll 收到 DEMO_TICK/8 的超时."""
+    """right 调速打印 Speed 2x，播放 poll 按 DEMO_TICK/2 计时."""
+    from mitocode.cli.demo import _ANY_KEY_POLL
+
+    class _LateConfirmSource(FakeKeySource):
+        """Fake source whose confirmation key appears only after playback."""
+
+        def __init__(self, keys, after_polls):
+            super().__init__(keys)
+            self._after_polls = after_polls
+            self._poll_count = 0
+
+        def poll(self, timeout):
+            self._poll_count += 1
+            self.timeouts.append(timeout)
+            if self._keys:
+                return self._keys.pop(0)
+            if self._poll_count > self._after_polls:
+                return "x"
+            return None
+
     ui, buffer = _ui(tmp_path / "history")
     blocks = [_PlainTextMessageBlock("assistant", "a" * 64)]
-    keys = FakeKeySource(["right"])
+    keys = _LateConfirmSource(["right"], after_polls=4)
     player, _session = _player(ui, blocks, [], root=tmp_path, key_source=keys)
     await player.run()
     output = buffer.getvalue()
-    assert "Speed 8x" in output
-    # 第一次 poll 发生在按键生效前，仍按默认 4x 计时
-    assert keys.timeouts[0] == DEMO_TICK / 4
-    assert keys.timeouts[1:] == [DEMO_TICK / 8] * (len(keys.timeouts) - 1)
+    assert "Speed 2x" in output
+    # 4 个 chunk 的播放 poll：第一个按默认 1x，其余按 2x；最后一个是
+    # "press any key" 确认 poll（超时 _ANY_KEY_POLL）。
+    assert keys.timeouts[0] == DEMO_TICK / 1
+    assert keys.timeouts[1:4] == [DEMO_TICK / 2] * 3
+    assert keys.timeouts[4] == _ANY_KEY_POLL
 
 
 @pytest.mark.asyncio
@@ -633,3 +655,16 @@ def test_render_session_history_empty_history_prints_only_header(tmp_path):
     out = buffer.getvalue()
     assert 'Restored · "Empty"' in out
     assert "❯" not in out
+
+
+@pytest.mark.asyncio
+async def test_demo_player_waits_for_any_key_after_finish(tmp_path):
+    """回放结束后提示按任意键，拿到按键才返回."""
+    ui, buffer = _ui(tmp_path / "history")
+    blocks = [_PlainTextMessageBlock("user", "hi")]
+    keys = FakeKeySource(["x"])
+    player, _session = _player(ui, blocks, [], root=tmp_path, key_source=keys)
+    await player.run()
+    output = buffer.getvalue()
+    assert "Press any key to return" in output
+    assert keys._keys == [], "等待阶段消费了确认按键"

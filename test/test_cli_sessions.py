@@ -1655,3 +1655,42 @@ async def test_switch_lock_blocks_concurrent_save(tmp_path):
     path = await task
     assert path is not None
     assert path.is_file()
+
+
+def test_display_messages_from_record_rebuilds_blocks(tmp_path):
+    """/demo 展示消息从 record 重建块实例，未知 kind 跳过，空 record 返回空."""
+    from mitocode.cli.sessions import display_messages_from_record
+
+    record = {
+        "schema_version": 1,
+        "session_id": "20261107T100000Z-11111111",
+        "title": "T",
+        "created_at": "2026-11-07T09:00:00Z",
+        "updated_at": "2026-11-07T10:00:00Z",
+        "workspace": "/tmp/w",
+        "model": "m",
+        "main_agent_id": 0,
+        "agents": [
+            {
+                "agent_id": 0,
+                "name": "Main",
+                "description": "Interactive session",
+                "parent_id": None,
+                "system_prompt": "",
+                "messages": [
+                    {
+                        "kind": "text",
+                        "role": "user",
+                        "message": "hello",
+                        "reasoning_content": "",
+                    },
+                    {"kind": "mystery", "junk": True},
+                ],
+            }
+        ],
+    }
+    blocks = display_messages_from_record(record)
+    assert len(blocks) == 1
+    assert getattr(blocks[0], "role", "") == "user"
+    assert getattr(blocks[0], "message", "") == "hello"
+    assert display_messages_from_record({"agents": [], "main_agent_id": 0}) == []

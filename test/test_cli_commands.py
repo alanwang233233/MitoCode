@@ -1212,8 +1212,8 @@ async def test_demo_replays_the_current_session_in_place(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_demo_switches_before_replaying_another_session(tmp_path, monkeypatch):
-    """Choosing another session switches to it and replays that session."""
+async def test_demo_replays_another_session_without_switching(tmp_path, monkeypatch):
+    """Choosing another session replays it read-only and stays on the current one."""
     import mitocode.cli.commands as commands_module
 
     monkeypatch.setattr(commands_module, "DemoPlayer", _FakePlayer)
@@ -1222,19 +1222,40 @@ async def test_demo_switches_before_replaying_another_session(tmp_path, monkeypa
 
     manager = _FakeManager()
     other = _record_for(
-        "20261107T090000Z-bbbbbbbb", title="Other", updated_at="2026-11-07T11:00:00Z"
+        "20261107T090000Z-bbbbbbbb",
+        title="Other",
+        updated_at="2026-11-07T11:00:00Z",
     )
+    other["agents"][0]["messages"] = [
+        {
+            "kind": "text",
+            "role": "user",
+            "message": "recorded question",
+            "reasoning_content": "",
+        }
+    ]
     _write_session_file(tmp_path, _record_for(manager.current_session_id))
     _write_session_file(tmp_path, other)
+    main_id_before = ctx_main_id = None
     ctx, buffer = _ctx(tmp_path, answers=["1"])
     ctx.state.session_manager = manager
+    main_id_before = ctx.state.main_id
 
     await dispatch("/demo", ctx)
 
-    assert manager.switched_to == [other]
+    # The current session is untouched: no switch, no restore, no reset.
+    assert manager.switched_to == []
+    assert manager.switch_new_calls == 0
+    assert ctx.state.main_id == main_id_before
     assert len(_FakePlayer.instances) == 1
-    assert _FakePlayer.instances[0].run_calls == 1
-    assert _FakePlayer.instances[0].title == "Other"
+    player = _FakePlayer.instances[0]
+    assert player.run_calls == 1
+    assert player.title == "Other"
+    # The replayed session is a display object built from the record, not the
+    # live main session.
+    assert player.session is not ctx.state.main_session()
+    assert len(player.session.messages) == 1
+    assert getattr(player.session.messages[0], "message", "") == "recorded question"
 
 
 @pytest.mark.asyncio

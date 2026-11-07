@@ -32,18 +32,20 @@ JSON file per session. The directory is created with `0o700` and each record is
 written with `0o600`, so session history stays private to the workspace.
 
 - **Startup choice**: with no saved session the CLI starts a new one; with
-  exactly one it restores it directly; with two or more a panel lists them
-  newest-first and you pick by number (`n` starts a new session). Files that
-  cannot be read or validated are skipped with one warning.
+  exactly one it restores it directly and echoes the previous conversation as
+  context; with two or more a panel lists them newest-first and you pick by
+  number (`n` starts a new session). Files that cannot be read or validated
+  are skipped with one warning.
 - **`/save`**: force-saves the current session to disk right away.
 - **`/sessions`**: saves the current session, lists the saved ones and switches
   to the chosen record (`n` = new session). If the session is still running —
   an agent task, a running turn or a background tool — MitoCode asks
   `Force stop and switch?` first.
-- **`/demo`**: replays a saved session read-only in the terminal with
-  synthetic pacing: `←`/`→` change the speed, `space` pauses/resumes, and
-  `q`, `Esc` or `Ctrl+C` quit the playback. Playback never calls the model or
-  changes the session history.
+- **`/demo`**: replays a saved session as a speed showcase of the agent's run,
+  at `1x` by default (`←`/`→` change the speed, `space` pauses/resumes, `q`,
+  `Esc` or `Ctrl+C` quit). The replay never opens the shown session: when it
+  ends you press any key to return, and the prompt comes back to the session
+  you were in. Playback never calls the model or changes any session history.
 - **Titles and autosave**: a fresh session is titled `New Session`; after the
   first turn a title is generated in the background from the first user
   message, and an autosave runs every 30 seconds plus at the end of every

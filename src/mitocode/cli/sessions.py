@@ -298,6 +298,35 @@ def restore_agent_messages(session: Any, agent_record: Mapping[str, Any]) -> Non
     ]
 
 
+def display_messages_from_record(record: Mapping[str, Any]) -> List[Any]:
+    """Rebuild the main agent's message blocks for a read-only replay.
+
+    ``/demo`` shows a saved session without opening it: there is no live
+    :class:`AgentSession` to read, so the record's own ``messages`` are
+    converted back into block instances.  The blocks are fresh objects; the
+    caller may render them freely without any risk of touching the live
+    session tree.
+
+    Args:
+        record: A loaded session document.
+
+    Returns:
+        The main agent's message blocks, unknown kinds skipped, or an empty
+        list when the record carries no usable ``messages``.
+    """
+    agent_record = _agent_record(record, record.get("main_agent_id"))
+    if agent_record is None:
+        return []
+    messages = agent_record.get("messages")
+    if not isinstance(messages, list):
+        return []
+    return [
+        block
+        for block in (_block_from_dict(item) for item in messages)
+        if block is not None
+    ]
+
+
 class SessionStore:
     """Read and write session records under ``<workspace>/.mitocode/sessions``.
 

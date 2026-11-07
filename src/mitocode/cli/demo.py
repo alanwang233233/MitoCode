@@ -41,8 +41,14 @@ DEMO_TICK = 0.05
 DEMO_SPEEDS = (0.5, 1, 2, 4, 8, 16)
 """Selectable playback speed multipliers, slowest first."""
 
-DEMO_DEFAULT_SPEED_INDEX = 3
-"""Index into :data:`DEMO_SPEEDS` the player starts at (4x)."""
+DEMO_DEFAULT_SPEED_INDEX = 1
+"""Index into :data:`DEMO_SPEEDS` the player starts at (1x real time)."""
+
+_ANY_KEY_POLL = 1.0
+"""Seconds one poll waits for the post-demo "any key" confirmation."""
+
+_ANY_KEY_MAX_POLLS = 60
+"""Poll budget for the confirmation hold; a minute of silence auto-returns."""
 
 _KEY_MAP = {
     "\x1b[D": "left",
@@ -450,11 +456,14 @@ class DemoPlayer:
         self._verbose = bool(getattr(ui, "verbose", False))
 
     async def run(self) -> None:
-        """Play the session history and finish with a closing note.
+        """Play the session history, then wait for a key before returning.
 
         Blocks are rendered in order; ``system`` blocks and unfinished tool
-        calls are skipped. On return the key source is closed exactly once so
-        the terminal leaves raw mode, and ``Demo finished.`` is printed.
+        calls are skipped. When playback ends -- naturally or via
+        ``q``/``esc``/``ctrl+c`` -- the terminal holds the last frame behind a
+        "press any key" prompt, so the user decides when the console returns
+        to the prompt. On return the key source is closed exactly once so the
+        terminal leaves raw mode.
         """
         self._ui.note(self._header())
         try:
@@ -464,10 +473,24 @@ class DemoPlayer:
                 await self._render_block(block)
         finally:
             self._renderer.finish()
-            close = getattr(self._key_source, "close", None)
-            if close is not None:
-                close()
-        self._ui.note("Demo finished.")
+        self._ui.note("Demo finished. Press any key to return.")
+        await self._wait_any_key()
+        close = getattr(self._key_source, "close", None)
+        if close is not None:
+            close()
+
+    async def _wait_any_key(self) -> None:
+        """Poll the key source until any key arrives.
+
+        Any press -- including ``q`` and ``ctrl+c`` -- just ends the hold; the
+        demo is over and the key carries no further meaning. The loop is
+        bounded by :data:`_ANY_KEY_MAX_POLLS` so a degraded (non-TTY) source
+        that never reports a key still returns instead of hanging forever.
+        """
+        for _ in range(_ANY_KEY_MAX_POLLS):
+            key = await asyncio.to_thread(self._key_source.poll, _ANY_KEY_POLL)
+            if key is not None:
+                return
 
     def _header(self) -> str:
         """Build the muted header note shown before playback starts.
