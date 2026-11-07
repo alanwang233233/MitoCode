@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Any, List, Optional
 if TYPE_CHECKING:
     from mitocode.cli.approval import CliApprover
     from mitocode.cli.args import CliArgs
+    from mitocode.cli.pump import EventPump
+    from mitocode.cli.sessions import SessionManager
     from mitocode.cli.ui import CliUI
     from mitocode.core.agent.agent_orchestrator import AgentOrchestrator
     from mitocode.core.agent.agent_session import AgentSession
@@ -87,7 +89,7 @@ class CliState:  # pylint: disable=too-many-instance-attributes
     Attributes:
         args: Parsed command line arguments; ``Repl`` reads
             ``args.initial_prompt`` from here.
-        workspace: Workspace the agent operates in.  ``/init`` persists it.
+        workspace: Workspace the agent operates in.
         tool_manager: Registry backing ``/tools`` and MCP refreshes.
         provider: Chat provider; ``/model`` reads and writes its
             ``default_model``.
@@ -95,15 +97,13 @@ class CliState:  # pylint: disable=too-many-instance-attributes
             event pump's tree events.
         mcp_manager: Connected MCP manager, or ``None`` when MCP is disabled.
         tool_context: Built-in tools' shared context, kept for inspection.
-        skills_manager: Skills manager over the workspace and user roots, with
-            its startup discovery already run; ``/skills`` reads and refreshes
-            it.  Always wired by the app; ``None`` only in tests.
+        skills_manager: Skills manager over the workspace root, with its
+            startup discovery already run; ``/skills`` reads and refreshes it.
+            Always wired by the app; ``None`` only in tests.
         ui: Terminal surface, so objects that only receive a state can still
             print.  ``CommandContext`` carries the same instance.
         approver: Approval policy/cache, or ``None`` when approvals are not
             interactive.  ``CommandContext`` carries the same instance.
-        workspace_initialized: Whether ``.mitocode/config.json`` exists on
-            disk; ``/init`` flips it after a successful dump.
         log_path: File receiving the CLI's logs, shown by ``/log``.
         main_id: Agent id of the interactive main session.  ``/clear`` replaces
             it with the id of the new session.
@@ -116,6 +116,11 @@ class CliState:  # pylint: disable=too-many-instance-attributes
             ``/status``.
         verbose: Whether full tool output is shown; ``/verbose`` toggles this
             together with :attr:`ui`'s flag.
+        session_manager: Owner of the current session's on-disk identity,
+            wired by the app after bootstrap; ``None`` in tests and before
+            the manager exists.
+        pump: The process-wide event pump, injected by the app right after
+            construction so session switches can drain it.
     """
 
     args: "CliArgs"
@@ -128,7 +133,6 @@ class CliState:  # pylint: disable=too-many-instance-attributes
     skills_manager: Optional["SkillsManager"] = None
     ui: Optional["CliUI"] = None
     approver: Optional["CliApprover"] = None
-    workspace_initialized: bool = False
     log_path: Path = field(default_factory=lambda: Path("cli.log"))
     main_id: int = 0
     turn_count: int = 0
@@ -137,6 +141,8 @@ class CliState:  # pylint: disable=too-many-instance-attributes
     agents: List[dict] = field(default_factory=list)
     mcp_error: str = ""
     verbose: bool = False
+    session_manager: Optional["SessionManager"] = None
+    pump: Optional["EventPump"] = None
 
     def main_session(self) -> "AgentSession":
         """Return the interactive main agent's session.

@@ -1,5 +1,7 @@
 """Tests for MCP configuration loading at CLI startup."""
 
+import json
+
 import os
 import sys
 from pathlib import Path
@@ -19,10 +21,6 @@ from mitocode.core.workspace.workspace import Workspace
 def _args(**over):
     base = dict(
         workspace=Path("."),
-        model=None,
-        api_key=None,
-        base_url=None,
-        timeout=None,
         permission_mode="ask",
         mcp_config=None,
         no_mcp=False,
@@ -34,6 +32,14 @@ def _args(**over):
     )
     base.update(over)
     return CliArgs(**base)
+
+
+def _write_config(root: Path, payload: str) -> Path:
+    """Write a minimal workspace configuration for *root*."""
+    path = root / ".mitocode" / "config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload, encoding="utf-8")
+    return path
 
 
 def _workspace(root: Path) -> Workspace:
@@ -184,6 +190,7 @@ def test_error_message_does_not_leak_non_string_command_values(tmp_path):
 @pytest.mark.asyncio
 async def test_loaded_config_matches_resolved_workspace(tmp_path):
     _write_mcp(tmp_path, '{"mcpServers":{"fs":{"command":"echo"}}}')
+    _write_config(tmp_path, json.dumps({"version": 2, "name": "x", "description": ""}))
     resolved = await resolve_workspace(tmp_path)
 
     servers = load_mcp_servers(_args(), resolved.workspace)

@@ -983,3 +983,89 @@ async def test_failing_command_does_not_escape_the_loop(tmp_path, monkeypatch):
 
     assert code == 0
     assert any("Command failed: command exploded" in line for line in ui.errors)
+
+
+# ---------------------------------------------------------------------------
+# End-of-turn session save and title trigger
+# ---------------------------------------------------------------------------
+
+
+class _FakeSessionManager:
+    """Recording stand-in for the manager the REPL saves through.
+
+    Attributes:
+        saves: Number of ``save_current`` calls.
+        titles: Number of ``maybe_generate_title`` calls.
+        save_error: Exception ``save_current`` raises when scripted.
+    """
+
+    def __init__(self):
+        self.saves = 0
+        self.titles = 0
+        self.save_error = None
+
+    async def save_current(self, *, force=False, report_failure=False):
+        """Count one save request, raising the scripted error when set.
+
+        Args:
+            force: Ignored force flag.
+            report_failure: Ignored failure-reporting flag.
+
+        Raises:
+            RuntimeError: When ``save_error`` is set.
+        """
+        self.saves += 1
+        if self.save_error is not None:
+            raise self.save_error
+
+    def maybe_generate_title(self):
+        """Count one title trigger."""
+        self.titles += 1
+
+
+@pytest.mark.asyncio
+async def test_turn_end_saves_the_session_and_triggers_the_title(tmp_path):
+    """After every turn the manager saved once and the title hook ran."""
+    ui = RecordingUI(answers=[])
+    state, repl, _, pump_task, _ = await _setup(tmp_path, ui, [_text_turn("hello")])
+    manager = _FakeSessionManager()
+    state.session_manager = manager
+    try:
+        await asyncio.wait_for(repl.run_turn("say hi"), timeout=5)
+
+        assert manager.saves == 1
+        assert manager.titles == 1
+        assert state.turn_count == 1
+    finally:
+        await _stop(pump_task)
+
+
+@pytest.mark.asyncio
+async def test_turn_end_save_error_is_reported_not_fatal(tmp_path):
+    """A raising manager save is contained by the turn-failure reporter."""
+    ui = RecordingUI(answers=[])
+    state, repl, _, pump_task, _ = await _setup(tmp_path, ui, [_text_turn("hello")])
+    manager = _FakeSessionManager()
+    manager.save_error = RuntimeError("disk exploded")
+    state.session_manager = manager
+    try:
+        await asyncio.wait_for(repl._run_turn_reported("say hi"), timeout=5)
+
+        assert any("Turn failed" in line for line in ui.errors)
+        assert state.turn_count == 1
+    finally:
+        await _stop(pump_task)
+
+
+@pytest.mark.asyncio
+async def test_turn_end_without_a_manager_stays_quiet(tmp_path):
+    """No manager wired means no save or title calls and a normal turn."""
+    ui = RecordingUI(answers=[])
+    state, repl, _, pump_task, _ = await _setup(tmp_path, ui, [_text_turn("hello")])
+    try:
+        await asyncio.wait_for(repl.run_turn("say hi"), timeout=5)
+
+        assert state.session_manager is None
+        assert len(ui.finish_lines) == 1
+    finally:
+        await _stop(pump_task)

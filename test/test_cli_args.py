@@ -31,17 +31,8 @@ def test_defaults():
     assert args.initial_prompt is None
 
 
-def test_repr_hides_api_key():
-    args = parse_args(["--api-key", "super-secret"])
-    assert "super-secret" not in repr(args)
-
-
 def test_default_optional_fields_are_unset():
     args = parse_args([])
-    assert args.model is None
-    assert args.api_key is None
-    assert args.base_url is None
-    assert args.timeout is None
     assert args.mcp_config is None
     assert args.no_mcp is False
     assert args.verbose is False
@@ -55,25 +46,11 @@ def test_flags_override_and_dangerous_skip_is_allow(tmp_path):
         [
             "-w",
             str(tmp_path),
-            "-m",
-            "m1",
-            "--api-key",
-            "k",
-            "--base-url",
-            "http://x",
-            "--timeout",
-            "12",
             "--dangerously-skip-permissions",
             "hello",
         ]
     )
     assert args.workspace == tmp_path
-    assert (args.model, args.api_key, args.base_url, args.timeout) == (
-        "m1",
-        "k",
-        "http://x",
-        12.0,
-    )
     assert args.permission_mode == "allow"
     assert args.initial_prompt == "hello"
 
@@ -126,7 +103,7 @@ def test_render_help_lists_key_options():
     buffer = StringIO()
     render_help(Console(file=buffer, width=100, force_terminal=False))
     text = buffer.getvalue()
-    for needle in ("--workspace", "--model", "--permission-mode", "--mcp-config"):
+    for needle in ("--workspace", "--permission-mode", "--mcp-config"):
         assert needle in text
 
 
@@ -180,9 +157,3 @@ def test_cli_package_exports_only_main():
 
     assert cli.__all__ == ["main"]
     assert callable(cli.main)
-
-
-def test_reasoning_effort_flag_parses_and_defaults_to_none():
-    args = parse_args(["--reasoning-effort", "HIGH"])
-    assert args.reasoning_effort == "HIGH"
-    assert parse_args([]).reasoning_effort is None

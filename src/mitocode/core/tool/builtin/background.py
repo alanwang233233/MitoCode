@@ -643,6 +643,28 @@ class BackgroundRegistry:
             if task is not None and not task.done():
                 task.cancel()
 
+    def has_active_tasks(self) -> bool:
+        """Return whether any detached call is still running.
+
+        Returns:
+            ``True`` while at least one launched task has not finished.
+        """
+        return any(not task.done() for task in self._tasks.values())
+
+    async def stop_all(self) -> None:
+        """Cancel every running detached call and wait for it to finish.
+
+        :meth:`cancel_all` only *requests* cancellation and returns before
+        the tasks have unwound; switching sessions must not leave a task
+        writing results into a registry that is about to be replaced, so
+        this awaits every cancelled task and swallows the resulting
+        ``CancelledError``.
+        """
+        self.cancel_all()
+        running = [task for task in self._tasks.values() if not task.done()]
+        if running:
+            await asyncio.gather(*running, return_exceptions=True)
+
     async def _run(self, record: BackgroundTask, coro_factory: CoroFactory) -> None:
         """Run *coro_factory* under its ceiling and settle *record*.
 
