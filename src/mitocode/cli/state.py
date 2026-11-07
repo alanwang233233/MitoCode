@@ -95,9 +95,9 @@ class CliState:  # pylint: disable=too-many-instance-attributes
             event pump's tree events.
         mcp_manager: Connected MCP manager, or ``None`` when MCP is disabled.
         tool_context: Built-in tools' shared context, kept for inspection.
-        skills_manager: Skills manager over the workspace and user roots, with
-            its startup discovery already run; ``/skills`` reads and refreshes
-            it.  Always wired by the app; ``None`` only in tests.
+        skills_manager: Skills manager over the workspace root, with its
+            startup discovery already run; ``/skills`` reads and refreshes it.
+            Always wired by the app; ``None`` only in tests.
         ui: Terminal surface, so objects that only receive a state can still
             print.  ``CommandContext`` carries the same instance.
         approver: Approval policy/cache, or ``None`` when approvals are not

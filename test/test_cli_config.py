@@ -14,6 +14,8 @@ from rich.console import Console
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import mitocode.cli.config as config_module
+
 from mitocode.cli.theme import MITOCODE_THEME
 
 from mitocode.cli.config import (
@@ -142,6 +144,13 @@ def test_boolean_timeout_is_ignored(tmp_path):
     assert resolve_provider_config(tmp_path).timeout == DEFAULT_TIMEOUT
 
 
+def test_blank_optional_timeout_uses_the_default(tmp_path):
+    """A whitespace-only optional field is absent, like the written file's omission."""
+    _write_secret(tmp_path, '{"api_key":"k","model":"m","timeout":"   "}')
+
+    assert resolve_provider_config(tmp_path).timeout == DEFAULT_TIMEOUT
+
+
 def test_blank_fields_are_missing(tmp_path):
     _write_secret(tmp_path, '{"api_key":"   ","model":"m"}')
 
@@ -222,6 +231,21 @@ def test_unreadable_secret_file_is_fatal(tmp_path):
         resolve_provider_config(tmp_path)
 
     assert str(secret_path(tmp_path)) in str(info.value)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs extra privileges")
+def test_dangling_secret_symlink_is_fatal_and_preserved(tmp_path):
+    path = secret_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    target = tmp_path / "missing-provider.json"
+    path.symlink_to(target)
+
+    with pytest.raises(MitoCodeCliConfigError) as info:
+        resolve_provider_config(tmp_path)
+
+    assert str(path) in str(info.value)
+    assert path.is_symlink()
+    assert not target.exists()
 
 
 def test_provider_config_is_frozen(tmp_path):
@@ -386,3 +410,32 @@ def test_write_failure_is_reported_without_values(tmp_path):
         write_secret_file(tmp_path, {"api_key": "k", "model": "m"})
 
     assert str(secret_path(tmp_path)) in str(info.value)
+
+
+def test_write_secret_file_refuses_to_overwrite_existing(tmp_path):
+    """Even a malformed credential file must survive a second setup attempt."""
+    path = _write_secret(tmp_path, '{"api_key": "old-secret"')
+    original = path.read_text(encoding="utf-8")
+
+    with pytest.raises(MitoCodeCliConfigError) as info:
+        write_secret_file(tmp_path, {"api_key": "new-secret", "model": "m"})
+
+    assert path.read_text(encoding="utf-8") == original
+    assert "new-secret" not in str(info.value)
+    assert "old-secret" not in str(info.value)
+
+
+def test_write_failure_leaves_no_temporary_file(tmp_path, monkeypatch):
+    """A failed atomic move must not strand a secret-bearing temporary file."""
+
+    def _fail_replace(source, destination):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(config_module.os, "replace", _fail_replace)
+
+    with pytest.raises(MitoCodeCliConfigError):
+        write_secret_file(tmp_path, {"api_key": "k", "model": "m"})
+
+    secret_dir = secret_path(tmp_path).parent
+    assert list(secret_dir.glob("*.tmp")) == []
+    assert not secret_path(tmp_path).exists()

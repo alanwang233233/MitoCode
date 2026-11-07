@@ -35,7 +35,7 @@ _REAL_ENSURE_PROVIDER_SETTINGS = app_module._ensure_provider_settings
 
 
 def _args(**overrides):
-    """Build parsed arguments pointing at a temporary workspace.
+    """Build parsed arguments, defaulting the rest to :class:`CliArgs` values.
 
     Args:
         **overrides: Fields to replace on the default :class:`CliArgs`.
@@ -43,7 +43,7 @@ def _args(**overrides):
     Returns:
         The parsed arguments.
     """
-    return CliArgs(workspace=Path("/tmp/mitocode-app-test"), **overrides)
+    return CliArgs(**overrides)
 
 
 @pytest.fixture(autouse=True)
@@ -99,7 +99,7 @@ def _boot(
         )
     )
     return SimpleNamespace(
-        args=_args(),
+        args=_args(workspace=tmp_path),
         resolution=SimpleNamespace(workspace=workspace, migrated_from=None),
         provider_config=SimpleNamespace(
             model="model-x", base_url=None, timeout=60.0, source="flags"
@@ -559,21 +559,94 @@ def test_existing_provider_file_is_left_untouched(monkeypatch, tmp_path):
     assert calls == []
 
 
-def test_confirm_workspace_renders_panel_and_asks(monkeypatch):
+def test_non_file_provider_path_is_left_untouched(monkeypatch, tmp_path):
+    secret = tmp_path / ".mitocode" / "secret" / "provider.json"
+    secret.parent.mkdir(parents=True)
+    secret.mkdir()
+    calls = []
+    monkeypatch.setattr(
+        app_module, "ask_provider_settings", lambda console: calls.append(console)
+    )
+    monkeypatch.setattr(
+        app_module, "write_secret_file", lambda workspace, values: calls.append(values)
+    )
+    monkeypatch.setattr(
+        app_module, "_ensure_provider_settings", _REAL_ENSURE_PROVIDER_SETTINGS
+    )
+
+    app_module._ensure_provider_settings(
+        tmp_path, Console(file=StringIO(), force_terminal=False)
+    )
+
+    assert calls == []
+    assert secret.is_dir()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs extra privileges")
+def test_dangling_provider_symlink_is_left_untouched(monkeypatch, tmp_path):
+    secret = tmp_path / ".mitocode" / "secret" / "provider.json"
+    secret.parent.mkdir(parents=True)
+    target = tmp_path / "missing-provider.json"
+    secret.symlink_to(target)
+    calls = []
+    monkeypatch.setattr(
+        app_module, "ask_provider_settings", lambda console: calls.append(console)
+    )
+    monkeypatch.setattr(
+        app_module, "write_secret_file", lambda workspace, values: calls.append(values)
+    )
+    monkeypatch.setattr(
+        app_module, "_ensure_provider_settings", _REAL_ENSURE_PROVIDER_SETTINGS
+    )
+
+    app_module._ensure_provider_settings(
+        tmp_path, Console(file=StringIO(), force_terminal=False)
+    )
+
+    assert calls == []
+    assert secret.is_symlink()
+    assert not target.exists()
+
+
+def test_malformed_provider_file_is_left_untouched(monkeypatch, tmp_path):
+    secret = tmp_path / ".mitocode" / "secret" / "provider.json"
+    secret.parent.mkdir(parents=True)
+    secret.write_text('{"api_key": "unfinished', encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        app_module, "ask_provider_settings", lambda console: calls.append(console)
+    )
+    monkeypatch.setattr(
+        app_module, "write_secret_file", lambda workspace, values: calls.append(values)
+    )
+    monkeypatch.setattr(
+        app_module, "_ensure_provider_settings", _REAL_ENSURE_PROVIDER_SETTINGS
+    )
+
+    app_module._ensure_provider_settings(
+        tmp_path, Console(file=StringIO(), force_terminal=False)
+    )
+
+    assert calls == []
+    assert secret.read_text(encoding="utf-8") == '{"api_key": "unfinished'
+
+
+def test_confirm_workspace_renders_panel_and_asks(monkeypatch, tmp_path):
     buffer = StringIO()
     console = Console(
-        file=buffer, width=100, force_terminal=False, theme=MITOCODE_THEME
+        file=buffer, width=400, force_terminal=False, theme=MITOCODE_THEME
     )
+    workspace = tmp_path / "here"
     monkeypatch.setattr(
         app_module.Confirm,
         "ask",
         lambda prompt, *, console, default: default,
     )
 
-    assert app_module._confirm_workspace(console, Path("/tmp/here")) is True
+    assert app_module._confirm_workspace(console, workspace) is True
     output = buffer.getvalue()
     assert "Workspace setup" in output
-    assert "/tmp/here" in output
+    assert str(workspace) in output
 
 
 def test_workspace_prompt_declined_returns_1(monkeypatch, capsys):
@@ -593,15 +666,39 @@ def test_workspace_prompt_declined_returns_1(monkeypatch, capsys):
 
 
 def test_provider_setup_cancelled_returns_1(monkeypatch, capsys):
+    timeline = []
+
     def fake_ensure(workspace, console):
+        timeline.append("provider")
         raise EOFError()
+
+    def fake_logging(**kwargs):
+        timeline.append("logging")
+        return Path("cli.log")
 
     monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
     monkeypatch.setattr(app_module, "ensure_workspace", lambda path, *, confirm: True)
     monkeypatch.setattr(app_module, "_ensure_provider_settings", fake_ensure)
+    monkeypatch.setattr(app_module, "configure_logging", fake_logging)
 
     assert app_module.main([]) == 1
+    # Logging must be configured before the credential prompts, so a cancelled
+    # setup still leaves the failure in the workspace log.
+    assert timeline == ["logging", "provider"]
     assert "Provider setup was cancelled" in capsys.readouterr().out
+
+
+def test_provider_setup_interrupt_returns_130(monkeypatch, capsys):
+    def fake_ensure(workspace, console):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
+    monkeypatch.setattr(app_module, "ensure_workspace", lambda path, *, confirm: True)
+    monkeypatch.setattr(app_module, "_ensure_provider_settings", fake_ensure)
+    monkeypatch.setattr(app_module, "configure_logging", lambda **kw: Path("cli.log"))
+
+    assert app_module.main([]) == 130
+    assert "Unexpected error" not in capsys.readouterr().err
 
 
 def test_provider_setup_error_returns_1(monkeypatch, capsys):
@@ -611,6 +708,7 @@ def test_provider_setup_error_returns_1(monkeypatch, capsys):
     monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
     monkeypatch.setattr(app_module, "ensure_workspace", lambda path, *, confirm: True)
     monkeypatch.setattr(app_module, "_ensure_provider_settings", fake_ensure)
+    monkeypatch.setattr(app_module, "configure_logging", lambda **kw: Path("cli.log"))
 
     assert app_module.main([]) == 1
     assert "cannot write provider file" in capsys.readouterr().err

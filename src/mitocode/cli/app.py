@@ -16,9 +16,9 @@ The startup order is a constraint, not a preference:
 3. provider setup (interactive when the credential file is missing), then the
    console's UI, approver and :func:`bootstrap`, which resolves the workspace,
    registers tools, starts MCP and creates the main session;
-3. state, event pump task and REPL, in that order, because the pump must be
+4. state, event pump task and REPL, in that order, because the pump must be
    consuming events before the first turn can produce any;
-4. ``SIGINT`` is routed to :meth:`Repl.handle_sigint` when the platform supports
+5. ``SIGINT`` is routed to :meth:`Repl.handle_sigint` when the platform supports
    it, then the REPL runs.
 
 Teardown lives in ``finally`` and is equally ordered: the pump task is
@@ -59,11 +59,7 @@ from mitocode.cli.config import (
     secret_path,
     write_secret_file,
 )
-from mitocode.cli.errors import (
-    MitoCodeCliConfigError,
-    MitoCodeCliError,
-    MitoCodeCliError,
-)
+from mitocode.cli.errors import MitoCodeCliConfigError, MitoCodeCliError
 from mitocode.cli.logging_setup import configure_logging
 from mitocode.cli.pump import EventPump
 from mitocode.cli.repl import Repl
@@ -302,7 +298,7 @@ def _confirm_workspace(console: Console, workspace: Path) -> bool:
 def _ensure_provider_settings(workspace: Path, console: Console) -> None:
     """Create the provider credential file when one is missing.
 
-    Only a missing file triggers the prompts. An existing but unusable file is
+    Only a missing path triggers the prompts. An existing but unusable entry is
     left untouched: overwriting it could destroy a credential the user can
     still repair by hand, and the resolver reports the specific problem.
 
@@ -315,7 +311,7 @@ def _ensure_provider_settings(workspace: Path, console: Console) -> None:
         MitoCodeCliConfigError: The file cannot be written.
     """
     path = secret_path(workspace)
-    if path.is_file():
+    if path.exists() or path.is_symlink():
         return
     values = ask_provider_settings(console)
     written = write_secret_file(workspace, values)
@@ -325,9 +321,11 @@ def _ensure_provider_settings(workspace: Path, console: Console) -> None:
 def _start(argv: Sequence[str] | None) -> int:
     """Parse arguments and run one session.
 
-    The workspace and provider checks happen before logging is configured, so
-    declining either leaves nothing on disk. Logging then targets the
-    workspace's own ``.mitocode/logs``; there is no home-directory fallback.
+    The workspace check happens before logging is configured, so declining it
+    leaves nothing on disk. Provider setup runs after logging because the
+    credential file is inside the same workspace as the log; cancelling it
+    therefore leaves only the workspace's own ``.mitocode/logs`` behind. There
+    is no home-directory fallback.
 
     Args:
         argv: Argument list without the program name, or ``None`` for

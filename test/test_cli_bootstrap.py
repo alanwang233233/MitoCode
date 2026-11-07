@@ -352,6 +352,39 @@ async def test_mcp_starts_before_session_and_model_is_union(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_provider_base_url_never_falls_through_to_the_environment(
+    tmp_path, monkeypatch
+):
+    """An omitted base_url must not let the OpenAI SDK read OPENAI_BASE_URL."""
+    ORDERS.clear()
+    _patch(monkeypatch)
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://ambient.invalid/v1")
+    ui = _ui()
+
+    result = await bootstrap(_provider_args(tmp_path), ui, CliApprover(ui))
+
+    assert (
+        result.provider.settings["base_url"]
+        == bootstrap_module.DEFAULT_PROVIDER_BASE_URL
+    )
+
+
+@pytest.mark.asyncio
+async def test_explicit_provider_base_url_is_passed_through(tmp_path, monkeypatch):
+    ORDERS.clear()
+    _patch(monkeypatch)
+    ui = _ui()
+
+    result = await bootstrap(
+        _provider_args(tmp_path, provider={"base_url": "http://workspace.invalid/v1"}),
+        ui,
+        CliApprover(ui),
+    )
+
+    assert result.provider.settings["base_url"] == "http://workspace.invalid/v1"
+
+
+@pytest.mark.asyncio
 async def test_model_absent_from_live_list_is_appended_with_warning(
     tmp_path, monkeypatch
 ):

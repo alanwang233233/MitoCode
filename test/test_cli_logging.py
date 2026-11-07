@@ -60,6 +60,18 @@ def test_log_dir_is_required(tmp_path):
         configure_logging()
 
 
+def test_failed_directory_creation_removes_sinks_first(tmp_path):
+    """A failed setup must not leave a stderr sink that can print a traceback."""
+    blocker = tmp_path / "logs"
+    blocker.write_text("not a directory", encoding="utf-8")
+    logger.add(sys.stderr, level="INFO")
+
+    with pytest.raises(OSError):
+        configure_logging(log_dir=blocker)
+
+    assert not any(sink is sys.stderr for sink in _sinks())
+
+
 def test_creates_missing_log_directory_with_private_mode(tmp_path):
     log_dir = tmp_path / "nested" / "logs"
 

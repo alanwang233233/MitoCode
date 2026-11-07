@@ -12,7 +12,7 @@ pip install -e .
 mitocode
 ```
 
-Provider settings come from one place only: the workspace's read-only
+Provider settings come from one place only: the workspace-local
 `.mitocode/secret/provider.json`. An API key and a model are both required.
 The first time mitocode sees a directory without a workspace, it asks before
 creating `.mitocode/` there (declining exits), and the first time it sees

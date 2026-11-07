@@ -79,6 +79,14 @@ SKILLS_DIR_NAME = "skills"
 """Skill directories' name under the workspace root:
 ``<workspace>/.mitocode/skills``."""
 
+DEFAULT_PROVIDER_BASE_URL = "https://api.openai.com/v1"
+"""Endpoint passed when the credential file names none.
+
+The OpenAI SDK falls back to ``OPENAI_BASE_URL`` when its ``base_url`` argument
+is ``None``; the CLI promises that provider settings come only from
+``provider.json``, so an explicit default keeps the environment out of it.
+"""
+
 SYSTEM_PROMPT_TEMPLATE = """\
 You are MitoCode, an interactive coding agent running in the user's terminal.
 You help with engineering tasks in the workspace at {workspace}.
@@ -169,15 +177,23 @@ def ensure_workspace(
             the contents.
     """
     root = Path(workspace_path)
-    if not root.is_dir():
+    if not root.exists():
         raise MitoCodeCliConfigError(
             f"The workspace directory '{root}' does not exist."
         )
+    if not root.is_dir():
+        raise MitoCodeCliConfigError(f"The workspace path '{root}' is not a directory.")
     config_file = root / MITOCODE_CONFIG_PATH / CONFIG_FILENAME
     if config_file.is_file():
         return True
     if not confirm(root):
         return False
+
+    # ``Path(".").name`` is empty, yet ``-w .`` names the current directory;
+    # making the path absolute normalises that without resolving symlinks.
+    workspace_name = root.absolute().name
+    if not workspace_name:
+        raise MitoCodeCliConfigError(f"Cannot determine a workspace name for '{root}'.")
 
     config_dir = root / MITOCODE_CONFIG_PATH
     try:
@@ -185,7 +201,7 @@ def ensure_workspace(
         # holds logs, history and credentials, so a newly created one starts
         # private. An existing one keeps whatever mode the user chose.
         config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        workspace = Workspace(root, root.name, APP_VERSION)
+        workspace = Workspace(root, workspace_name, APP_VERSION)
         result = workspace.dump()
         if asyncio.iscoroutine(result):
             result = asyncio.run(result)
@@ -405,9 +421,9 @@ class Bootstrapped:  # pylint: disable=too-many-instance-attributes
         mcp_manager: Live MCP manager, or ``None`` when MCP is disabled or could
             not be configured.
         mcp_error: Message describing why MCP is off, or ``""``.
-        skills_manager: Skills manager over the workspace and user roots, with
-            its startup discovery already run.  Always present; its catalogue
-            may be empty.
+        skills_manager: Skills manager over the workspace root, with its
+            startup discovery already run.  Always present; its catalogue may
+            be empty.
     """
 
     args: CliArgs
@@ -601,7 +617,9 @@ async def _create_provider(config: ProviderConfig, ui: CliUI) -> ChatProviderOpe
     """
     settings = {
         "api_key": config.api_key,
-        "base_url": config.base_url,
+        # An explicit endpoint keeps the provider SDK from reading
+        # OPENAI_BASE_URL when provider.json omitted base_url.
+        "base_url": config.base_url or DEFAULT_PROVIDER_BASE_URL,
         "timeout": config.timeout,
         "reasoning_effort": config.reasoning_effort,
     }
@@ -727,6 +745,7 @@ def _scrub_secret(message: str, secret: str) -> str:
 __all__ = [
     "CONFIG_FILENAME",
     "DEFAULT_MCP_CONFIG_RELATIVE_PATH",
+    "DEFAULT_PROVIDER_BASE_URL",
     "SKILLS_DIR_NAME",
     "SKILLS_PROMPT_SECTION",
     "SYSTEM_PROMPT_TEMPLATE",

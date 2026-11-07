@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Mapping, Optional
@@ -210,9 +211,11 @@ def ask_provider_settings(
 def write_secret_file(workspace: Path, values: Mapping[str, object]) -> Path:
     """Write the provider credential file with private permissions.
 
-    The write is atomic: the document is written to a sibling temporary file
-    and moved into place, so an interrupted setup cannot leave a truncated
-    ``provider.json`` behind.
+    The write is atomic: the document is written to a private sibling temporary
+    file and moved into place, so an interrupted setup cannot leave a truncated
+    ``provider.json`` behind. An existing file is never replaced, even when it
+    is malformed: the user may still be able to repair it by hand, and silently
+    discarding a credential would be destructive.
 
     Args:
         workspace: Workspace root that receives ``.mitocode/secret/``.
@@ -222,30 +225,55 @@ def write_secret_file(workspace: Path, values: Mapping[str, object]) -> Path:
         The path that was written.
 
     Raises:
-        MitoCodeCliConfigError: The directory or file cannot be created. The
-            message names the path and never a value.
+        MitoCodeCliConfigError: The file already exists, or the directory or
+            file cannot be created. The message names the path and never a
+            value.
     """
     path = secret_path(workspace)
+    if path.exists() or path.is_symlink():
+        raise MitoCodeCliConfigError(
+            f"The provider configuration at '{path}' already exists; it was "
+            "not overwritten. Repair or remove it by hand, then run mitocode "
+            "again."
+        )
     payload = {
         key: value
         for key, value in values.items()
         if value is not None and not (isinstance(value, str) and not value.strip())
     }
-    temporary = path.with_name(path.name + ".tmp")
+    temporary_path: Optional[str] = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=_DIRECTORY_MODE)
         path.parent.chmod(_DIRECTORY_MODE)
-        with open(temporary, "w", encoding="utf-8") as handle:
+        # ``mkstemp`` creates the file with mode 0o600, so the credential is
+        # never briefly readable through the default umask before it is chmoded.
+        descriptor, temporary_path = tempfile.mkstemp(
+            dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, ensure_ascii=False)
             handle.write("\n")
-        os.chmod(temporary, _FILE_MODE)
-        os.replace(temporary, path)
-        os.chmod(path, _FILE_MODE)
-    except OSError as exc:
+        os.chmod(temporary_path, _FILE_MODE)
+        # Re-check immediately before the move: the file may have appeared
+        # while the prompts were being answered.
+        if path.exists() or path.is_symlink():
+            raise MitoCodeCliConfigError(
+                f"The provider configuration at '{path}' already exists; it "
+                "was not overwritten."
+            )
+        os.replace(temporary_path, path)
+        temporary_path = None
+    except (OSError, TypeError, ValueError) as exc:
         raise MitoCodeCliConfigError(
             f"Cannot write the provider configuration at '{path}': "
-            f"{exc.strerror or 'I/O error'}."
+            f"{getattr(exc, 'strerror', None) or 'I/O error'}."
         ) from exc
+    finally:
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
     return path
 
 
@@ -405,7 +433,8 @@ def _timeout_field(data: Mapping[str, object], path: Path) -> float:
         path: File the fields came from, named in error messages.
 
     Returns:
-        The timeout in seconds, :data:`DEFAULT_TIMEOUT` when the field is absent.
+        The timeout in seconds, :data:`DEFAULT_TIMEOUT` when the field is absent
+        or blank.
 
     Raises:
         MitoCodeCliConfigError: The value is not a number, not finite or not
@@ -416,9 +445,9 @@ def _timeout_field(data: Mapping[str, object], path: Path) -> float:
         return DEFAULT_TIMEOUT
     raw = _as_text(value)
     if raw is None:
-        raise MitoCodeCliConfigError(
-            f"The provider timeout in '{path}' is not a number."
-        )
+        # An optional field holding only whitespace is treated as absent, the
+        # same way blank base_url and reasoning_effort values are.
+        return DEFAULT_TIMEOUT
     try:
         timeout = float(raw)
     except ValueError as exc:

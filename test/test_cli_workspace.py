@@ -195,6 +195,19 @@ def test_ensure_workspace_creates_private_configuration(tmp_path):
     assert Workspace(tmp_path, tmp_path.name, APP_VERSION).config_file == config
 
 
+def test_ensure_workspace_names_a_relative_workspace(tmp_path, monkeypatch):
+    """``-w .`` must still store a non-empty directory name in the config."""
+    monkeypatch.chdir(tmp_path)
+
+    assert ensure_workspace(Path("."), confirm=lambda path: True) is True
+
+    document = json.loads(
+        (tmp_path / ".mitocode" / "config.json").read_text(encoding="utf-8")
+    )
+    assert document["name"] == tmp_path.name
+    assert document["version"] == APP_VERSION
+
+
 def test_ensure_workspace_preserves_existing_subdirectories(tmp_path):
     skills = tmp_path / ".mitocode" / "skills" / "alpha"
     skills.mkdir(parents=True)
@@ -226,6 +239,28 @@ def test_ensure_workspace_rejects_a_missing_directory(tmp_path):
         ensure_workspace(missing, confirm=lambda path: True)
 
     assert str(missing) in str(info.value)
+
+
+def test_ensure_workspace_rejects_a_file_instead_of_a_directory(tmp_path):
+    workspace_file = tmp_path / "not-a-directory"
+    workspace_file.write_text("file", encoding="utf-8")
+
+    with pytest.raises(MitoCodeCliConfigError) as info:
+        ensure_workspace(workspace_file, confirm=lambda path: True)
+
+    assert str(workspace_file) in str(info.value)
+    assert not (tmp_path / ".mitocode").exists()
+
+
+def test_ensure_workspace_fails_when_mitocode_is_a_file(tmp_path):
+    (tmp_path / ".mitocode").write_text("file", encoding="utf-8")
+
+    with pytest.raises(MitoCodeCliConfigError) as info:
+        ensure_workspace(tmp_path, confirm=lambda path: True)
+
+    assert str(tmp_path / ".mitocode") in str(info.value)
+    assert (tmp_path / ".mitocode").is_file()
+    assert not (tmp_path / ".mitocode" / "config.json").exists()
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can write a read-only directory")
