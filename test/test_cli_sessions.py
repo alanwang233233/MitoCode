@@ -13,9 +13,10 @@ import os
 import re
 import stat
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -23,12 +24,17 @@ import pytest
 from rich.console import Console
 
 from mitocode.cli.sessions import (
+    AUTOSAVE_INTERVAL,
     SCHEMA_VERSION,
+    SessionAutosaver,
     SessionLoadError,
+    SessionManager,
     SessionStore,
     SessionSummary,
     _block_from_dict,
     block_to_dict,
+    fallback_title,
+    generate_session_title,
     is_valid_session_id,
     new_session_id,
     restore_agent_messages,
@@ -37,6 +43,7 @@ from mitocode.cli.sessions import (
     validate_record,
 )
 
+from mitocode.cli.pump import EventPump
 from mitocode.cli.theme import MITOCODE_THEME
 from mitocode.cli.ui import CliUI
 
@@ -260,6 +267,21 @@ async def _orchestrator_with_tree():
     call.finish()
     main.messages.append(_ToolResultMessageBlock("call_1", "120 lines"))
     return orchestrator, main, child
+
+
+async def _orchestrator_with_clean_main():
+    """Build an orchestrator whose main session has no history yet.
+
+    Returns:
+        ``(orchestrator, main_session)`` with only the seeded system block.
+    """
+    orchestrator = AgentOrchestrator(
+        default_provider=_EchoProvider(), system_prompt="You are MitoCode."
+    )
+    main = await orchestrator.create_session(
+        name="Main", description="Interactive session"
+    )
+    return orchestrator, main
 
 
 @pytest.mark.asyncio
@@ -823,3 +845,813 @@ async def test_select_session_truncates_overwide_titles():
     assert long_title not in text
     assert long_title[:20] in text
     assert "…" in text
+
+
+# ---------------------------------------------------------------------------
+# Shared fakes for SessionManager tests (tasks 11-15)
+# ---------------------------------------------------------------------------
+
+
+class _FakeUI:
+    """Record warn/note calls and expose the agent_count slot."""
+
+    def __init__(self):
+        self.warnings = []
+        self.notes = []
+        self.agent_count = 0
+
+    def warn(self, message):
+        """Record one warning."""
+        self.warnings.append(message)
+
+    def note(self, message):
+        """Record one note."""
+        self.notes.append(message)
+
+
+class _FrozenClock:
+    """Callable clock returning a controllable UTC moment."""
+
+    def __init__(self, start="2026-11-07T15:00:00Z"):
+        self.moment = datetime.strptime(start, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+
+    def __call__(self):
+        return self.moment
+
+    def advance(self, seconds=1):
+        """Move the frozen moment forward."""
+        self.moment = self.moment + timedelta(seconds=seconds)
+
+
+class _ManagerProvider:
+    """Duck-typed provider for manager/title tests; captures chat calls.
+
+    Attributes:
+        calls: One dict per chat call: the clone's ``reasoning_effort`` plus
+            every keyword argument the caller passed.
+    """
+
+    def __init__(
+        self, default_model="echo-model", content=None, error=None, hang=False
+    ):
+        self.default_model = default_model
+        self.reasoning_effort = "high"
+        self.calls = []
+        self._content = content
+        self._error = error
+        self._hang = hang
+
+    async def chat(self, **kwargs):
+        """Record the call, then fail, hang or answer as configured."""
+        self.calls.append(
+            {"reasoning_effort": getattr(self, "reasoning_effort", None), **kwargs}
+        )
+        if self._error is not None:
+            raise self._error
+        if self._hang:
+            await asyncio.Event().wait()
+        return {"choices": [{"message": {"content": self._content}}]}
+
+
+def _manager_state(main_id=0, tool_context=None, pump=None):
+    """Build a SimpleNamespace state with the fields SessionManager touches."""
+    return SimpleNamespace(
+        main_id=main_id,
+        turn_count=3,
+        tool_call_count=2,
+        total_chars=100,
+        agents=[],
+        tool_context=tool_context,
+        pump=pump,
+    )
+
+
+def _counting_save(store):
+    """Wrap ``store.save`` with a write counter and return the counter list."""
+    original = store.save
+    writes = []
+
+    def counting(record):
+        writes.append(1)
+        return original(record)
+
+    store.save = counting
+    return writes
+
+
+def _make_manager(tmp_path, orchestrator, state, provider=None, clock=None):
+    """Build a SessionManager over a real store with fake ui/clock defaults.
+
+    Returns:
+        ``(manager, ui, store, clock)``.
+    """
+    store = SessionStore(tmp_path)
+    ui = _FakeUI()
+    provider = provider if provider is not None else _ManagerProvider()
+    clock = clock if clock is not None else _FrozenClock()
+    manager = SessionManager(
+        store,
+        orchestrator,
+        ui,
+        state=state,
+        provider=provider,
+        workspace=str(tmp_path),
+        clock=clock,
+    )
+    return manager, ui, store, clock
+
+
+# ---------------------------------------------------------------------------
+# Task 11: SessionManager — saving and registration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_new_session_registers_id_title_and_writes_file(tmp_path):
+    """start_new_session 生成新 id、标题 New Session 并落盘."""
+    orchestrator, main, _ = await _orchestrator_with_tree()
+    state = _manager_state(main_id=main.agent_id)
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+
+    await manager.start_new_session(main)
+
+    assert is_valid_session_id(manager.current_session_id)
+    assert manager.current_title == "New Session"
+    path = store.sessions_dir / f"{manager.current_session_id}.json"
+    assert path.is_file()
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["title"] == "New Session"
+    assert record["created_at"] == "2026-11-07T15:00:00Z"
+    assert record["main_agent_id"] == main.agent_id
+
+
+@pytest.mark.asyncio
+async def test_save_current_skips_rewrite_when_content_unchanged(tmp_path):
+    """内容未变时不重写文件、不更新时间戳."""
+    orchestrator, main, _ = await _orchestrator_with_tree()
+    state = _manager_state(main_id=main.agent_id)
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+    await manager.start_new_session(main)
+    writes = _counting_save(store)
+
+    second = await manager.save_current()
+
+    assert second is None
+    assert writes == []
+    record = json.loads(
+        (store.sessions_dir / f"{manager.current_session_id}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert record["updated_at"] == "2026-11-07T15:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_save_current_rewrites_and_updates_timestamp_when_changed(tmp_path):
+    """内容变化时重写且 updated_at 更新."""
+    orchestrator, main, _ = await _orchestrator_with_tree()
+    state = _manager_state(main_id=main.agent_id)
+    clock = _FrozenClock()
+    manager, ui, store, _ = _make_manager(tmp_path, orchestrator, state, clock=clock)
+    await manager.start_new_session(main)
+    await manager.save_current()
+
+    clock.advance(5)
+    main.append_user_prompt("second message")
+    path = await manager.save_current()
+
+    assert path is not None
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["updated_at"] == "2026-11-07T15:00:05Z"
+    assert any(
+        block.get("message") == "second message"
+        for block in record["agents"][0]["messages"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_save_failure_warns_once_per_session(tmp_path, monkeypatch):
+    """保存失败不抛出；同一会话只 warn 一次."""
+    orchestrator, main, _ = await _orchestrator_with_tree()
+    state = _manager_state(main_id=main.agent_id)
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+    await manager.start_new_session(main)
+
+    def _boom(record):
+        raise OSError("disk full")
+
+    store.save = _boom
+    await manager.save_current(force=True)
+    assert len(ui.warnings) == 1
+
+    await manager.save_current(force=True)
+    assert len(ui.warnings) == 1
+
+
+@pytest.mark.asyncio
+async def test_save_failure_reports_every_time_when_requested(tmp_path):
+    """report_failure=True 时每次失败都 warn."""
+    orchestrator, main, _ = await _orchestrator_with_tree()
+    state = _manager_state(main_id=main.agent_id)
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+    await manager.start_new_session(main)
+
+    def _boom(record):
+        raise OSError("disk full")
+
+    store.save = _boom
+    await manager.save_current(force=True, report_failure=True)
+    await manager.save_current(force=True, report_failure=True)
+    assert len(ui.warnings) == 2
+
+
+@pytest.mark.asyncio
+async def test_attach_record_adopts_id_title_and_skips_rewrite(tmp_path):
+    """attach_record 认领记录的 id/标题，且未变化时不重写."""
+    orchestrator, main, _ = await _orchestrator_with_tree()
+    session_id = "20261107T152000Z-1a2b3c4d"
+    record = serialize_tree(
+        orchestrator,
+        main_agent_id=main.agent_id,
+        session_id=session_id,
+        title="Attach me",
+        created_at="2026-11-07T15:00:00Z",
+        model="echo-model",
+        workspace=str(tmp_path),
+        updated_at="2026-11-07T15:20:00Z",
+    )
+    store = SessionStore(tmp_path)
+    store.save(record)
+    state = _manager_state(main_id=main.agent_id)
+    manager, ui, _, _ = _make_manager(tmp_path, orchestrator, state)
+
+    manager.attach_record(record)
+
+    assert manager.current_session_id == session_id
+    assert manager.current_title == "Attach me"
+    writes = _counting_save(store)
+    assert await manager.save_current() is None
+    assert writes == []
+
+
+# ---------------------------------------------------------------------------
+# Task 12: SessionAutosaver — periodic background saving
+# ---------------------------------------------------------------------------
+
+
+def test_autosave_interval_constant_is_thirty_seconds():
+    """AUTOSAVE_INTERVAL 固定为 30.0 秒."""
+    assert AUTOSAVE_INTERVAL == 30.0
+
+
+@pytest.mark.asyncio
+async def test_autosaver_saves_periodically_until_stopped(tmp_path):
+    """有会话时按 interval 周期调用保存；stop 后任务干净退出."""
+    orchestrator, main, _ = await _orchestrator_with_tree()
+    state = _manager_state(main_id=main.agent_id)
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+    await manager.start_new_session(main)
+    original_save = manager.save_current
+    saves = []
+
+    async def counting_save(*args, **kwargs):
+        saves.append(1)
+        return await original_save(*args, **kwargs)
+
+    manager.save_current = counting_save
+
+    autosaver = SessionAutosaver(manager, interval=0.01)
+    autosaver.start()
+    await asyncio.sleep(0.06)
+    await autosaver.stop()
+
+    assert len(saves) >= 2
+    assert autosaver._task is None
+
+
+@pytest.mark.asyncio
+async def test_autosaver_without_session_writes_nothing(tmp_path):
+    """无会话（current_session_id 为 None）时不写任何文件."""
+    orchestrator, main, _ = await _orchestrator_with_tree()
+    state = _manager_state(main_id=main.agent_id)
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+    writes = _counting_save(store)
+
+    autosaver = SessionAutosaver(manager, interval=0.01)
+    autosaver.start()
+    await asyncio.sleep(0.03)
+    await autosaver.stop()
+
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_autosaver_stop_is_safe_without_start(tmp_path):
+    """未 start 时 stop 幂等不抛错."""
+    orchestrator, main, _ = await _orchestrator_with_tree()
+    state = _manager_state(main_id=main.agent_id)
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+    autosaver = SessionAutosaver(manager, interval=0.01)
+    await autosaver.stop()
+    assert autosaver._task is None
+
+
+# ---------------------------------------------------------------------------
+# Task 13: generate_session_title / fallback_title
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_generate_session_title_sends_clean_request_and_clears_reasoning():
+    """请求带 system+user、stream=False、tools=[]；克隆关闭 reasoning 且原 provider 不变."""
+    provider = _ManagerProvider(content='  "Fix the parser bug"\n')
+    title = await generate_session_title(provider, "Fix the parser bug now")
+
+    assert title == "Fix the parser bug"
+    assert provider.reasoning_effort == "high"
+    assert len(provider.calls) == 1
+    call = provider.calls[0]
+    assert call["reasoning_effort"] is None
+    assert call["stream"] is False
+    assert call["tools"] == []
+    assert [m["role"] for m in call["messages"]] == ["system", "user"]
+    assert call["messages"][1]["content"] == "Fix the parser bug now"
+
+
+@pytest.mark.asyncio
+async def test_generate_session_title_takes_first_line_and_truncates():
+    """多行取第一行；超 60 字符截断."""
+    provider = _ManagerProvider(content="Fix the parser\nsecond line")
+    assert await generate_session_title(provider, "x") == "Fix the parser"
+
+    provider = _ManagerProvider(content="x" * 70)
+    assert await generate_session_title(provider, "x") == "x" * 60
+
+
+@pytest.mark.asyncio
+async def test_generate_session_title_raises_on_provider_error():
+    """provider 抛出的异常原样传播，由调用方 fallback."""
+    provider = _ManagerProvider(error=RuntimeError("boom"))
+    with pytest.raises(RuntimeError):
+        await generate_session_title(provider, "x")
+
+
+@pytest.mark.asyncio
+async def test_generate_session_title_raises_on_empty_result():
+    """空结果抛 ValueError，由调用方 fallback."""
+    provider = _ManagerProvider(content="   ")
+    with pytest.raises(ValueError):
+        await generate_session_title(provider, "x")
+
+
+def test_fallback_title_first_line_collapsed_and_truncated():
+    """fallback 取首行、压缩空白、截 40 字符超出加 …；空消息返回空串."""
+    assert fallback_title("Fix the\n parser bug") == "Fix the"
+    assert fallback_title("  Fix   the  bug  ") == "Fix the bug"
+    assert fallback_title("x" * 50) == "x" * 39 + "…"
+    assert fallback_title("") == ""
+    assert fallback_title("   \n  ") == ""
+
+
+# ---------------------------------------------------------------------------
+# Task 14: SessionManager.maybe_generate_title / shutdown
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_maybe_generate_title_updates_title_and_force_saves(tmp_path):
+    """标题为 New Session 且有用户消息时启动任务；完成后写回标题并 force 保存."""
+    orchestrator, main, _ = await _orchestrator_with_tree()
+    main.append_user_prompt("Fix the parser bug now")
+    state = _manager_state(main_id=main.agent_id)
+    provider = _ManagerProvider(content="Parser Bug")
+    manager, ui, store, clock = _make_manager(
+        tmp_path, orchestrator, state, provider=provider
+    )
+    await manager.start_new_session(main)
+    writes = _counting_save(store)
+
+    manager.maybe_generate_title()
+    assert manager._title_task is not None
+    await manager._title_task
+
+    assert manager.current_title == "Parser Bug"
+    assert len(writes) >= 1
+    record = json.loads(
+        (store.sessions_dir / f"{manager.current_session_id}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert record["title"] == "Parser Bug"
+
+
+@pytest.mark.asyncio
+async def test_maybe_generate_title_runs_once_per_session(tmp_path):
+    """同一会话第二次调用不再启动新任务、不再请求 provider."""
+    orchestrator, main, _ = await _orchestrator_with_tree()
+    main.append_user_prompt("Fix the parser bug now")
+    state = _manager_state(main_id=main.agent_id)
+    provider = _ManagerProvider(content="Parser Bug")
+    manager, ui, store, clock = _make_manager(
+        tmp_path, orchestrator, state, provider=provider
+    )
+    await manager.start_new_session(main)
+
+    manager.maybe_generate_title()
+    task = manager._title_task
+    await task
+    manager.maybe_generate_title()
+
+    assert manager._title_task is task
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_maybe_generate_title_skips_without_user_message_or_default_title(
+    tmp_path,
+):
+    """无用户消息或标题已非 New Session 时不启动任务."""
+    orchestrator, main = await _orchestrator_with_clean_main()
+    state = _manager_state(main_id=main.agent_id)
+    provider = _ManagerProvider(content="Parser Bug")
+    manager, ui, store, clock = _make_manager(
+        tmp_path, orchestrator, state, provider=provider
+    )
+    await manager.start_new_session(main)
+
+    manager.maybe_generate_title()
+    assert manager._title_task is None
+
+    main.append_user_prompt("hello")
+    manager._current_title = "Already Named"
+    manager.maybe_generate_title()
+    assert manager._title_task is None
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_maybe_generate_title_discards_result_after_session_change(tmp_path):
+    """会话切换后旧任务结果被丢弃，不影响新会话的标题与文件."""
+    orchestrator, main = await _orchestrator_with_clean_main()
+    main.append_user_prompt("Fix the parser bug now")
+    state = _manager_state(main_id=main.agent_id)
+    provider = _ManagerProvider(content="Parser Bug")
+    manager, ui, store, clock = _make_manager(
+        tmp_path, orchestrator, state, provider=provider
+    )
+    await manager.start_new_session(main)
+
+    manager.maybe_generate_title()
+    other = _valid_record("20261107T160000Z-abcdef01", title="Other Session")
+    store.save(other)
+    manager.attach_record(other)
+    await manager._title_task
+
+    assert manager.current_title == "Other Session"
+    assert len(provider.calls) == 1
+    reloaded = json.loads(
+        (store.sessions_dir / "20261107T160000Z-abcdef01.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert reloaded["title"] == "Other Session"
+
+
+@pytest.mark.asyncio
+async def test_maybe_generate_title_falls_back_on_provider_error(tmp_path):
+    """provider 失败时标题回退为用户消息首行."""
+    orchestrator, main = await _orchestrator_with_clean_main()
+    main.append_user_prompt("Fix the parser bug now")
+    state = _manager_state(main_id=main.agent_id)
+    provider = _ManagerProvider(error=RuntimeError("boom"))
+    manager, ui, store, clock = _make_manager(
+        tmp_path, orchestrator, state, provider=provider
+    )
+    await manager.start_new_session(main)
+
+    manager.maybe_generate_title()
+    await manager._title_task
+
+    assert manager.current_title == fallback_title("Fix the parser bug now")
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_pending_title_task(tmp_path):
+    """shutdown 取消未完成的标题任务并 await，不抛异常."""
+    orchestrator, main = await _orchestrator_with_clean_main()
+    main.append_user_prompt("Fix the parser bug now")
+    state = _manager_state(main_id=main.agent_id)
+    provider = _ManagerProvider(hang=True)
+    manager, ui, store, clock = _make_manager(
+        tmp_path, orchestrator, state, provider=provider
+    )
+    await manager.start_new_session(main)
+
+    manager.maybe_generate_title()
+    task = manager._title_task
+    assert task is not None and not task.done()
+
+    await manager.shutdown()
+
+    assert task.done()
+    assert task.cancelled()
+
+
+# ---------------------------------------------------------------------------
+# Task 15: SessionManager.switch_to / switch_new
+# ---------------------------------------------------------------------------
+
+
+class _FakeSwitchOrchestrator:
+    """Small orchestrator fake with real create/restore/reset behaviour.
+
+    Attributes:
+        sessions: Live sessions keyed by agent id.
+        counter: Next agent id a create allocates.
+        reset_count: How many times ``reset_sessions`` ran.
+        fail_restore: When set, ``restore_tree`` inserts the first agent and
+            then raises, leaving half-restored state for the caller to clean.
+    """
+
+    def __init__(self):
+        self.sessions = {}
+        self.counter = 0
+        self.reset_count = 0
+        self.fail_restore = False
+
+    async def reset_sessions(self):
+        """Clear the registry and restart ids at zero."""
+        self.reset_count += 1
+        self.sessions.clear()
+        self.counter = 0
+
+    async def create_session(self, name="", description="", **kwargs):
+        """Create and register one session with a fresh id."""
+        session = AgentSession(
+            agent_id=self.counter,
+            name=name,
+            description=description,
+            provider=_EchoProvider(),
+            system_prompt="You are MitoCode.",
+        )
+        self.sessions[self.counter] = session
+        self.counter += 1
+        return session
+
+    async def restore_tree(self, agents):
+        """Rebuild sessions from records, keeping original ids."""
+        if self.fail_restore:
+            first = agents[0]
+            self.sessions[int(first["agent_id"])] = AgentSession(
+                agent_id=int(first["agent_id"]),
+                name=str(first.get("name", "") or ""),
+                parent_id=first.get("parent_id"),
+                provider=_EchoProvider(),
+                system_prompt="",
+            )
+            raise ValueError("restore boom")
+        ids = [int(agent["agent_id"]) for agent in agents]
+        if len(ids) != len(set(ids)):
+            raise ValueError("duplicate agent ids")
+        sessions = {}
+        for agent in agents:
+            sessions[int(agent["agent_id"])] = AgentSession(
+                agent_id=int(agent["agent_id"]),
+                name=str(agent.get("name", "") or ""),
+                description=str(agent.get("description", "") or ""),
+                parent_id=agent.get("parent_id"),
+                provider=_EchoProvider(),
+                system_prompt="",
+            )
+        for agent in agents:
+            parent_id = agent.get("parent_id")
+            if parent_id is not None:
+                sessions[parent_id].sub_agent_ids.append(int(agent["agent_id"]))
+        self.sessions = sessions
+        self.counter = max(ids) + 1
+        return dict(sessions)
+
+    def get_session(self, agent_id):
+        """Return the session under *agent_id* or ``None``."""
+        return self.sessions.get(agent_id)
+
+    def get_tree_snapshot(self):
+        """Return the current tree as node dicts."""
+        return [s.to_agent_node().to_dict() for s in self.sessions.values()]
+
+
+class _FakeBackground:
+    """Record whether ``stop_all`` was awaited."""
+
+    def __init__(self):
+        self.stopped = False
+
+    async def stop_all(self):
+        """Mark the registry as stopped."""
+        self.stopped = True
+
+
+def _switch_record(session_id="20261107T170000Z-7e7e7e7e", workspace="/tmp/ws"):
+    """Return a valid record for switch tests whose main holds one user text.
+
+    The record mirrors what ``serialize_tree`` emits for the fake
+    orchestrator's restored tree, so an unchanged post-switch save is a no-op.
+    """
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "session_id": session_id,
+        "title": "Other Session",
+        "created_at": "2026-11-07T17:00:00Z",
+        "updated_at": "2026-11-07T17:10:00Z",
+        "workspace": workspace,
+        "model": "echo-model",
+        "main_agent_id": 0,
+        "agents": [
+            {
+                "agent_id": 0,
+                "name": "Main",
+                "description": "Interactive session",
+                "parent_id": None,
+                "sub_agent_ids": [],
+                "system_prompt": "You are MitoCode.",
+                "messages": [
+                    {
+                        "kind": "text",
+                        "role": "user",
+                        "message": "restored message",
+                        "reasoning_content": "",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_switch_to_saves_old_tree_and_restores_new_one(tmp_path):
+    """切换在锁内完成：保存旧树 → reset → 恢复 → 状态与登记全部更新."""
+    orchestrator = _FakeSwitchOrchestrator()
+    state = _manager_state(main_id=0)
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+    main = await orchestrator.create_session(
+        name="Main", description="Interactive session"
+    )
+    state.main_id = main.agent_id
+    await manager.start_new_session(main)
+    old_id = manager.current_session_id
+    main.append_user_prompt("old message")
+    await manager.save_current()
+    old_record = json.loads(
+        (store.sessions_dir / f"{old_id}.json").read_text(encoding="utf-8")
+    )
+    assert any(
+        block.get("message") == "old message"
+        for block in old_record["agents"][0]["messages"]
+    )
+
+    record = _switch_record(workspace=str(tmp_path))
+    assert await manager.switch_to(record) is True
+
+    assert manager.current_session_id == "20261107T170000Z-7e7e7e7e"
+    assert manager.current_title == "Other Session"
+    assert state.main_id == 0
+    assert orchestrator.reset_count == 1
+    restored = orchestrator.get_session(0)
+    assert restored.system_prompt == "You are MitoCode."
+    assert [block.message for block in restored.messages] == ["restored message"]
+    assert state.turn_count == 0
+    assert state.tool_call_count == 0
+    assert state.total_chars == 0
+    assert state.agents == orchestrator.get_tree_snapshot()
+    assert ui.agent_count == len(state.agents)
+    # 恢复即认领指纹：紧随的未变化保存不重写
+    writes = _counting_save(store)
+    assert await manager.save_current() is None
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_switch_to_failure_cleans_registry_and_keeps_current(tmp_path):
+    """恢复失败返回 False：reset 再跑一次清掉半恢复残留，当前会话不变."""
+    orchestrator = _FakeSwitchOrchestrator()
+    state = _manager_state(main_id=0)
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+    main = await orchestrator.create_session(
+        name="Main", description="Interactive session"
+    )
+    state.main_id = main.agent_id
+    await manager.start_new_session(main)
+    old_id = manager.current_session_id
+    orchestrator.fail_restore = True
+
+    record = _switch_record(workspace=str(tmp_path))
+    assert await manager.switch_to(record) is False
+
+    assert manager.current_session_id == old_id
+    assert manager.current_title == "New Session"
+    assert state.main_id == main.agent_id
+    assert orchestrator.reset_count == 2
+    assert orchestrator.sessions == {}
+
+
+@pytest.mark.asyncio
+async def test_switch_to_stops_background_tasks(tmp_path):
+    """state.tool_context 带 background 时切换会 await stop_all."""
+    orchestrator = _FakeSwitchOrchestrator()
+    background = _FakeBackground()
+    state = _manager_state(
+        main_id=0, tool_context=SimpleNamespace(background=background)
+    )
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+    main = await orchestrator.create_session(
+        name="Main", description="Interactive session"
+    )
+    state.main_id = main.agent_id
+    await manager.start_new_session(main)
+
+    assert await manager.switch_to(_switch_record(workspace=str(tmp_path))) is True
+    assert background.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_switch_to_drains_real_pump_without_hanging(tmp_path):
+    """state.pump 为真实 EventPump（未启动任务）时 wait_idle 正常返回."""
+    orchestrator = _FakeSwitchOrchestrator()
+    state = _manager_state(main_id=0)
+    pump = EventPump(asyncio.Queue(), _FakeUI(), state)
+    state.pump = pump
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+    main = await orchestrator.create_session(
+        name="Main", description="Interactive session"
+    )
+    state.main_id = main.agent_id
+    await manager.start_new_session(main)
+
+    assert await manager.switch_to(_switch_record(workspace=str(tmp_path))) is True
+
+
+@pytest.mark.asyncio
+async def test_switch_new_destroys_old_tree_and_starts_fresh(tmp_path):
+    """switch_new 销毁旧树、新建 #0 Main，新 id 与 New Session 标题落盘."""
+    orchestrator = _FakeSwitchOrchestrator()
+    state = _manager_state(main_id=0)
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+    main = await orchestrator.create_session(
+        name="Main", description="Interactive session"
+    )
+    state.main_id = main.agent_id
+    await manager.start_new_session(main)
+    old_id = manager.current_session_id
+    main.append_user_prompt("old message")
+    state.turn_count = 7
+    state.tool_call_count = 3
+    state.total_chars = 500
+
+    await manager.switch_new()
+
+    assert manager.current_session_id != old_id
+    assert is_valid_session_id(manager.current_session_id)
+    assert manager.current_title == "New Session"
+    assert state.main_id == 0
+    new_main = orchestrator.get_session(0)
+    assert new_main is not None and new_main.name == "Main"
+    assert orchestrator.reset_count == 1
+    assert state.turn_count == 0
+    assert state.tool_call_count == 0
+    assert state.total_chars == 0
+    assert state.agents == orchestrator.get_tree_snapshot()
+    assert ui.agent_count == 1
+    record = json.loads(
+        (store.sessions_dir / f"{manager.current_session_id}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert record["title"] == "New Session"
+
+
+@pytest.mark.asyncio
+async def test_switch_lock_blocks_concurrent_save(tmp_path):
+    """锁被持有时 save_current 等待，不与切换交错."""
+    orchestrator = _FakeSwitchOrchestrator()
+    state = _manager_state(main_id=0)
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+    main = await orchestrator.create_session(
+        name="Main", description="Interactive session"
+    )
+    state.main_id = main.agent_id
+    await manager.start_new_session(main)
+    main.append_user_prompt("more content")
+
+    await manager._lock.acquire()
+    try:
+        task = asyncio.create_task(manager.save_current())
+        await asyncio.sleep(0.02)
+        assert not task.done()
+    finally:
+        manager._lock.release()
+
+    path = await task
+    assert path is not None
+    assert path.is_file()

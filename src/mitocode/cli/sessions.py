@@ -10,6 +10,8 @@ concerns (import direction: this module may import private block classes from
 ``core.agent.agent_session``; the core never imports this module).
 """
 
+import asyncio
+import copy
 import json
 import os
 import re
@@ -34,6 +36,27 @@ from mitocode.cli.format import ERROR_PREFIX
 
 SCHEMA_VERSION = 1
 """Version of the on-disk session record schema written by this module."""
+
+AUTOSAVE_INTERVAL = 30.0
+"""Seconds between automatic background saves of the current session."""
+
+TITLE_TIMEOUT = 30.0
+"""Ceiling in seconds for one background title-generation request."""
+
+TITLE_MAX_CHARS = 60
+"""Maximum characters of a generated session title."""
+
+FALLBACK_TITLE_MAX_CHARS = 40
+"""Maximum characters of a fallback session title (ellipsis included)."""
+
+_TITLE_SYSTEM_PROMPT = (
+    "You name chat sessions. Reply with one short title of at most 40 "
+    "characters for the conversation start below. Output the title only: "
+    "no quotes, no preamble, single line."
+)
+
+_TITLE_QUOTE_CHARS = "\"'\u201c\u201d\u2018\u2019"
+"""Quote characters stripped when they wrap the whole generated title."""
 
 
 class SessionLoadError(Exception):
@@ -572,3 +595,560 @@ async def select_session(
                 return summaries[number - 1].session_id
         tail = ", or n for a new session" if allow_new else ""
         ui.warn(f"Please enter a number between 1 and {len(summaries)}{tail}.")
+
+
+# ---------------------------------------------------------------------------
+# SessionManager: the current on-disk session identity
+# ---------------------------------------------------------------------------
+
+_NEW_SESSION_TITLE = "New Session"
+"""Title every fresh session starts with until a real one is generated."""
+
+_SAVE_WARN_MESSAGE = (
+    "Saving the session to disk failed; continuing without persistence."
+)
+"""User-facing warning shown at most once per session on save failures."""
+
+
+def _format_clock(clock: Any) -> str:
+    """Render one clock reading as an ISO-8601 UTC timestamp.
+
+    Args:
+        clock: Zero-argument callable returning a ``datetime``.
+
+    Returns:
+        ``YYYY-MM-DDTHH:MM:SSZ`` in UTC.
+    """
+    return clock().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _record_fingerprint(record: Mapping[str, Any]) -> str:
+    """Return the change-detection fingerprint of a session record.
+
+    The ``updated_at`` field is blanked first so a timestamp-only change
+    never counts as new content; the rest is dumped with sorted keys so the
+    comparison is stable across processes.
+
+    Args:
+        record: A schema document (or any mapping).
+
+    Returns:
+        A canonical JSON string for comparison.
+    """
+    data = dict(record)
+    data["updated_at"] = ""
+    return json.dumps(data, sort_keys=True, ensure_ascii=False)
+
+
+def _agent_record(
+    record: Mapping[str, Any], agent_id: int
+) -> Optional[Mapping[str, Any]]:
+    """Find the ``agents`` entry of *record* carrying *agent_id*.
+
+    Args:
+        record: A schema document.
+        agent_id: The agent id to look up.
+
+    Returns:
+        The matching mapping, or ``None`` when the id is absent.
+    """
+    for agent in record.get("agents") or []:
+        if isinstance(agent, Mapping) and agent.get("agent_id") == agent_id:
+            return agent
+    return None
+
+
+class SessionManager:
+    """Own the on-disk identity of the current interactive session.
+
+    One lock serializes saving *and* switching: an autosave that fires
+    mid-switch would otherwise read the new tree and write it into the old
+    file.  Every save failure is contained — logged and warned at most once
+    per session — so the REPL never dies over disk trouble.
+    """
+
+    def __init__(
+        self,
+        store: Any,
+        orchestrator: Any,
+        ui: Any,
+        *,
+        state: Any,
+        provider: Any,
+        workspace: str,
+        clock: Any = None,
+    ) -> None:
+        """Wire the manager to its collaborators.
+
+        Args:
+            store: Disk store for session records.
+            orchestrator: Session registry to serialize and restore.
+            ui: Surface used for warnings and notes.
+            state: CLI state providing ``main_id`` and the counters and
+                tree snapshot a switch resets.
+            provider: Provider used for background title generation; its
+                ``default_model`` is recorded into saved records.
+            workspace: Absolute workspace path written into records.
+            clock: ``datetime``-like factory for timestamps; tests inject a
+                frozen clock, production uses ``datetime.now``.
+        """
+        self._store = store
+        self._orchestrator = orchestrator
+        self._ui = ui
+        self._state = state
+        self._provider = provider
+        self._workspace = workspace
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._lock = asyncio.Lock()
+        self._current_session_id: Optional[str] = None
+        self._current_title: str = _NEW_SESSION_TITLE
+        self._created_at: str = ""
+        self._last_fingerprint: Optional[str] = None
+        self._save_warned = False
+        self._title_task: Optional[asyncio.Task] = None
+        self._title_attempted: set = set()
+
+    @property
+    def current_session_id(self) -> Optional[str]:
+        """Return the disk id of the current session, or ``None``."""
+        return self._current_session_id
+
+    @property
+    def current_title(self) -> str:
+        """Return the current session's display title."""
+        return self._current_title
+
+    def _model(self) -> str:
+        """Return the provider's default model name for record display."""
+        return str(getattr(self._provider, "default_model", "") or "")
+
+    def _first_user_text(self) -> str:
+        """Return the main session's first non-blank user message.
+
+        Returns:
+            The stripped message text, or ``""`` when the main session does
+            not exist or no user text has been sent yet.
+        """
+        session = self._orchestrator.get_session(self._state.main_id)
+        if session is None:
+            return ""
+        for block in getattr(session, "messages", None) or []:
+            if getattr(block, "role", "") != "user":
+                continue
+            text = str(getattr(block, "message", "") or "").strip()
+            if text:
+                return text
+        return ""
+
+    async def save_current(
+        self, *, force: bool = False, report_failure: bool = False
+    ) -> Optional[Path]:
+        """Serialize and store the current session tree.
+
+        Args:
+            force: Write even when the record is unchanged.
+            report_failure: Warn on every failure instead of once.
+
+        Returns:
+            The written path, or ``None`` when there is no session, the
+            content was unchanged, or the write failed.
+        """
+        async with self._lock:
+            return await self._save_locked(force=force, report_failure=report_failure)
+
+    async def _save_locked(
+        self, *, force: bool, report_failure: bool
+    ) -> Optional[Path]:
+        """Save the current tree; the caller must hold the manager lock.
+
+        Args:
+            force: Write even when the record is unchanged.
+            report_failure: Warn on every failure instead of once.
+
+        Returns:
+            The written path, or ``None`` as for :meth:`save_current`.
+        """
+        if self._current_session_id is None:
+            return None
+        if self._orchestrator.get_session(self._state.main_id) is None:
+            return None
+        record = serialize_tree(
+            self._orchestrator,
+            main_agent_id=self._state.main_id,
+            session_id=self._current_session_id,
+            title=self._current_title,
+            created_at=self._created_at,
+            model=self._model(),
+            workspace=self._workspace,
+            updated_at="",
+        )
+        fingerprint = json.dumps(record, sort_keys=True, ensure_ascii=False)
+        if not force and fingerprint == self._last_fingerprint:
+            return None
+        record["updated_at"] = _format_clock(self._clock)
+        try:
+            path = await asyncio.to_thread(self._store.save, record)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            loguru_logger.exception(
+                "Session {} save failed: {}", self._current_session_id, exc
+            )
+            if report_failure or not self._save_warned:
+                self._ui.warn(_SAVE_WARN_MESSAGE)
+                self._save_warned = True
+            return None
+        self._save_warned = False
+        self._last_fingerprint = fingerprint
+        return path
+
+    def _register_new_locked(self) -> None:
+        """Adopt a fresh id, the default title and a blank fingerprint.
+
+        The caller must hold the manager lock.
+        """
+        self._current_session_id = new_session_id()
+        self._current_title = _NEW_SESSION_TITLE
+        self._created_at = _format_clock(self._clock)
+        self._last_fingerprint = None
+        self._save_warned = False
+
+    async def start_new_session(self, main_session: Any) -> None:
+        """Register a fresh session id and save an empty record.
+
+        Args:
+            main_session: The newly created main session (unused for
+                serialization, which reads the whole tree live).
+        """
+        async with self._lock:
+            self._register_new_locked()
+            await self._save_locked(force=False, report_failure=False)
+
+    def attach_record(self, record: Mapping[str, Any]) -> None:
+        """Adopt an existing record as the current on-disk session.
+
+        Args:
+            record: A schema document previously loaded from the store; the
+                pre-seeded fingerprint makes the next unchanged save a no-op.
+        """
+        self._adopt_record_locked(record)
+
+    def maybe_generate_title(self) -> None:
+        """Start one background title task for the current session.
+
+        Runs only while the title is still the default, a first user text
+        exists, and this session has not been titled before; the task binds
+        the session id at start and its result is discarded if the current
+        session changed by the time the title is written.
+        """
+        if self._current_session_id is None:
+            return
+        if self._current_title != _NEW_SESSION_TITLE:
+            return
+        if self._current_session_id in self._title_attempted:
+            return
+        first_user_message = self._first_user_text()
+        if not first_user_message:
+            return
+        session_id = self._current_session_id
+        self._title_attempted.add(session_id)
+        self._title_task = asyncio.create_task(
+            self._title_job(session_id, first_user_message)
+        )
+
+    async def _title_job(self, session_id: str, first_user_message: str) -> None:
+        """Generate one title off the interactive path and write it back.
+
+        Args:
+            session_id: Session the request was started for; results for any
+                other current session are dropped.
+            first_user_message: The user text the title is generated from.
+        """
+        try:
+            try:
+                title = await asyncio.wait_for(
+                    generate_session_title(self._provider, first_user_message),
+                    TITLE_TIMEOUT,
+                )
+            except Exception:  # pylint: disable=broad-exception-caught
+                title = fallback_title(first_user_message)
+            await self._write_title_locked(session_id, title)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pylint: disable=broad-exception-caught
+            loguru_logger.exception("Session title generation failed")
+
+    async def _write_title_locked(self, session_id: str, title: str) -> None:
+        """Apply a generated title and force-save, under the manager lock.
+
+        Args:
+            session_id: Session the title belongs to; a mismatch with the
+                current session means the result is stale and is dropped.
+            title: Cleaned or fallback title; blanks keep the old title.
+        """
+        async with self._lock:
+            if self._current_session_id != session_id:
+                return
+            title = title.strip()
+            if not title:
+                return
+            self._current_title = title
+            await self._save_locked(force=True, report_failure=False)
+
+    async def _cancel_title_task_locked(self) -> None:
+        """Cancel any pending title task and wait for it to unwind.
+
+        The caller must hold the manager lock.
+        """
+        task = self._title_task
+        self._title_task = None
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def shutdown(self) -> None:
+        """Cancel title generation and write a final forced save.
+
+        Used at process exit: a title that had not finished is dropped (the
+        next start regenerates it) and the last tree state reaches disk.
+        Save failures stay contained, so shutdown never raises.
+        """
+        await self._cancel_title_task_locked()
+        await self.save_current(force=True)
+
+    async def _drain_pump(self) -> None:
+        """Wait until the event pump has rendered everything queued so far.
+
+        A missing pump (tests, or early startup) is skipped silently.
+        """
+        pump = getattr(self._state, "pump", None)
+        if pump is not None:
+            await pump.wait_idle()
+
+    async def _stop_background_locked(self) -> None:
+        """Stop every detached tool task so none outlives the switch."""
+        tool_context = getattr(self._state, "tool_context", None)
+        background = getattr(tool_context, "background", None)
+        if background is not None:
+            await background.stop_all()
+
+    def _adopt_record_locked(self, record: Mapping[str, Any]) -> None:
+        """Register a loaded record as the current session; caller holds lock."""
+        self._current_session_id = str(record["session_id"])
+        self._current_title = str(record.get("title", "") or _NEW_SESSION_TITLE)
+        self._created_at = str(record.get("created_at", "") or "")
+        self._last_fingerprint = _record_fingerprint(record)
+        self._save_warned = False
+
+    def _reset_counters_locked(self) -> None:
+        """Zero the per-process counters and refresh the tree snapshot."""
+        self._state.turn_count = 0
+        self._state.tool_call_count = 0
+        self._state.total_chars = 0
+        self._state.agents = self._orchestrator.get_tree_snapshot()
+        self._ui.agent_count = len(self._state.agents)
+
+    async def switch_to(self, record: Mapping[str, Any]) -> bool:
+        """Switch the live tree to a loaded record, all under the save lock.
+
+        The old tree is saved first, then the registry is reset and the new
+        tree restored; a failure anywhere in the restore leaves a clean
+        registry and the current session untouched.
+
+        Args:
+            record: A validated schema document (typically from
+                ``SessionStore.load``).
+
+        Returns:
+            ``True`` on success; ``False`` when the restore failed, in which
+                case the current session identity is unchanged.
+        """
+        async with self._lock:
+            await self._cancel_title_task_locked()
+            await self._stop_background_locked()
+            await self._save_locked(force=False, report_failure=False)
+            await self._drain_pump()
+            await self._orchestrator.reset_sessions()
+            try:
+                sessions = await self._orchestrator.restore_tree(
+                    record.get("agents") or []
+                )
+                for agent_id, session in sessions.items():
+                    agent_record = _agent_record(record, agent_id)
+                    if agent_record is not None:
+                        restore_agent_messages(session, agent_record)
+                main_agent_id = record.get("main_agent_id")
+                if main_agent_id not in sessions:
+                    raise ValueError("main_agent_id is not among the restored agents")
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                loguru_logger.exception(
+                    "Session switch to {} failed: {}",
+                    record.get("session_id"),
+                    exc,
+                )
+                await self._orchestrator.reset_sessions()
+                await self._drain_pump()
+                return False
+            self._state.main_id = main_agent_id
+            self._adopt_record_locked(record)
+            self._reset_counters_locked()
+            await self._drain_pump()
+            self.maybe_generate_title()
+            return True
+
+    async def switch_new(self) -> None:
+        """Destroy the current tree and start a brand-new session, locked.
+
+        The old session is saved first; the new one gets a fresh disk id, the
+        default title and zeroed counters, and its empty record is written
+        immediately so a crash never leaves the new session unsaved.
+        """
+        async with self._lock:
+            await self._cancel_title_task_locked()
+            await self._stop_background_locked()
+            await self._save_locked(force=False, report_failure=False)
+            await self._drain_pump()
+            await self._orchestrator.reset_sessions()
+            main_session = await self._orchestrator.create_session(
+                name="Main", description="Interactive session"
+            )
+            self._state.main_id = main_session.agent_id
+            self._register_new_locked()
+            self._reset_counters_locked()
+            await self._drain_pump()
+            await self._save_locked(force=True, report_failure=False)
+
+
+class SessionAutosaver:
+    """Periodically save the current session in the background.
+
+    One asyncio task sleeps for the configured interval, calls
+    :meth:`SessionManager.save_current` and repeats until stopped. Saving
+    itself is a no-op while no session exists, so the loop does not need to
+    know whether one is live; the manager's lock keeps it from interleaving
+    with a session switch.
+    """
+
+    def __init__(
+        self, manager: SessionManager, interval: float = AUTOSAVE_INTERVAL
+    ) -> None:
+        """Bind the autosaver to a manager.
+
+        Args:
+            manager: Manager whose :meth:`~SessionManager.save_current` is
+                called once per tick.
+            interval: Seconds between saves; tests inject a small value.
+        """
+        self._manager = manager
+        self._interval = interval
+        self._task: Optional[asyncio.Task] = None
+
+    def start(self) -> None:
+        """Start the background loop unless it is already running."""
+        if self._task is None:
+            self._task = asyncio.create_task(self.run())
+
+    async def run(self) -> None:
+        """Save once per interval until cancelled.
+
+        Raises:
+            asyncio.CancelledError: When the task is cancelled by
+                :meth:`stop`; the error propagates to the gatherer.
+        """
+        while True:
+            await asyncio.sleep(self._interval)
+            await self._manager.save_current()
+
+    async def stop(self) -> None:
+        """Cancel the loop and wait until it has fully unwound."""
+        task = self._task
+        self._task = None
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+# ---------------------------------------------------------------------------
+# Session title generation
+# ---------------------------------------------------------------------------
+
+
+def _clean_title_text(raw: str) -> str:
+    """Clean a model-produced title down to one short line.
+
+    The order follows the design: strip surrounding whitespace, keep the
+    first line only, drop a pair of wrapping quotes, collapse internal
+    whitespace and cut at :data:`TITLE_MAX_CHARS`.
+
+    Args:
+        raw: The raw model output.
+
+    Returns:
+        The cleaned title, possibly empty.
+    """
+    text = raw.strip()
+    if "\n" in text:
+        text = text.split("\n", 1)[0].strip()
+    if len(text) >= 2 and text[0] in _TITLE_QUOTE_CHARS and text[-1] == text[0]:
+        text = text[1:-1].strip()
+    return " ".join(text.split())[:TITLE_MAX_CHARS]
+
+
+async def generate_session_title(provider: Any, first_user_message: str) -> str:
+    """Ask the provider for a one-line session title.
+
+    The provider is shallow-copied and the copy's ``reasoning_effort`` is
+    cleared, so the title request neither inherits the interactive tier nor
+    races the main turn's attribute.
+
+    Args:
+        provider: Chat provider exposing ``chat`` and ``default_model``.
+        first_user_message: The session's first user text.
+
+    Returns:
+        The cleaned title (never blank).
+
+    Raises:
+        Exception: Whatever the provider raises, and ``ValueError`` when the
+            response carries no usable content; callers fall back.
+    """
+    clone = copy.copy(provider)
+    clone.reasoning_effort = None
+    messages = [
+        {"role": "system", "content": _TITLE_SYSTEM_PROMPT},
+        {"role": "user", "content": first_user_message},
+    ]
+    response = await clone.chat(messages=messages, tools=[], stream=False)
+    choices = response.get("choices") if isinstance(response, Mapping) else None
+    if not choices:
+        raise ValueError("title response has no choices")
+    first = choices[0] if isinstance(choices[0], Mapping) else None
+    message = first.get("message") if first is not None else None
+    content = message.get("content") if isinstance(message, Mapping) else None
+    title = _clean_title_text(str(content or ""))
+    if not title:
+        raise ValueError("title response was empty")
+    return title
+
+
+def fallback_title(first_user_message: str) -> str:
+    """Derive a title from the user message when generation fails.
+
+    Args:
+        first_user_message: The session's first user text.
+
+    Returns:
+        The first line with collapsed whitespace, cut at
+        :data:`FALLBACK_TITLE_MAX_CHARS` with an ellipsis; an empty string
+        when the message carries no usable text.
+    """
+    text = str(first_user_message or "").strip()
+    if not text:
+        return ""
+    if "\n" in text:
+        text = text.split("\n", 1)[0].strip()
+    text = " ".join(text.split())
+    if not text:
+        return ""
+    return _truncate_title(text, FALLBACK_TITLE_MAX_CHARS)
