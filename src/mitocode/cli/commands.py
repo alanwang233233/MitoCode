@@ -23,6 +23,7 @@ needs a terminal or a network connection.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 from rich.table import Table
@@ -30,7 +31,15 @@ from rich.text import Text
 
 from loguru import logger as loguru_logger
 
+from mitocode.core.agent.agent_state import AgentState
+
 from mitocode.cli.config import KNOWN_REASONING_EFFORTS
+from mitocode.cli.demo import DemoPlayer, TerminalKeySource
+from mitocode.cli.sessions import (
+    SessionLoadError,
+    SessionStore,
+    select_session,
+)
 from mitocode.cli.state import CommandContext
 
 if TYPE_CHECKING:
@@ -389,6 +398,9 @@ async def _cmd_status(ctx: CommandContext, args: List[str]) -> CommandResult:
     table.add_column("Field", style="mito.muted", no_wrap=True)
     table.add_column("Value")
     table.add_row("session", Text(f"#{state.main_id} {name}"))
+    manager = state.session_manager
+    if manager is not None:
+        table.add_row("title", Text(manager.current_title))
     table.add_row("model", Text(_model_name(state)))
     table.add_row(
         "effort",
@@ -529,6 +541,9 @@ async def _cmd_clear(ctx: CommandContext, args: List[str]) -> CommandResult:
     """
     del args
     state = ctx.state
+    manager = state.session_manager
+    if manager is not None:
+        await manager.save_current(force=True)
     await state.orchestrator.destroy_agent(state.main_id)
     state.main_id = await state.orchestrator.create_agent(
         name="Main", description="Interactive session"
@@ -537,7 +552,200 @@ async def _cmd_clear(ctx: CommandContext, args: List[str]) -> CommandResult:
     state.tool_call_count = 0
     state.total_chars = 0
     state.agents = state.orchestrator.get_tree_snapshot()
+    if manager is not None:
+        await manager.start_new_session(state.main_session())
     ctx.ui.note(f"New session #{state.main_id}.")
+    return CommandResult()
+
+
+async def _confirm_force_stop(ctx: CommandContext) -> bool:
+    """Ask whether a running session may be force-stopped for a switch.
+
+    Busy means an orchestrator task, a RUNNING main session, or a live
+    background tool task.  Refusal is reported as ``Switch cancelled.``
+
+    Args:
+        ctx: Command context carrying state and UI.
+
+    Returns:
+        ``True`` when the session is idle or the user accepted the forced
+        stop; ``False`` when the user refused.
+    """
+    state = ctx.state
+    busy = False
+
+    has_active_tasks = getattr(state.orchestrator, "has_active_tasks", None)
+    if callable(has_active_tasks) and has_active_tasks():
+        busy = True
+
+    if not busy:
+        try:
+            session = state.main_session()
+        except RuntimeError:
+            session = None
+        if (
+            session is not None
+            and getattr(session, "state", None) is AgentState.RUNNING
+        ):
+            busy = True
+
+    if not busy:
+        background = getattr(state.tool_context, "background", None)
+        has_background = getattr(background, "has_active_tasks", None)
+        if callable(has_background) and has_background():
+            busy = True
+
+    if not busy:
+        return True
+    answer = await ctx.ui.ask(
+        "Current session is still running. Force stop and switch? [y/N] "
+    )
+    if answer.strip().lower() in ("y", "yes"):
+        return True
+    ctx.ui.note("Switch cancelled.")
+    return False
+
+
+def _session_store(ctx: CommandContext) -> SessionStore:
+    """Build the session store for the command's workspace.
+
+    Args:
+        ctx: Command context carrying the state's workspace.
+
+    Returns:
+        A store rooted at the workspace's ``.mitocode/sessions`` directory.
+    """
+    return SessionStore(Path(_workspace_path(ctx.state)))
+
+
+@command("save", "/save", "Save the current session to disk now.")
+async def _cmd_save(ctx: CommandContext, args: List[str]) -> CommandResult:
+    """Force-save the current session tree to disk.
+
+    Args:
+        ctx: Command context.
+        args: Unused extra arguments.
+
+    Returns:
+        A default result.
+    """
+    del args
+    manager = ctx.state.session_manager
+    if manager is None:
+        ctx.ui.warn("Session saving is not available in this run.")
+        return CommandResult()
+    path = await manager.save_current(force=True, report_failure=True)
+    if path is None:
+        ctx.ui.warn("No session to save.")
+        return CommandResult()
+    ctx.ui.note(f"Saved session {manager.current_session_id} to {path}.")
+    return CommandResult()
+
+
+@command("sessions", "/sessions", "List saved sessions and switch to one.")
+async def _cmd_sessions(ctx: CommandContext, args: List[str]) -> CommandResult:
+    """Switch the live tree to another saved session or a brand-new one.
+
+    The current session is saved first; a busy session asks for
+    confirmation before its tasks are force-stopped.
+
+    Args:
+        ctx: Command context.
+        args: Unused extra arguments.
+
+    Returns:
+        A default result.
+    """
+    del args
+    state = ctx.state
+    manager = state.session_manager
+    if manager is None:
+        ctx.ui.warn("Session switching is not available in this run.")
+        return CommandResult()
+
+    await manager.save_current()
+    if not await _confirm_force_stop(ctx):
+        return CommandResult()
+
+    store = _session_store(ctx)
+    summaries, _skipped = store.list_sessions()
+    choice = await select_session(state.ui, summaries, allow_new=True)
+    if choice == manager.current_session_id:
+        ctx.ui.note("Already current.")
+        return CommandResult()
+    if choice == "new":
+        await manager.switch_new()
+        ctx.ui.note(f'Switched to "{manager.current_title}".')
+        return CommandResult()
+
+    try:
+        record = store.load(choice)
+    except SessionLoadError as exc:
+        ctx.ui.warn(f"Session could not be loaded; staying on the current one. ({exc})")
+        return CommandResult()
+    if await manager.switch_to(record):
+        ctx.ui.note(f'Switched to "{manager.current_title}".')
+        return CommandResult()
+    ctx.ui.warn("Session could not be restored; staying on the current one.")
+    return CommandResult()
+
+
+@command("demo", "/demo", "Replay a saved session as a read-only demo.")
+async def _cmd_demo(ctx: CommandContext, args: List[str]) -> CommandResult:
+    """Replay one saved session with synthetic pacing, read-only.
+
+    Args:
+        ctx: Command context.
+        args: Unused extra arguments.
+
+    Returns:
+        A default result.
+    """
+    del args
+    state = ctx.state
+    manager = state.session_manager
+    if manager is None:
+        ctx.ui.warn("Demo playback is not available in this run.")
+        return CommandResult()
+
+    store = _session_store(ctx)
+    summaries, _skipped = store.list_sessions()
+    if not summaries:
+        ctx.ui.warn("No saved sessions to replay.")
+        return CommandResult()
+
+    if not await _confirm_force_stop(ctx):
+        return CommandResult()
+    await manager.save_current()
+
+    choice = await select_session(state.ui, summaries, allow_new=False)
+    if choice == manager.current_session_id:
+        session = state.main_session()
+    else:
+        try:
+            record = store.load(choice)
+        except SessionLoadError as exc:
+            ctx.ui.warn(
+                f"Session could not be loaded; staying on the current one. ({exc})"
+            )
+            return CommandResult()
+        if not await manager.switch_to(record):
+            ctx.ui.warn("Session could not be restored; staying on the current one.")
+            return CommandResult()
+        session = state.main_session()
+
+    pump = getattr(state, "pump", None)
+    if pump is not None:
+        await pump.wait_idle()
+    player = DemoPlayer(
+        state.ui,
+        session,
+        title=manager.current_title,
+        key_source=TerminalKeySource(),
+        tool_manager=state.tool_manager,
+        root=Path(_workspace_path(state)),
+    )
+    await player.run()
     return CommandResult()
 
 

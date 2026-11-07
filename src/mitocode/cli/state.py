@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Any, List, Optional
 if TYPE_CHECKING:
     from mitocode.cli.approval import CliApprover
     from mitocode.cli.args import CliArgs
+    from mitocode.cli.pump import EventPump
+    from mitocode.cli.sessions import SessionManager
     from mitocode.cli.ui import CliUI
     from mitocode.core.agent.agent_orchestrator import AgentOrchestrator
     from mitocode.core.agent.agent_session import AgentSession
@@ -114,6 +116,11 @@ class CliState:  # pylint: disable=too-many-instance-attributes
             ``/status``.
         verbose: Whether full tool output is shown; ``/verbose`` toggles this
             together with :attr:`ui`'s flag.
+        session_manager: Owner of the current session's on-disk identity,
+            wired by the app after bootstrap; ``None`` in tests and before
+            the manager exists.
+        pump: The process-wide event pump, injected by the app right after
+            construction so session switches can drain it.
     """
 
     args: "CliArgs"
@@ -134,6 +141,8 @@ class CliState:  # pylint: disable=too-many-instance-attributes
     agents: List[dict] = field(default_factory=list)
     mcp_error: str = ""
     verbose: bool = False
+    session_manager: Optional["SessionManager"] = None
+    pump: Optional["EventPump"] = None
 
     def main_session(self) -> "AgentSession":
         """Return the interactive main agent's session.

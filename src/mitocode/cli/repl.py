@@ -27,6 +27,12 @@ A command or turn failure is logged and reported but never ends the process:
 only ``/exit``, ``/quit``, EOF or the double ``Ctrl+C`` stop the loop, which
 returns ``0``.  ``KeyboardInterrupt`` and ``CancelledError`` are not failures
 and keep propagating.
+
+**Every turn ends with a session save.**  After the counters are updated, the
+turn asks the state's :class:`~mitocode.cli.sessions.SessionManager` (when one
+is wired) to persist the tree and trigger background title generation, so a
+crash between prompts still leaves an up-to-date record on disk; a manager
+without persistence support is skipped silently.
 """
 
 from __future__ import annotations
@@ -261,6 +267,10 @@ class Repl:  # pylint: disable=too-many-instance-attributes
             tool_calls = max(0, self.state.tool_call_count - calls_before)
             self.ui.finish_turn(time.monotonic() - started, tokens, tool_calls)
             self.state.turn_count += 1
+            manager = self.state.session_manager
+            if manager is not None:
+                await manager.save_current()
+                manager.maybe_generate_title()
 
     # ------------------------------------------------------------------
     # Signals

@@ -6,6 +6,7 @@ providers, MCP managers and approvers are small fakes defined in this file;
 tool registration uses the real :class:`ToolManager`.
 """
 
+import json
 import os
 import sys
 from io import StringIO
@@ -33,6 +34,9 @@ EXPECTED_COMMANDS = {
     "model",
     "effort",
     "clear",
+    "save",
+    "sessions",
+    "demo",
     "agents",
     "tools",
     "skills",
@@ -129,6 +133,9 @@ class _FakeOrchestrator:
     async def create_agent(self, **kwargs):
         """Record a creation request and return the next id.
 
+        The bare session is registered so ``state.main_session()`` resolves
+        right after a ``/clear``, exactly as the real orchestrator does.
+
         Args:
             **kwargs: Session options such as ``name`` and ``description``.
 
@@ -137,6 +144,7 @@ class _FakeOrchestrator:
         """
         self.created += 1
         self.created_kwargs.append(kwargs)
+        self.sessions[self.next_id] = SimpleNamespace(agent_id=self.next_id)
         return self.next_id
 
 
@@ -789,3 +797,469 @@ async def test_status_shows_effort_row(tmp_path):
     ctx2, buffer2 = _ctx(tmp_path, answers=[])
     await dispatch("/status", ctx2)
     assert "not sent" in buffer2.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# /save, /sessions, /demo and the session-aware /clear, /status
+# ---------------------------------------------------------------------------
+
+
+class _FakeManager:
+    """Recording stand-in for :class:`~mitocode.cli.sessions.SessionManager`."""
+
+    def __init__(
+        self,
+        *,
+        current_id="20261107T100000Z-aaaaaaaa",
+        title="Saved one",
+        save_result=None,
+        switch_to_result=True,
+    ):
+        """Configure the scripted identity and outcomes.
+
+        Args:
+            current_id: Disk id reported as the current session.
+            title: Current title.
+            save_result: Path ``save_current`` returns, or ``None``.
+            switch_to_result: Whether ``switch_to`` succeeds.
+        """
+        self.current_id_value = current_id
+        self.title_value = title
+        self.save_result = save_result
+        self.switch_to_result = switch_to_result
+        self.saved_calls = []
+        self.started_new = []
+        self.attached = None
+        self.switched_to = []
+        self.switch_new_calls = 0
+        self.title_calls = 0
+
+    @property
+    def current_session_id(self):
+        """Return the scripted current disk id."""
+        return self.current_id_value
+
+    @property
+    def current_title(self):
+        """Return the scripted current title."""
+        return self.title_value
+
+    async def save_current(self, *, force=False, report_failure=False):
+        """Record one save request.
+
+        Args:
+            force: Whether the caller forced the write.
+            report_failure: Whether failures warn every time.
+
+        Returns:
+            The scripted save result path.
+        """
+        self.saved_calls.append((force, report_failure))
+        return self.save_result
+
+    async def start_new_session(self, session):
+        """Record a new-session registration."""
+        self.started_new.append(session)
+
+    def attach_record(self, record):
+        """Record the adopted record."""
+        self.attached = record
+
+    def maybe_generate_title(self):
+        """Count one title trigger."""
+        self.title_calls += 1
+
+    async def shutdown(self):
+        """Satisfy the exit path without doing anything."""
+
+    async def switch_to(self, record):
+        """Record a switch request and report the scripted outcome.
+
+        Args:
+            record: The loaded session document.
+
+        Returns:
+            The scripted success flag.
+        """
+        self.switched_to.append(record)
+        if self.switch_to_result:
+            self.title_value = str(record.get("title", "") or "")
+            return True
+        return False
+
+    async def switch_new(self):
+        """Record a switch-to-new request and adopt a fresh identity."""
+        self.switch_new_calls += 1
+        self.current_id_value = "20261107T110000Z-newnew01"
+        self.title_value = "New Session"
+
+
+def _write_session_file(tmp_path, record):
+    """Write one session record into *tmp_path*'s sessions directory.
+
+    Args:
+        tmp_path: Workspace root.
+        record: The schema document to store.
+
+    Returns:
+        The written path.
+    """
+    sessions_dir = tmp_path / ".mitocode" / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    path = sessions_dir / f"{record['session_id']}.json"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    return path
+
+
+def _record_for(session_id, *, title="Saved one", updated_at="2026-11-07T10:00:00Z"):
+    """Build a minimal valid session record.
+
+    Args:
+        session_id: Disk id of the record.
+        title: Record title.
+        updated_at: ISO timestamp controlling the panel sort order.
+
+    Returns:
+        The schema-shaped dict.
+    """
+    return {
+        "schema_version": 1,
+        "session_id": session_id,
+        "title": title,
+        "created_at": "2026-11-07T09:00:00Z",
+        "updated_at": updated_at,
+        "workspace": "/tmp/w",
+        "model": "model-x",
+        "main_agent_id": 0,
+        "agents": [
+            {
+                "agent_id": 0,
+                "name": "Main",
+                "description": "Interactive session",
+                "parent_id": None,
+                "system_prompt": "",
+                "messages": [],
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_save_notes_id_and_path(tmp_path):
+    """/save reports the session id and the written path."""
+    manager = _FakeManager(save_result=tmp_path / "s.json")
+    ctx, buffer = _ctx(tmp_path)
+    ctx.state.session_manager = manager
+
+    await dispatch("/save", ctx)
+
+    assert manager.saved_calls == [(True, True)]
+    assert "20261107T100000Z-aaaaaaaa" in buffer.getvalue()
+    assert str(tmp_path / "s.json") in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_save_without_manager_warns(tmp_path):
+    """/save without persistence support warns instead of raising."""
+    ctx, buffer = _ctx(tmp_path)
+
+    await dispatch("/save", ctx)
+
+    assert "not available" in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_save_without_a_session_warns(tmp_path):
+    """A ``None`` save result is reported as no session."""
+    manager = _FakeManager(save_result=None)
+    ctx, buffer = _ctx(tmp_path)
+    ctx.state.session_manager = manager
+
+    await dispatch("/save", ctx)
+
+    assert "No session to save." in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_sessions_without_manager_warns(tmp_path):
+    """/sessions without persistence support warns instead of raising."""
+    ctx, buffer = _ctx(tmp_path)
+
+    await dispatch("/sessions", ctx)
+
+    assert "not available" in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_sessions_busy_refusal_cancels_the_switch(tmp_path):
+    """A busy session with a ``n`` answer never leaves the current session."""
+    manager = _FakeManager()
+    ctx, buffer = _ctx(tmp_path, answers=["n"])
+    ctx.state.session_manager = manager
+    ctx.state.orchestrator = SimpleNamespace(
+        get_tree_snapshot=lambda: [],
+        get_session=lambda agent_id: None,
+        has_active_tasks=lambda: True,
+    )
+
+    await dispatch("/sessions", ctx)
+
+    assert "Switch cancelled." in buffer.getvalue()
+    assert manager.switched_to == [] and manager.switch_new_calls == 0
+    prompt = getattr(ctx.ui, "_prompt_session")
+    assert any("Force stop and switch" in message for message in prompt.messages)
+
+
+@pytest.mark.asyncio
+async def test_sessions_busy_confirmation_accepts_yes(tmp_path):
+    """A ``y`` answer on a busy session proceeds to the new-session branch."""
+    manager = _FakeManager()
+    ctx, buffer = _ctx(tmp_path, answers=["y"])
+    ctx.state.session_manager = manager
+    ctx.state.orchestrator = SimpleNamespace(
+        get_tree_snapshot=lambda: [],
+        get_session=lambda agent_id: None,
+        has_active_tasks=lambda: True,
+    )
+
+    await dispatch("/sessions", ctx)
+
+    assert manager.switch_new_calls == 1
+    assert 'Switched to "New Session".' in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_sessions_running_main_session_counts_as_busy(tmp_path):
+    """A RUNNING main session triggers the confirmation too."""
+    from mitocode.core.agent.agent_state import AgentState
+
+    manager = _FakeManager()
+    ctx, buffer = _ctx(tmp_path, answers=["n"])
+    ctx.state.session_manager = manager
+    session = SimpleNamespace(agent_id=0, state=AgentState.RUNNING, messages=[])
+    ctx.state.orchestrator = _FakeOrchestrator(sessions={0: session})
+
+    await dispatch("/sessions", ctx)
+
+    assert "Switch cancelled." in buffer.getvalue()
+    assert manager.switch_new_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_sessions_picking_current_session_notes_already_current(tmp_path):
+    """Selecting the id that is already current does not reload anything."""
+    manager = _FakeManager()
+    _write_session_file(tmp_path, _record_for(manager.current_session_id))
+    ctx, buffer = _ctx(tmp_path)
+    ctx.state.session_manager = manager
+
+    await dispatch("/sessions", ctx)
+
+    assert "Already current." in buffer.getvalue()
+    assert manager.switched_to == [] and manager.switch_new_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_sessions_switches_to_the_chosen_record(tmp_path):
+    """Choosing another session loads it and hands it to ``switch_to``."""
+    manager = _FakeManager()
+    other = _record_for(
+        "20261107T090000Z-bbbbbbbb", title="Other", updated_at="2026-11-07T11:00:00Z"
+    )
+    _write_session_file(tmp_path, _record_for(manager.current_session_id))
+    _write_session_file(tmp_path, other)
+    ctx, buffer = _ctx(tmp_path, answers=["1"])
+    ctx.state.session_manager = manager
+
+    await dispatch("/sessions", ctx)
+
+    assert manager.switched_to == [other]
+    assert ctx.state.session_manager.current_title == "Other"
+    assert 'Switched to "Other".' in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_sessions_new_choice_calls_switch_new(tmp_path):
+    """Choosing ``n`` starts a brand-new session under the manager."""
+    manager = _FakeManager()
+    _write_session_file(tmp_path, _record_for(manager.current_session_id))
+    _write_session_file(tmp_path, _record_for("20261107T090000Z-bbbbbbbb"))
+    ctx, buffer = _ctx(tmp_path, answers=["n"])
+    ctx.state.session_manager = manager
+
+    await dispatch("/sessions", ctx)
+
+    assert manager.switch_new_calls == 1
+    assert 'Switched to "New Session".' in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_sessions_load_failure_keeps_the_current_session(tmp_path, monkeypatch):
+    """A load failure warns and leaves the manager untouched."""
+    import mitocode.cli.commands as commands_module
+
+    manager = _FakeManager()
+    _write_session_file(tmp_path, _record_for(manager.current_session_id))
+    _write_session_file(tmp_path, _record_for("20261107T090000Z-bbbbbbbb"))
+    ctx, buffer = _ctx(tmp_path, answers=["2"])
+    ctx.state.session_manager = manager
+
+    async def fake_select(ui, summaries, *, allow_new=True):
+        return "20261107T100000Z-deadbeef"
+
+    monkeypatch.setattr(commands_module, "select_session", fake_select)
+
+    await dispatch("/sessions", ctx)
+
+    assert "could not be loaded" in buffer.getvalue()
+    assert manager.switched_to == [] and manager.switch_new_calls == 0
+
+
+class _FakePlayer:
+    """Recording stand-in for :class:`~mitocode.cli.demo.DemoPlayer`."""
+
+    instances = []
+
+    def __init__(
+        self,
+        ui,
+        session,
+        *,
+        title,
+        key_source,
+        tool_manager=None,
+        root=None,
+        controls=None,
+        sleeper=None,
+    ):
+        """Record the constructor arguments.
+
+        Args:
+            ui: Terminal surface.
+            session: Session to replay.
+            title: Demo headline title.
+            key_source: Key source instance.
+            tool_manager: Tool registry for display names.
+            root: Workspace root for path display.
+            controls: Optional injected controls.
+            sleeper: Optional injected sleeper.
+        """
+        self.ui = ui
+        self.session = session
+        self.title = title
+        self.key_source = key_source
+        self.tool_manager = tool_manager
+        self.root = root
+        self.run_calls = 0
+        _FakePlayer.instances.append(self)
+
+    async def run(self):
+        """Count one playback."""
+        self.run_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_demo_without_manager_warns(tmp_path):
+    """/demo without persistence support warns instead of raising."""
+    ctx, buffer = _ctx(tmp_path)
+
+    await dispatch("/demo", ctx)
+
+    assert "not available" in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_demo_without_saved_sessions_warns(tmp_path):
+    """/demo with an empty sessions directory warns and returns."""
+    manager = _FakeManager()
+    ctx, buffer = _ctx(tmp_path)
+    ctx.state.session_manager = manager
+
+    await dispatch("/demo", ctx)
+
+    assert "No saved sessions to replay." in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_demo_replays_the_current_session_in_place(tmp_path, monkeypatch):
+    """Choosing the current session replays it without switching."""
+    import mitocode.cli.commands as commands_module
+
+    monkeypatch.setattr(commands_module, "DemoPlayer", _FakePlayer)
+    monkeypatch.setattr(commands_module, "TerminalKeySource", lambda: object())
+    _FakePlayer.instances.clear()
+
+    manager = _FakeManager()
+    _write_session_file(tmp_path, _record_for(manager.current_session_id))
+    ctx, buffer = _ctx(tmp_path)
+    ctx.state.session_manager = manager
+    wait_idle_calls = []
+
+    async def fake_wait_idle():
+        wait_idle_calls.append(True)
+
+    ctx.state.pump = SimpleNamespace(wait_idle=fake_wait_idle)
+
+    await dispatch("/demo", ctx)
+
+    assert len(_FakePlayer.instances) == 1
+    player = _FakePlayer.instances[0]
+    assert player.run_calls == 1
+    assert player.session is ctx.state.main_session()
+    assert player.title == "Saved one"
+    assert wait_idle_calls == [True]
+    assert manager.switched_to == [] and manager.switch_new_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_demo_switches_before_replaying_another_session(tmp_path, monkeypatch):
+    """Choosing another session switches to it and replays that session."""
+    import mitocode.cli.commands as commands_module
+
+    monkeypatch.setattr(commands_module, "DemoPlayer", _FakePlayer)
+    monkeypatch.setattr(commands_module, "TerminalKeySource", lambda: object())
+    _FakePlayer.instances.clear()
+
+    manager = _FakeManager()
+    other = _record_for(
+        "20261107T090000Z-bbbbbbbb", title="Other", updated_at="2026-11-07T11:00:00Z"
+    )
+    _write_session_file(tmp_path, _record_for(manager.current_session_id))
+    _write_session_file(tmp_path, other)
+    ctx, buffer = _ctx(tmp_path, answers=["1"])
+    ctx.state.session_manager = manager
+
+    await dispatch("/demo", ctx)
+
+    assert manager.switched_to == [other]
+    assert len(_FakePlayer.instances) == 1
+    assert _FakePlayer.instances[0].run_calls == 1
+    assert _FakePlayer.instances[0].title == "Other"
+
+
+@pytest.mark.asyncio
+async def test_clear_saves_the_old_session_and_registers_the_new(tmp_path):
+    """/clear with a manager force-saves before destroying and starts a new one."""
+    manager = _FakeManager()
+    ctx, buffer = _ctx(tmp_path)
+    ctx.state.session_manager = manager
+
+    await dispatch("/clear", ctx)
+
+    assert manager.saved_calls == [(True, False)]
+    assert len(manager.started_new) == 1
+    assert manager.started_new[0] is ctx.state.main_session()
+    assert "New session #7" in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_status_shows_the_session_title(tmp_path):
+    """/status renders the current title when a manager exists."""
+    manager = _FakeManager(title="Fix the parser bug")
+    ctx, buffer = _ctx(tmp_path)
+    ctx.state.session_manager = manager
+
+    await dispatch("/status", ctx)
+
+    assert "title" in buffer.getvalue()
+    assert "Fix the parser bug" in buffer.getvalue()

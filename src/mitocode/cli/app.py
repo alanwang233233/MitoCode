@@ -14,16 +14,20 @@ The startup order is a constraint, not a preference:
    logging takeover, in that order: a declined workspace must not create the
    log directory, and every log lives inside the workspace;
 3. provider setup (interactive when the credential file is missing), then the
-   console's UI, approver and :func:`bootstrap`, which resolves the workspace,
-   registers tools, starts MCP and creates the main session;
-4. state, event pump task and REPL, in that order, because the pump must be
-   consuming events before the first turn can produce any;
+   console's UI, approver, saved-session selection (``SessionStore`` +
+   :func:`~mitocode.cli.sessions.select_session`, which only needs the
+   workspace) and :func:`bootstrap`, which resolves the workspace, registers
+   tools, starts MCP and restores or creates the main session;
+4. state, session manager, autosave task, event pump task and REPL, in that
+   order, because the pump must be consuming events before the first turn can
+   produce any;
 5. ``SIGINT`` is routed to :meth:`Repl.handle_sigint` when the platform supports
    it, then the REPL runs.
 
-Teardown lives in ``finally`` and is equally ordered: the pump task is
-cancelled and awaited first, because it renders into the UI and MCP shutdown
-may log, then ``mcp.stop()`` runs under :func:`asyncio.shield` so a second
+Teardown lives in ``finally`` and is equally ordered: the autosave task is
+stopped first, then the session manager writes its final forced save, then the
+pump task is cancelled and awaited, because it renders into the UI and MCP
+shutdown may log; ``mcp.stop()`` runs under :func:`asyncio.shield` so a second
 ``Ctrl+C`` cannot leave a subprocess behind.  MCP shutdown failures are logged
 and never change the exit code.  The ``try`` starts as soon as
 :func:`bootstrap` returns, so a banner, state, pump, REPL or task-creation
@@ -63,6 +67,13 @@ from mitocode.cli.errors import MitoCodeCliConfigError, MitoCodeCliError
 from mitocode.cli.logging_setup import configure_logging
 from mitocode.cli.pump import EventPump
 from mitocode.cli.repl import Repl
+from mitocode.cli.sessions import (
+    SessionAutosaver,
+    SessionLoadError,
+    SessionManager,
+    SessionStore,
+    select_session,
+)
 from mitocode.cli.state import CliState
 from mitocode.cli.theme import MITOCODE_THEME
 from mitocode.cli.ui import BannerInfo, CliUI
@@ -225,10 +236,37 @@ async def _amain(args: CliArgs, log_path: Any, console: Console) -> int:
         history_path=Path(args.workspace) / MITOCODE_CONFIG_PATH / "history",
     )
     approver = CliApprover(ui, ApprovalPolicy(args.permission_mode))
-    boot = await bootstrap(args, ui, approver)
+
+    # Saved-session selection runs before bootstrap: it only needs the
+    # workspace to exist, and the choice decides what bootstrap restores.
+    store = SessionStore(Path(args.workspace))
+    summaries, skipped = store.list_sessions()
+    if skipped > 0:
+        ui.warn(f"{skipped} session file(s) could not be read and were skipped.")
+
+    restore: Optional[dict] = None
+    # Zero or one saved session needs no interactive choice: the panel (and
+    # its prompting, hence EOF/interrupt paths) only exists from two on.
+    if len(summaries) <= 1:
+        choice = summaries[0].session_id if summaries else "new"
+    else:
+        try:
+            choice = await select_session(ui, summaries)
+        except EOFError:
+            return FAILURE_EXIT_CODE
+    if choice != "new":
+        try:
+            restore = store.load(choice)
+        except SessionLoadError as exc:
+            ui.warn(f"Saved session could not be loaded; starting a new one. ({exc})")
+            restore = None
+
+    boot = await bootstrap(args, ui, approver, restore=restore)
 
     pump_task: Optional[asyncio.Task[None]] = None
     state: Optional[CliState] = None
+    manager: Optional[SessionManager] = None
+    autosaver: Optional[SessionAutosaver] = None
     try:
         ui.show_banner(_banner_info(boot))
 
@@ -248,13 +286,36 @@ async def _amain(args: CliArgs, log_path: Any, console: Console) -> int:
             mcp_error=boot.mcp_error,
             verbose=args.verbose,
         )
+        manager = SessionManager(
+            store,
+            boot.orchestrator,
+            ui,
+            state=state,
+            provider=boot.provider,
+            workspace=str(Path(args.workspace).resolve()),
+        )
+        state.session_manager = manager
+        if boot.restore_succeeded and restore is not None:
+            manager.attach_record(restore)
+            if manager.current_title == "New Session":
+                manager.maybe_generate_title()
+        else:
+            await manager.start_new_session(boot.main_session)
+        autosaver = SessionAutosaver(manager)
+        autosaver.start()
+
         pump = EventPump(boot.orchestrator.event_queue, ui, state)
+        state.pump = pump
         pump_task = asyncio.create_task(pump.run())
         repl = Repl(state, ui, pump, approver)
         _install_sigint_handler(asyncio.get_running_loop(), repl)
 
         return await repl.run()
     finally:
+        if autosaver is not None:
+            await autosaver.stop()
+        if manager is not None:
+            await manager.shutdown()
         if pump_task is not None:
             pump_task.cancel()
             await asyncio.gather(pump_task, return_exceptions=True)

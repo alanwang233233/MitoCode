@@ -720,6 +720,174 @@ async def test_bootstrap_passes_provider_api_key_for_redaction(tmp_path, monkeyp
     ), "orchestrator 必须拿到字面 key 才能在错误事件与日志中抹除它"
 
 
+# ──────────────────────────────────────────────
+# bootstrap(restore=...): 启动时恢复已保存会话
+# ──────────────────────────────────────────────
+
+
+def _restore_record() -> dict:
+    """Build a minimal valid session record for restore tests.
+
+    Returns:
+        A schema-shaped record with one main agent carrying one user message.
+    """
+    return {
+        "schema_version": 1,
+        "session_id": "20261107T000000Z-abcdef01",
+        "title": "Old session",
+        "created_at": "2026-11-07T00:00:00Z",
+        "updated_at": "2026-11-07T00:00:00Z",
+        "workspace": "/tmp/w",
+        "model": "m",
+        "main_agent_id": 0,
+        "agents": [
+            {
+                "agent_id": 0,
+                "name": "Main",
+                "description": "Interactive session",
+                "parent_id": None,
+                "system_prompt": "restored prompt",
+                "messages": [
+                    {
+                        "kind": "text",
+                        "role": "user",
+                        "message": "hi",
+                        "reasoning_content": "",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+class _RestoreOrchestrator:
+    """Recording stand-in for the orchestrator's reset/restore/create calls.
+
+    Attributes:
+        reset_calls: Number of ``reset_sessions`` invocations.
+        restore_calls: Lists of agent records passed to ``restore_tree``.
+        created: Keyword arguments of every ``create_session`` call.
+    """
+
+    def __init__(self, restore_error=None):
+        self.reset_calls = 0
+        self.restore_calls = []
+        self.created = []
+        self.restore_error = restore_error
+
+    async def reset_sessions(self):
+        """Count one registry reset."""
+        self.reset_calls += 1
+
+    async def restore_tree(self, agents):
+        """Rebuild fake sessions, or raise the scripted error.
+
+        Args:
+            agents: Agent records from the session document.
+
+        Returns:
+            Sessions keyed by their original agent id.
+
+        Raises:
+            Exception: The scripted ``restore_error``, when set.
+        """
+        self.restore_calls.append(list(agents))
+        if self.restore_error is not None:
+            raise self.restore_error
+        sessions = {}
+        for agent in agents:
+            sessions[agent["agent_id"]] = SimpleNamespace(
+                agent_id=agent["agent_id"], system_prompt="", messages=[]
+            )
+        return sessions
+
+    async def create_session(self, **kwargs):
+        """Record a creation request and return a bare main session.
+
+        Args:
+            **kwargs: Session options.
+
+        Returns:
+            A namespace carrying the agent id and the options.
+        """
+        self.created.append(kwargs)
+        return SimpleNamespace(agent_id=0, **kwargs)
+
+
+def _patch_restore(monkeypatch, restore_error=None) -> _RestoreOrchestrator:
+    """Install the restore-recording orchestrator on the bootstrap module.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        restore_error: Exception ``restore_tree`` should raise, or ``None``.
+
+    Returns:
+        The orchestrator instance bootstrap will receive.
+    """
+    orchestrator = _RestoreOrchestrator(restore_error)
+    monkeypatch.setattr(bootstrap_module, "ChatProviderOpenAI", _FakeProvider)
+    monkeypatch.setattr(bootstrap_module, "McpManager", _FakeMcp)
+    monkeypatch.setattr(
+        bootstrap_module, "AgentOrchestrator", lambda **kw: orchestrator
+    )
+    return orchestrator
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_restore_rebuilds_the_saved_tree(tmp_path, monkeypatch):
+    """A valid record restores ids, messages and the system prompt."""
+    ORDERS.clear()
+    orchestrator = _patch_restore(monkeypatch)
+    ui = _ui()
+
+    result = await bootstrap(
+        _provider_args(tmp_path), ui, CliApprover(ui), restore=_restore_record()
+    )
+
+    assert result.restore_succeeded is True
+    assert result.restore_error == ""
+    assert result.main_session.agent_id == 0
+    assert result.main_session.system_prompt == "restored prompt"
+    assert [block.message for block in result.main_session.messages] == ["hi"]
+    assert orchestrator.reset_calls == 1, "恢复前必须先清空注册表"
+    assert orchestrator.created == [], "恢复成功时不得再新建 main"
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_restore_failure_falls_back_to_a_new_session(
+    tmp_path, monkeypatch
+):
+    """A failing restore warns nobody, cleans the registry and creates Main."""
+    ORDERS.clear()
+    orchestrator = _patch_restore(
+        monkeypatch, restore_error=ValueError("duplicate agent id")
+    )
+    ui = _ui()
+
+    result = await bootstrap(
+        _provider_args(tmp_path), ui, CliApprover(ui), restore=_restore_record()
+    )
+
+    assert result.restore_succeeded is False
+    assert result.restore_error == "duplicate agent id"
+    assert len(orchestrator.created) == 1, "回退路径必须新建一个 main"
+    assert orchestrator.reset_calls == 2, "失败后必须再清一次注册表"
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_without_restore_reports_no_restore(tmp_path, monkeypatch):
+    """The default path creates the session and reports no restore attempt."""
+    ORDERS.clear()
+    _patch(monkeypatch)
+    ui = _ui()
+
+    result = await bootstrap(_provider_args(tmp_path), ui, CliApprover(ui))
+
+    assert result.restore_succeeded is False
+    assert result.restore_error == ""
+    assert result.main_session.agent_id == 0
+
+
 @pytest.mark.asyncio
 async def test_unknown_effort_tier_warns_at_startup(tmp_path, monkeypatch):
     """未知 effort 档位启动时警告一次，且原值进入 provider settings."""

@@ -69,6 +69,8 @@ from mitocode.core.workspace.workspace import Workspace
 if TYPE_CHECKING:  # pragma: no cover - imported for annotations only
     from mitocode.core.agent.agent_session import AgentSession
 
+from mitocode.cli.sessions import _agent_record, restore_agent_messages
+
 CONFIG_FILENAME = "config.json"
 """Workspace configuration file name inside the ``.mitocode`` directory."""
 
@@ -424,6 +426,10 @@ class Bootstrapped:  # pylint: disable=too-many-instance-attributes
         skills_manager: Skills manager over the workspace root, with its
             startup discovery already run.  Always present; its catalogue may
             be empty.
+        restore_succeeded: Whether a *restore* document was applied to the
+            orchestrator; ``False`` when no record was passed or the restore
+            fell back to a fresh session.
+        restore_error: Exception text of a failed restore, or ``""``.
     """
 
     args: CliArgs
@@ -437,6 +443,8 @@ class Bootstrapped:  # pylint: disable=too-many-instance-attributes
     mcp_manager: Optional[McpManager]
     skills_manager: SkillsManager
     mcp_error: str = ""
+    restore_succeeded: bool = False
+    restore_error: str = ""
 
 
 def build_system_prompt(workspace: Path, skills: Sequence[Skill] = ()) -> str:
@@ -501,7 +509,9 @@ def build_skills_manager(workspace: Workspace) -> SkillsManager:
     return SkillsManager(list(skills_roots(workspace)))
 
 
-async def bootstrap(args: CliArgs, ui: CliUI, approver: CliApprover) -> Bootstrapped:
+async def bootstrap(
+    args: CliArgs, ui: CliUI, approver: CliApprover, restore: Optional[dict] = None
+) -> Bootstrapped:
     """Assemble a CLI run from arguments to an interactive main session.
 
     The order is a constraint, not a preference: the workspace has to exist
@@ -516,13 +526,22 @@ async def bootstrap(args: CliArgs, ui: CliUI, approver: CliApprover) -> Bootstra
     and is reported through ``ui.warn``; a malformed explicit ``--mcp-config``
     file is the user's own pointer and aborts startup.
 
+    When *restore* carries a saved session document, the main session is not
+    created but rebuilt from it: the registry is reset, the tree is restored
+    with its original ids and the message blocks are filled in.  Any failure
+    is logged, the registry is cleaned again and a fresh ``Main`` session is
+    created instead; the failure never aborts startup.
+
     Args:
         args: Parsed command line arguments.
         ui: Console surface used for startup warnings.
         approver: Approval policy installed in the tool context.
+        restore: A validated session document from ``SessionStore.load``, or
+            ``None`` to start a brand-new session.
 
     Returns:
-        The started components, including the main session.
+        The started components, including the main session, and whether the
+        restore succeeded.
 
     Raises:
         MitoCodeCliConfigError: The workspace or provider configuration is
@@ -571,9 +590,27 @@ async def bootstrap(args: CliArgs, ui: CliUI, approver: CliApprover) -> Bootstra
         )
         tool_context.attach_orchestrator(orchestrator)
 
-        main_session = await orchestrator.create_session(
-            name="Main", description="Interactive session"
-        )
+        main_session: Optional[AgentSession] = None
+        restore_succeeded = False
+        restore_error = ""
+        if restore is not None:
+            try:
+                await orchestrator.reset_sessions()
+                sessions = await orchestrator.restore_tree(restore.get("agents") or [])
+                for agent_id, session in sessions.items():
+                    agent_record = _agent_record(restore, agent_id)
+                    if agent_record is not None:
+                        restore_agent_messages(session, agent_record)
+                main_session = sessions[restore["main_agent_id"]]
+                restore_succeeded = True
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                restore_error = str(exc) or type(exc).__name__
+                loguru_logger.exception("Session restore failed")
+                await orchestrator.reset_sessions()
+        if main_session is None:
+            main_session = await orchestrator.create_session(
+                name="Main", description="Interactive session"
+            )
     except BaseException:
         # MCP is live at this point and its manager would otherwise be lost
         # with the exception, orphaning every server subprocess it started.
@@ -593,6 +630,8 @@ async def bootstrap(args: CliArgs, ui: CliUI, approver: CliApprover) -> Bootstra
         mcp_manager=mcp_manager,
         skills_manager=skills_manager,
         mcp_error=mcp_error,
+        restore_succeeded=restore_succeeded,
+        restore_error=restore_error,
     )
 
 

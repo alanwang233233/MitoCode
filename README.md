@@ -24,3 +24,30 @@ read from the environment, and nothing is written outside the workspace.
 to work elsewhere. Type `/help` for the available slash commands and `/exit`
 (or press `Ctrl+D`) to leave. `python -m mitocode` is equivalent, and
 `mitocode --version` / `mitocode --help` work without a terminal.
+
+## Sessions
+
+Every conversation is persisted under `<workspace>/.mitocode/sessions/` as one
+JSON file per session. The directory is created with `0o700` and each record is
+written with `0o600`, so session history stays private to the workspace.
+
+- **Startup choice**: with no saved session the CLI starts a new one; with
+  exactly one it restores it directly; with two or more a panel lists them
+  newest-first and you pick by number (`n` starts a new session). Files that
+  cannot be read or validated are skipped with one warning.
+- **`/save`**: force-saves the current session to disk right away.
+- **`/sessions`**: saves the current session, lists the saved ones and switches
+  to the chosen record (`n` = new session). If the session is still running —
+  an agent task, a running turn or a background tool — MitoCode asks
+  `Force stop and switch?` first.
+- **`/demo`**: replays a saved session read-only in the terminal with
+  synthetic pacing: `←`/`→` change the speed, `space` pauses/resumes, and
+  `q`, `Esc` or `Ctrl+C` quit the playback. Playback never calls the model or
+  changes the session history.
+- **Titles and autosave**: a fresh session is titled `New Session`; after the
+  first turn a title is generated in the background from the first user
+  message, and an autosave runs every 30 seconds plus at the end of every
+  turn and on exit.
+- **Failure fallback**: if a saved session cannot be loaded or restored, the
+  CLI warns and starts a new session instead — startup never aborts over a
+  broken session file, and a failed restore never overwrites the old file.

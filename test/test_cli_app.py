@@ -8,6 +8,7 @@ opens a terminal, raises a real signal or reaches the network.
 """
 
 import asyncio
+import json
 import os
 import signal
 import sys
@@ -23,6 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from mitocode.cli import app as app_module
 from mitocode.cli.args import CliArgs
 from mitocode.cli.errors import MitoCodeCliConfigError
+from mitocode.cli.sessions import SessionStore
 from mitocode.cli.theme import MITOCODE_THEME
 from mitocode.core.exception.mitocode_exception import MitoCodeBaseError
 from mitocode.core.tool.tool_manager import ToolManager
@@ -117,7 +119,176 @@ def _boot(
     )
 
 
-def _install_common_fakes(monkeypatch, tmp_path, boot, events=None):
+def _session_record(
+    session_id, *, title="Saved one", updated_at="2026-11-07T10:00:00Z"
+):
+    """Build a minimal valid session record for startup-selection tests.
+
+    Args:
+        session_id: Disk id the record pretends to be stored under.
+        title: Record title.
+        updated_at: ISO timestamp controlling the panel sort order.
+
+    Returns:
+        A schema-shaped record with one empty main agent.
+    """
+    return {
+        "schema_version": 1,
+        "session_id": session_id,
+        "title": title,
+        "created_at": "2026-11-07T09:00:00Z",
+        "updated_at": updated_at,
+        "workspace": "/tmp/w",
+        "model": "model-x",
+        "main_agent_id": 0,
+        "agents": [
+            {
+                "agent_id": 0,
+                "name": "Main",
+                "description": "Interactive session",
+                "parent_id": None,
+                "system_prompt": "",
+                "messages": [],
+            }
+        ],
+    }
+
+
+def _write_record(tmp_path, record):
+    """Write a session record into *tmp_path*'s sessions directory.
+
+    Args:
+        tmp_path: Workspace root.
+        record: The schema document to store.
+
+    Returns:
+        The written path.
+    """
+    sessions_dir = tmp_path / ".mitocode" / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    path = sessions_dir / f"{record['session_id']}.json"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    return path
+
+
+def _serializable_boot(tmp_path, **overrides):
+    """Build a fake boot whose orchestrator can be serialized.
+
+    The real :class:`~mitocode.cli.sessions.SessionManager` reads the tree
+    through ``get_tree_snapshot``/``get_session``; this boot provides both so
+    a test can exercise the real manager and store end to end.
+
+    Args:
+        tmp_path: Directory used as the workspace root.
+        **overrides: Passed through to :func:`_boot`.
+
+    Returns:
+        The boot namespace with a serializable orchestrator.
+    """
+    boot = _boot(tmp_path, **overrides)
+    session = SimpleNamespace(agent_id=0, system_prompt="", messages=[])
+    boot.orchestrator = SimpleNamespace(
+        event_queue=asyncio.Queue(),
+        get_tree_snapshot=lambda: [
+            {
+                "id": 0,
+                "name": "Main",
+                "description": "Interactive session",
+                "parent_id": None,
+                "sub_agent": [],
+            }
+        ],
+        get_session=lambda agent_id: session if agent_id == 0 else None,
+    )
+    return boot
+
+
+def _patch_store(monkeypatch, tmp_path):
+    """Point the app's session store at *tmp_path*.
+
+    ``main([])`` parses a default workspace, so without this patch the
+    startup selection would read and write the repository's own
+    ``.mitocode/sessions`` directory.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        tmp_path: Workspace root the store is rooted at.
+    """
+    real_store = SessionStore(tmp_path)
+    monkeypatch.setattr(app_module, "SessionStore", lambda workspace: real_store)
+
+
+def _patch_session_fakes(monkeypatch, boot, timeline):
+    """Replace SessionManager/SessionAutosaver with recording fakes.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        boot: Fake boot; the manager instance is attached as
+            ``boot.session_manager`` for assertions.
+        timeline: Event list the fakes append their lifecycle to.
+    """
+
+    class FakeManager:
+        """Recording stand-in for :class:`SessionManager`."""
+
+        def __init__(
+            self, store, orchestrator, ui, *, state, provider, workspace, clock=None
+        ):
+            timeline.append("manager-created")
+            boot.session_manager = self
+            self.store = store
+            self.state = state
+            self.attached = None
+            self.started_new = None
+            self.title_calls = 0
+            self.shutdown_calls = 0
+
+        @property
+        def current_session_id(self):
+            return "fake-session-id"
+
+        @property
+        def current_title(self):
+            return "New Session"
+
+        async def save_current(self, *, force=False, report_failure=False):
+            return None
+
+        async def start_new_session(self, main_session):
+            self.started_new = main_session
+            timeline.append("start-new")
+
+        def attach_record(self, record):
+            self.attached = record
+            timeline.append("attach_record")
+
+        def maybe_generate_title(self):
+            self.title_calls += 1
+
+        async def shutdown(self):
+            self.shutdown_calls += 1
+            timeline.append("manager-shutdown")
+
+    class FakeAutosaver:
+        """Recording stand-in for :class:`SessionAutosaver`."""
+
+        def __init__(self, manager, interval=30.0):
+            timeline.append("autosaver-created")
+            self.manager = manager
+
+        def start(self):
+            timeline.append("autosaver-start")
+
+        async def stop(self):
+            timeline.append("autosaver-stop")
+
+    monkeypatch.setattr(app_module, "SessionManager", FakeManager)
+    monkeypatch.setattr(app_module, "SessionAutosaver", FakeAutosaver)
+
+
+def _install_common_fakes(
+    monkeypatch, tmp_path, boot, events=None, *, session_fakes=True
+):
     """Replace the application's collaborators with recording fakes.
 
     Args:
@@ -126,14 +297,18 @@ def _install_common_fakes(monkeypatch, tmp_path, boot, events=None):
         boot: Fake returned by :func:`bootstrap`.
         events: List that records lifecycle order; a new one is created when
             ``None``.
+        session_fakes: Whether to patch ``SessionManager``/``SessionAutosaver``
+            with recording fakes; ``False`` leaves the real ones in place.
 
     Returns:
         The event list in recording order.
     """
     timeline = [] if events is None else events
 
-    async def fake_bootstrap(args, ui, approver):
+    async def fake_bootstrap(args, ui, approver, restore=None):
         timeline.append("bootstrap")
+        boot.received_restore = restore
+        boot.restore_succeeded = restore is not None
         return boot
 
     class FakePump:
@@ -174,6 +349,9 @@ def _install_common_fakes(monkeypatch, tmp_path, boot, events=None):
     monkeypatch.setattr(app_module, "bootstrap", fake_bootstrap)
     monkeypatch.setattr(app_module, "EventPump", FakePump)
     monkeypatch.setattr(app_module, "Repl", FakeRepl)
+    _patch_store(monkeypatch, tmp_path)
+    if session_fakes:
+        _patch_session_fakes(monkeypatch, boot, timeline)
     # Signal installation is covered on its own; keeping it out of these tests
     # leaves pytest's own SIGINT handling untouched.
     monkeypatch.setattr(app_module, "_install_sigint_handler", lambda loop, repl: False)
@@ -215,14 +393,21 @@ def test_main_delegates_to_bootstrap_and_repl(monkeypatch, tmp_path):
 
     assert app_module.main([]) == 0
     assert stopped == ["stop"]
-    # The pump task is created before the REPL runs, is cancelled after it
-    # returns, and the MCP manager is stopped only after the pump is gone.
+    # The session manager and autosaver are wired right after bootstrap, the
+    # pump task is created before the REPL runs, and teardown stops the
+    # autosaver, then the manager, then the pump, then MCP.
     assert timeline == [
         "bootstrap",
+        "manager-created",
+        "start-new",
+        "autosaver-created",
+        "autosaver-start",
         "pump-created",
         "repl-created",
         "repl-started",
         "pump-started",
+        "autosaver-stop",
+        "manager-shutdown",
         "pump-cancelled",
     ]
 
@@ -315,7 +500,7 @@ def test_banner_has_model_workspace_and_mcp_state(monkeypatch, tmp_path, capsys)
 
 
 def test_config_error_prints_a_panel_and_returns_1(monkeypatch, tmp_path, capsys):
-    async def failing_bootstrap(args, ui, approver):
+    async def failing_bootstrap(args, ui, approver, restore=None):
         raise MitoCodeCliConfigError("provider rejected the request")
 
     monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
@@ -323,6 +508,7 @@ def test_config_error_prints_a_panel_and_returns_1(monkeypatch, tmp_path, capsys
         app_module, "configure_logging", lambda **kw: tmp_path / "cli.log"
     )
     monkeypatch.setattr(app_module, "bootstrap", failing_bootstrap)
+    _patch_store(monkeypatch, tmp_path)
 
     assert app_module.main([]) == 1
     error = capsys.readouterr().err
@@ -330,7 +516,7 @@ def test_config_error_prints_a_panel_and_returns_1(monkeypatch, tmp_path, capsys
 
 
 def test_base_error_prints_a_panel_and_returns_1(monkeypatch, tmp_path, capsys):
-    async def failing_bootstrap(args, ui, approver):
+    async def failing_bootstrap(args, ui, approver, restore=None):
         raise MitoCodeBaseError("workspace is too old")
 
     monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
@@ -338,13 +524,14 @@ def test_base_error_prints_a_panel_and_returns_1(monkeypatch, tmp_path, capsys):
         app_module, "configure_logging", lambda **kw: tmp_path / "cli.log"
     )
     monkeypatch.setattr(app_module, "bootstrap", failing_bootstrap)
+    _patch_store(monkeypatch, tmp_path)
 
     assert app_module.main([]) == 1
     assert "workspace is too old" in capsys.readouterr().err
 
 
 def test_keyboard_interrupt_returns_130(monkeypatch, tmp_path):
-    async def interrupted_bootstrap(args, ui, approver):
+    async def interrupted_bootstrap(args, ui, approver, restore=None):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
@@ -352,12 +539,13 @@ def test_keyboard_interrupt_returns_130(monkeypatch, tmp_path):
         app_module, "configure_logging", lambda **kw: tmp_path / "cli.log"
     )
     monkeypatch.setattr(app_module, "bootstrap", interrupted_bootstrap)
+    _patch_store(monkeypatch, tmp_path)
 
     assert app_module.main([]) == 130
 
 
 def test_unexpected_exception_is_reported_and_returns_1(monkeypatch, tmp_path, capsys):
-    async def exploding_bootstrap(args, ui, approver):
+    async def exploding_bootstrap(args, ui, approver, restore=None):
         raise RuntimeError("unexpected boom")
 
     monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
@@ -365,6 +553,7 @@ def test_unexpected_exception_is_reported_and_returns_1(monkeypatch, tmp_path, c
         app_module, "configure_logging", lambda **kw: tmp_path / "cli.log"
     )
     monkeypatch.setattr(app_module, "bootstrap", exploding_bootstrap)
+    _patch_store(monkeypatch, tmp_path)
 
     assert app_module.main([]) == 1
     assert "unexpected boom" in capsys.readouterr().err
@@ -412,6 +601,7 @@ def test_is_interactive_requires_both_streams(monkeypatch):
 def test_banner_failure_still_stops_mcp(monkeypatch, tmp_path, capsys):
     """A post-bootstrap failure must release the MCP servers it started."""
     stopped = []
+    timeline = []
 
     async def fake_stop():
         stopped.append("stop")
@@ -429,7 +619,7 @@ def test_banner_failure_still_stops_mcp(monkeypatch, tmp_path, capsys):
         def show_banner(self, info):
             raise RuntimeError("banner failed")
 
-    async def fake_bootstrap(args, ui, approver):
+    async def fake_bootstrap(args, ui, approver, restore=None):
         return boot
 
     monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
@@ -438,6 +628,8 @@ def test_banner_failure_still_stops_mcp(monkeypatch, tmp_path, capsys):
     )
     monkeypatch.setattr(app_module, "bootstrap", fake_bootstrap)
     monkeypatch.setattr(app_module, "CliUI", ExplodingBannerUI)
+    _patch_store(monkeypatch, tmp_path)
+    _patch_session_fakes(monkeypatch, boot, timeline)
 
     assert app_module.main([]) == 1
     assert stopped == ["stop"]
@@ -464,6 +656,7 @@ def test_repl_constructor_failure_cancels_pump_and_stops_mcp(monkeypatch, tmp_pa
     """A failure while wiring the REPL leaves no task and no live MCP."""
     stopped = []
     created = []
+    timeline = []
 
     async def fake_stop():
         stopped.append("stop")
@@ -491,7 +684,9 @@ def test_repl_constructor_failure_cancels_pump_and_stops_mcp(monkeypatch, tmp_pa
         created.append(task)
         return task
 
-    async def fake_bootstrap(args, ui, approver):
+    async def fake_bootstrap(args, ui, approver, restore=None):
+        boot.received_restore = restore
+        boot.restore_succeeded = restore is not None
         return boot
 
     monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
@@ -502,6 +697,8 @@ def test_repl_constructor_failure_cancels_pump_and_stops_mcp(monkeypatch, tmp_pa
     monkeypatch.setattr(app_module, "EventPump", FakePump)
     monkeypatch.setattr(app_module, "Repl", ExplodingRepl)
     monkeypatch.setattr(app_module.asyncio, "create_task", fake_create_task)
+    _patch_store(monkeypatch, tmp_path)
+    _patch_session_fakes(monkeypatch, boot, timeline)
 
     assert app_module.main([]) == 1
     assert stopped == ["stop"]
@@ -727,3 +924,188 @@ def test_log_directory_failure_returns_1(monkeypatch, capsys):
 
     assert app_module.main([]) == 1
     assert "log directory" in capsys.readouterr().err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Session selection, autosave and exit-time save (session persistence)
+# ---------------------------------------------------------------------------
+
+
+def test_no_saved_sessions_starts_new_and_writes_the_file(monkeypatch, tmp_path):
+    """With an empty sessions directory the run starts fresh and saves it."""
+    boot = _serializable_boot(tmp_path)
+    timeline = _install_common_fakes(monkeypatch, tmp_path, boot, session_fakes=False)
+
+    assert app_module.main([]) == 0
+    assert boot.received_restore is None
+    assert "attach_record" not in timeline
+    sessions_dir = tmp_path / ".mitocode" / "sessions"
+    files = list(sessions_dir.glob("*.json"))
+    assert len(files) == 1, "启动后磁盘上必须已有一个会话记录"
+
+
+def test_single_saved_session_is_restored_without_asking(monkeypatch, tmp_path):
+    """Exactly one saved session is restored directly, no panel, no prompt."""
+    record = _session_record("20261107T100000Z-11111111")
+    _write_record(tmp_path, record)
+    boot = _boot(tmp_path)
+    timeline = _install_common_fakes(monkeypatch, tmp_path, boot)
+    calls = []
+
+    async def fake_select(ui, summaries, *, allow_new=True):
+        calls.append((summaries, allow_new))
+        return "new"
+
+    monkeypatch.setattr(app_module, "select_session", fake_select)
+
+    assert app_module.main([]) == 0
+    assert calls == [], "单会话必须直接恢复而不是进入选择面板"
+    assert boot.received_restore == record
+    assert boot.restore_succeeded is True
+    assert boot.session_manager.attached == record
+    assert boot.session_manager.title_calls == 1
+    assert "start-new" not in timeline
+    assert "attach_record" in timeline
+
+
+def test_multiple_sessions_show_the_panel_and_restore_the_choice(monkeypatch, tmp_path):
+    """Two or more sessions open the panel; the picked id is restored."""
+    older = _session_record(
+        "20261107T090000Z-22222222",
+        title="Older",
+        updated_at="2026-11-07T09:00:00Z",
+    )
+    newer = _session_record("20261107T100000Z-33333333", title="Newer")
+    _write_record(tmp_path, older)
+    _write_record(tmp_path, newer)
+    boot = _boot(tmp_path)
+    timeline = _install_common_fakes(monkeypatch, tmp_path, boot)
+    seen = {}
+
+    async def fake_select(ui, summaries, *, allow_new=True):
+        seen["ids"] = [summary.session_id for summary in summaries]
+        seen["allow_new"] = allow_new
+        return summaries[0].session_id
+
+    monkeypatch.setattr(app_module, "select_session", fake_select)
+
+    assert app_module.main([]) == 0
+    assert seen["ids"] == [newer["session_id"], older["session_id"]]
+    assert seen["allow_new"] is True
+    assert boot.received_restore == newer
+    assert boot.session_manager.attached == newer
+    assert "attach_record" in timeline
+
+
+def test_choosing_new_session_at_the_panel_starts_fresh(monkeypatch, tmp_path):
+    """Picking ``n`` keeps no restore and registers a brand-new session."""
+    _write_record(tmp_path, _session_record("20261107T100000Z-44444444"))
+    _write_record(tmp_path, _session_record("20261107T090000Z-55555555"))
+    boot = _boot(tmp_path)
+    timeline = _install_common_fakes(monkeypatch, tmp_path, boot)
+
+    async def fake_select(ui, summaries, *, allow_new=True):
+        return "n"
+
+    monkeypatch.setattr(app_module, "select_session", fake_select)
+
+    assert app_module.main([]) == 0
+    assert boot.received_restore is None
+    assert "start-new" in timeline
+    assert "attach_record" not in timeline
+
+
+def test_corrupt_session_file_is_skipped_with_one_warning(
+    monkeypatch, tmp_path, capsys
+):
+    """A broken session file is counted and warned about exactly once."""
+    _write_record(tmp_path, _session_record("20261107T100000Z-66666666"))
+    (tmp_path / ".mitocode" / "sessions" / "broken.json").write_text(
+        "{ not json", encoding="utf-8"
+    )
+    boot = _boot(tmp_path)
+    _install_common_fakes(monkeypatch, tmp_path, boot)
+
+    assert app_module.main([]) == 0
+    output = capsys.readouterr().out
+    assert "could not be read" in output
+    assert boot.received_restore == _session_record("20261107T100000Z-66666666")
+
+
+def test_load_failure_at_selection_falls_back_to_new(monkeypatch, tmp_path, capsys):
+    """An id that fails to load warns and the run continues with a new one."""
+    _write_record(tmp_path, _session_record("20261107T100000Z-44444444"))
+    _write_record(tmp_path, _session_record("20261107T090000Z-55555555"))
+    boot = _boot(tmp_path)
+    timeline = _install_common_fakes(monkeypatch, tmp_path, boot)
+
+    async def fake_select(ui, summaries, *, allow_new=True):
+        return "20261107T100000Z-deadbeef"
+
+    monkeypatch.setattr(app_module, "select_session", fake_select)
+
+    assert app_module.main([]) == 0
+    assert "could not be loaded" in capsys.readouterr().out
+    assert boot.received_restore is None
+    assert "start-new" in timeline
+
+
+def test_eof_during_selection_returns_1(monkeypatch, tmp_path):
+    """``Ctrl+D`` at the selection prompt exits with the failure code."""
+    _write_record(tmp_path, _session_record("20261107T100000Z-44444444"))
+    _write_record(tmp_path, _session_record("20261107T090000Z-55555555"))
+    boot = _boot(tmp_path)
+    _install_common_fakes(monkeypatch, tmp_path, boot)
+
+    async def raising_select(ui, summaries, *, allow_new=True):
+        raise EOFError
+
+    monkeypatch.setattr(app_module, "select_session", raising_select)
+
+    assert app_module.main([]) == 1
+
+
+def test_interrupt_during_selection_returns_130(monkeypatch, tmp_path):
+    """``Ctrl+C`` at the selection prompt keeps the interrupt convention."""
+    _write_record(tmp_path, _session_record("20261107T100000Z-44444444"))
+    _write_record(tmp_path, _session_record("20261107T090000Z-55555555"))
+    boot = _boot(tmp_path)
+    _install_common_fakes(monkeypatch, tmp_path, boot)
+
+    async def raising_select(ui, summaries, *, allow_new=True):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(app_module, "select_session", raising_select)
+
+    assert app_module.main([]) == 130
+
+
+def test_teardown_order_autosaver_manager_pump_mcp(monkeypatch, tmp_path):
+    """Teardown stops the autosaver, then the manager, then pump, then MCP."""
+    timeline = []
+
+    async def fake_stop():
+        timeline.append("mcp-stopped")
+
+    _install_common_fakes(
+        monkeypatch, tmp_path, _boot(tmp_path, stop=fake_stop), events=timeline
+    )
+
+    assert app_module.main([]) == 0
+    order = [entry for entry in timeline if isinstance(entry, str)]
+    assert order.index("autosaver-stop") < order.index("manager-shutdown")
+    assert order.index("manager-shutdown") < order.index("pump-cancelled")
+    assert order.index("pump-cancelled") < order.index("mcp-stopped")
+    assert boot_shutdown_happened(timeline)
+
+
+def boot_shutdown_happened(timeline):
+    """Return whether the manager recorded exactly one shutdown.
+
+    Args:
+        timeline: The ordered event list.
+
+    Returns:
+        ``True`` when ``manager-shutdown`` appears once.
+    """
+    return timeline.count("manager-shutdown") == 1
