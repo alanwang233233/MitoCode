@@ -547,3 +547,89 @@ async def test_demo_player_closes_key_source_once(tmp_path):
     await player.run()
     assert closable.close_calls == 1
     assert "Demo finished." in buffer.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Restored-session echo (startup history replay)
+# ---------------------------------------------------------------------------
+
+
+def test_render_session_history_prints_full_transcript(tmp_path):
+    """回显渲染 user/assistant/推理/工具头/工具结果，头部含标题与消息数."""
+    from mitocode.cli.demo import render_session_history
+
+    ui, buffer = _ui(tmp_path / "history")
+    call = _ToolCallMessageBlock("Read", "call_1")
+    call.append_argument_chunk('{"file_path": "src/a.py"}')
+    call.finish()
+    blocks = [
+        _PlainTextMessageBlock("system", "You are MitoCode."),
+        _PlainTextMessageBlock("user", "hello there"),
+        _PlainTextMessageBlock("assistant", "I will read the file."),
+        blocks_reasoning_assistant("Thinking hard", "And here is the answer."),
+        call,
+        _ToolResultMessageBlock("call_1", "120 lines"),
+    ]
+    session = SimpleNamespace(messages=blocks)
+    render_session_history(
+        ui, session, title="Old chat", tool_manager=None, root=tmp_path
+    )
+    out = buffer.getvalue()
+    assert 'Restored · "Old chat"' in out
+    assert "❯ hello there" in out
+    assert "I will read the file." in out
+    assert "Thinking hard" in out
+    assert "And here is the answer." in out
+    assert "Read" in out
+    # Read 结果按 format_result 的既有规则折叠为行数预览。
+    assert "⎿ 1 lines" in out
+    assert "You are MitoCode." not in out, "system 块不回显"
+    assert len(session.messages) == 6, "回显不修改 messages"
+
+
+def blocks_reasoning_assistant(reasoning: str, message: str):
+    """Build an assistant block carrying reasoning plus text.
+
+    Args:
+        reasoning: Reasoning text replayed before the answer.
+        message: The assistant answer text.
+
+    Returns:
+        A ``_PlainTextMessageBlock`` with ``reasoning_content`` set.
+    """
+    block = _PlainTextMessageBlock("assistant", message)
+    block.reasoning_content = reasoning
+    return block
+
+
+def test_render_session_history_skips_unfinished_and_mismatched(tmp_path):
+    """未 finished 的工具调用跳过；无配对头的结果仍打印."""
+    from mitocode.cli.demo import render_session_history
+
+    ui, buffer = _ui(tmp_path / "history")
+    unfinished = _ToolCallMessageBlock("Bash", "call_x")
+    orphan_result = _ToolResultMessageBlock("call_lost", "orphan output")
+    blocks = [
+        _PlainTextMessageBlock("user", "go"),
+        unfinished,
+        orphan_result,
+    ]
+    session = SimpleNamespace(messages=blocks)
+    render_session_history(ui, session, title="T", root=tmp_path)
+    out = buffer.getvalue()
+    assert "Bash" not in out, "未完成的工具调用不打印"
+    assert "orphan output" in out
+    assert "❯ go" in out
+
+
+def test_render_session_history_empty_history_prints_only_header(tmp_path):
+    """空历史（仅 system 块）只打印头部 note，不抛异常."""
+    from mitocode.cli.demo import render_session_history
+
+    ui, buffer = _ui(tmp_path / "history")
+    blocks = [_PlainTextMessageBlock("system", "You are MitoCode.")]
+    session = SimpleNamespace(messages=blocks)
+    render_session_history(ui, session, title="Empty", root=tmp_path)
+    out = buffer.getvalue()
+    assert 'Restored · "Empty"' in out
+    assert "❯" not in out

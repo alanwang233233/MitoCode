@@ -63,6 +63,7 @@ from mitocode.cli.config import (
     secret_path,
     write_secret_file,
 )
+from mitocode.cli.demo import render_session_history
 from mitocode.cli.errors import MitoCodeCliConfigError, MitoCodeCliError
 from mitocode.cli.logging_setup import configure_logging
 from mitocode.cli.pump import EventPump
@@ -297,6 +298,16 @@ async def _amain(args: CliArgs, log_path: Any, console: Console) -> int:
         state.session_manager = manager
         if boot.restore_succeeded and restore is not None:
             manager.attach_record(restore)
+            # A restored session is live in memory but invisible on the fresh
+            # terminal; echoing the transcript is what makes the continuation
+            # legible instead of looking like an empty conversation.
+            render_session_history(
+                ui,
+                boot.main_session,
+                title=manager.current_title,
+                tool_manager=boot.tool_manager,
+                root=Path(args.workspace),
+            )
             if manager.current_title == "New Session":
                 manager.maybe_generate_title()
         else:

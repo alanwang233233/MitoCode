@@ -1109,3 +1109,42 @@ def boot_shutdown_happened(timeline):
         ``True`` when ``manager-shutdown`` appears once.
     """
     return timeline.count("manager-shutdown") == 1
+
+
+def test_restored_session_history_is_echoed(monkeypatch, tmp_path):
+    """恢复成功后，先前会话内容被回显到终端一次."""
+    record = _session_record("20261107T100000Z-11111111")
+    _write_record(tmp_path, record)
+    boot = _boot(tmp_path)
+    timeline = _install_common_fakes(monkeypatch, tmp_path, boot)
+    echo_calls = []
+
+    def fake_echo(ui, session, *, title, tool_manager=None, root=None):
+        echo_calls.append((session, title))
+
+    monkeypatch.setattr(app_module, "render_session_history", fake_echo)
+
+    assert app_module.main([]) == 0
+    assert boot.restore_succeeded is True
+    assert len(echo_calls) == 1
+    echo_session, echo_title = echo_calls[0]
+    assert echo_session is boot.main_session
+    assert echo_title == boot.session_manager.current_title
+    assert "attach_record" in timeline
+
+
+def test_new_session_does_not_echo_history(monkeypatch, tmp_path):
+    """新建会话不回显任何历史."""
+    boot = _boot(tmp_path)
+    _install_common_fakes(monkeypatch, tmp_path, boot)
+    echo_calls = []
+
+    def fake_echo(ui, session, *, title, tool_manager=None, root=None):
+        echo_calls.append((session, title))
+
+    monkeypatch.setattr(app_module, "render_session_history", fake_echo)
+
+    assert app_module.main([]) == 0
+    assert boot.received_restore is None
+    assert boot.restore_succeeded is False
+    assert echo_calls == []

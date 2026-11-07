@@ -296,6 +296,111 @@ class DemoTextRenderer:
             self._needs_newline = False
 
 
+def render_session_history(
+    ui: Any,
+    session: Any,
+    *,
+    title: str,
+    tool_manager: Any = None,
+    root: Optional[Path] = None,
+) -> None:
+    """Print a restored session's history to the terminal at once.
+
+    A session restored at startup is live in memory but invisible: the fresh
+    terminal shows only the banner, so the user has no idea what the
+    conversation was about.  This renders the same picture :class:`DemoPlayer`
+    would draw -- users, assistant answers with their reasoning, tool calls
+    and results -- but instantly, with no key handling and no pacing.
+
+    Read-only by the same rules as the demo: ``system`` blocks and unfinished
+    tool calls are skipped, nothing calls the orchestrator, nothing writes
+    into the session and no counter is touched.
+
+    Args:
+        ui: Terminal surface; its ``console`` receives the transcript and
+            ``note`` prints the header.
+        session: Object exposing ``messages``; only read, never written.
+        title: Session title shown in the header note.
+        tool_manager: Optional registry consulted for ``display_param``.
+        root: Workspace root used to relativise paths; defaults to ``.``.
+    """
+    blocks = list(getattr(session, "messages", None) or [])
+    ui.note(f'Restored · "{title}" · {len(blocks)} message blocks')
+    root = Path(root) if root is not None else Path(".")
+    renderer = DemoTextRenderer(ui.console)
+    pending_calls: dict[str, tuple[str, dict]] = {}
+    verbose = bool(getattr(ui, "verbose", False))
+    display_param = _display_param_of(tool_manager)
+    for block in blocks:
+        if isinstance(block, _PlainTextMessageBlock):
+            if block.role == "system":
+                continue
+            if block.role == "user":
+                renderer.finish()
+                ui.console.print(Text.assemble(("❯ ", "mito.accent"), block.message))
+                continue
+            if block.reasoning_content:
+                renderer.finish()
+                ui.console.print(
+                    Text(block.reasoning_content, style="dim"),
+                    soft_wrap=True,
+                )
+            renderer.print_chunk(block.message)
+            renderer.finish()
+        elif isinstance(block, _ToolCallMessageBlock):
+            if not block.finished:
+                continue
+            call = format_tool_call(
+                block.name,
+                block.parameter,
+                display_param(block.name),
+                root,
+            )
+            ui.console.print(Text.assemble(("● ", "mito.accent"), call))
+            pending_calls[block.id] = (block.name, dict(block.parameter))
+        elif isinstance(block, _ToolResultMessageBlock):
+            name, args = pending_calls.pop(block.tool_call_id, ("", {}))
+            preview = format_result(
+                name,
+                args,
+                block.content,
+                verbose=verbose,
+                root=root,
+            )
+            ui.console.print(Text.assemble(("  ⎿ ", "mito.muted"), preview))
+    renderer.finish()
+
+
+def _display_param_of(tool_manager: Any):
+    """Build the display-parameter lookup used by the transcript renderer.
+
+    Args:
+        tool_manager: Optional registry exposing ``get_spec``.
+
+    Returns:
+        A callable mapping a tool name to its advertised ``display_param``,
+        empty when the manager is missing or the tool unknown.
+    """
+    if tool_manager is None:
+        return lambda name: ""
+
+    def _lookup(name: str) -> str:
+        """Read one tool's display parameter from the registry.
+
+        Args:
+            name: Registered tool name.
+
+        Returns:
+            The advertised ``display_param`` or ``""``.
+        """
+        spec = tool_manager.get_spec(name)
+        if spec is None:
+            return ""
+        return str(getattr(spec, "display_param", "") or "")
+
+    return _lookup
+
+
 class DemoPlayer:
     """Replay one restored session into the terminal, read-only.
 
@@ -484,4 +589,5 @@ __all__ = [
     "KeySource",
     "TerminalKeySource",
     "format_speed",
+    "render_session_history",
 ]
