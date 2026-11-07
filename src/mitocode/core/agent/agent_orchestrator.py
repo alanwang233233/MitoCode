@@ -4,7 +4,7 @@ import asyncio
 import copy
 import re
 import traceback
-from typing import Dict, List, Sequence
+from typing import Any, Dict, List, Mapping, Sequence
 
 from loguru import logger as loguru_logger
 
@@ -211,6 +211,101 @@ class AgentOrchestrator:  # pylint: disable=too-many-instance-attributes
         )
         return session.agent_id
 
+    async def restore_tree(
+        self, agents: Sequence[Mapping[str, Any]]
+    ) -> Dict[int, AgentSession]:
+        """Rebuild sessions from persisted records, keeping their original ids.
+
+        The registry is assumed empty (the caller has just run
+        :meth:`reset_sessions`).  Sessions are constructed in two passes:
+        first every session object with its original id, then the tree
+        wiring derived from ``parent_id``, so a record may list children
+        before its parent.  The counter restarts above the largest
+        restored id.
+
+        Args:
+            agents: Mapping records each carrying ``agent_id`` (int) and
+                ``parent_id`` (``None`` or an id present in *agents*), plus
+                optional ``name`` and ``description``.  Messages are NOT
+                restored here; the caller fills them afterwards.
+
+        Returns:
+            Restored sessions keyed by their original agent id.
+
+        Raises:
+            ValueError: On an empty list, duplicate ids, a missing parent,
+                or a cycle in the parent chain.
+        """
+        records: List[Mapping[str, Any]] = list(agents)
+        if not records:
+            raise ValueError("restore_tree requires at least one agent record")
+
+        ids: List[int] = []
+        for record in records:
+            agent_id = record.get("agent_id")
+            if not isinstance(agent_id, int) or isinstance(agent_id, bool):
+                raise ValueError(f"agent_id must be an int, got {agent_id!r}")
+            ids.append(agent_id)
+        duplicates = {agent_id for agent_id in ids if ids.count(agent_id) > 1}
+        if duplicates:
+            raise ValueError(
+                f"Duplicate agent ids in restore records: {sorted(duplicates)}"
+            )
+
+        known_ids = set(ids)
+        parents: Dict[int, Any] = {}
+        for record in records:
+            agent_id = record["agent_id"]
+            parent_id = record.get("parent_id")
+            if parent_id is not None and parent_id not in known_ids:
+                raise ValueError(f"Parent agent {parent_id} does not exist")
+            parents[agent_id] = parent_id
+
+        for agent_id in known_ids:
+            visited: set[int] = set()
+            current: Any = agent_id
+            while current is not None:
+                if current in visited:
+                    raise ValueError(
+                        f"Cycle detected in parent chain at agent {current}"
+                    )
+                visited.add(current)
+                current = parents.get(current)
+
+        if self._default_provider is None:
+            raise ValueError(
+                "provider is required — set default_provider on the orchestrator"
+            )
+
+        sessions: Dict[int, AgentSession] = {}
+        for record in records:
+            agent_id = record["agent_id"]
+            provider = self._default_provider
+            if hasattr(provider, "turn"):
+                provider = copy.deepcopy(provider)
+                setattr(provider, "turn", 0)
+            sessions[agent_id] = AgentSession(
+                agent_id=agent_id,
+                name=str(record.get("name", "") or ""),
+                description=str(record.get("description", "") or ""),
+                parent_id=parents[agent_id],
+                provider=provider,
+                tool_manager=self._tool_manager,
+                system_prompt="",
+            )
+
+        for agent_id in sorted(sessions):
+            parent_id = sessions[agent_id].parent_id
+            if parent_id is not None:
+                sessions[parent_id].sub_agent_ids.append(agent_id)
+
+        self._sessions.update(sessions)
+        self._tasks.update({agent_id: None for agent_id in sessions})
+        self._counter = max(ids) + 1
+
+        await self._push_tree_sync()
+        return sessions
+
     async def destroy_agent(self, agent_id: int, _sync: bool = True) -> None:
         """Remove a session and all of its descendants.
 
@@ -291,6 +386,43 @@ class AgentOrchestrator:  # pylint: disable=too-many-instance-attributes
         task = asyncio.create_task(self._run_session(agent_id))
         self._tasks[agent_id] = task
         return task
+
+    def has_active_tasks(self) -> bool:
+        """Return whether any session currently has a live run task.
+
+        A task that has finished but has not been reaped does not count:
+        ``_run_session`` clears its own entry in ``finally``, so a ``None``
+        entry or a done task both mean "idle" for switching purposes.
+
+        Returns:
+            ``True`` when at least one registered task is not done.
+        """
+        return any(
+            task is not None and not task.done() for task in self._tasks.values()
+        )
+
+    async def reset_sessions(self) -> None:
+        """Cancel and await every run task, then drop the whole registry.
+
+        Sessions are cancelled cooperatively first so the runtime's
+        ``finally`` branches can still write tool results and synthetic
+        cancel events; the tasks are then awaited with
+        ``return_exceptions=True`` because a cancelled task raises. The
+        counter restarts at zero so a subsequent :meth:`restore_tree` or
+        :meth:`create_session` allocates ids from the beginning again.
+        """
+        tasks = [task for task in self._tasks.values() if task is not None]
+        for session in self._sessions.values():
+            session.cancel()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._sessions.clear()
+        self._tasks.clear()
+        self._counter = 0
+        await self._push_tree_sync()
 
     def get_session(self, agent_id: int) -> AgentSession | None:
         """Return the session registered under ``agent_id``, or ``None``."""
