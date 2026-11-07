@@ -23,7 +23,6 @@ from mitocode.cli.demo import (
     DEMO_TICK,
     DemoControls,
     DemoPlayer,
-    DemoTextRenderer,
     FakeKeySource,
     TerminalKeySource,
     _map_key,
@@ -346,32 +345,53 @@ def _player(
     return player, session
 
 
-def test_demo_text_renderer_prints_chunks_without_trailing_newline():
-    """chunk 连续打印且不自动换行."""
-    buffer = StringIO()
-    console = Console(file=buffer, width=200, theme=MITOCODE_THEME)
-    renderer = DemoTextRenderer(console)
-    renderer.print_chunk("hello ")
-    renderer.print_chunk("world")
-    assert buffer.getvalue() == "hello world"
+_MD_SAMPLE = (
+    "## Plan\n"
+    "\n"
+    "Use **bold** and `code` words.\n"
+    "\n"
+    "```python\n"
+    "print(1)\n"
+    "```\n"
+)
+"""Assistant sample exercising headings, inline markdown and a code fence."""
 
 
-def test_demo_text_renderer_finish_adds_newline_once():
-    """finish 补一次换行；以换行结尾的文本不再补."""
-    buffer = StringIO()
-    console = Console(file=buffer, width=200, theme=MITOCODE_THEME)
-    renderer = DemoTextRenderer(console)
-    renderer.print_chunk("hi")
-    renderer.finish()
-    assert buffer.getvalue() == "hi\n"
-    renderer.finish()
-    assert buffer.getvalue() == "hi\n"
+def test_render_session_history_renders_markdown(tmp_path):
+    """回显与实时对话一致：标题/行内 markdown/代码围栏都被渲染."""
+    from mitocode.cli.demo import render_session_history
 
-    buffer2 = StringIO()
-    renderer2 = DemoTextRenderer(Console(file=buffer2, width=200, theme=MITOCODE_THEME))
-    renderer2.print_chunk("hi\n")
-    renderer2.finish()
-    assert buffer2.getvalue() == "hi\n"
+    ui, buffer = _ui(tmp_path / "history")
+    blocks = [_PlainTextMessageBlock("assistant", _MD_SAMPLE)]
+    session = SimpleNamespace(messages=blocks)
+    render_session_history(ui, session, title="T", root=tmp_path)
+    out = buffer.getvalue()
+    assert "##" not in out, "标题标记被渲染掉"
+    assert "Plan" in out
+    assert "**" not in out, "行内加粗标记被渲染掉"
+    assert "bold" in out and "code" in out
+    assert "```" not in out, "围栏标记被渲染掉"
+    assert "print(1)" in out
+    assert "python" in out, "围栏语言标记按实时规则显示"
+    assert len(session.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_demo_player_renders_markdown(tmp_path):
+    """/demo 回放同样渲染 markdown，而不是原样输出."""
+    ui, buffer = _ui(tmp_path / "history")
+    blocks = [_PlainTextMessageBlock("assistant", _MD_SAMPLE)]
+    player, session = _player(ui, blocks, [], root=tmp_path)
+    await player.run()
+    out = buffer.getvalue()
+    assert "##" not in out, "标题标记被渲染掉"
+    assert "Plan" in out
+    assert "**" not in out, "行内加粗标记被渲染掉"
+    assert "bold" in out and "code" in out
+    assert "```" not in out, "围栏标记被渲染掉"
+    assert "print(1)" in out
+    assert "python" in out, "围栏语言标记按实时规则显示"
+    assert len(session.messages) == 1
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,9 @@ pacing: it never calls the orchestrator, never writes into the session and
 never touches the CLI's counters.  Pacing is controlled by
 :class:`DemoControls` (speed, pause, quit), keys come from a
 :class:`KeySource` (:class:`TerminalKeySource` live, :class:`FakeKeySource` in
-tests) and :class:`DemoPlayer` drives the loop.
+tests) and :class:`DemoPlayer` drives the loop.  Assistant text goes through
+the same markdown renderer as a live turn, and :func:`render_session_history`
+echoes a restored session's transcript through the same pipeline.
 """
 
 from __future__ import annotations
@@ -19,7 +21,6 @@ from pathlib import Path
 from typing import Any, List, Optional, Protocol
 
 from loguru import logger as loguru_logger
-from rich.console import Console
 from rich.text import Text
 
 # noinspection PyProtectedMember
@@ -29,6 +30,7 @@ from mitocode.core.agent.agent_session import (
     _ToolResultMessageBlock,
 )
 from mitocode.cli.format import format_result, format_tool_call
+from mitocode.cli.stream import StreamingRenderer
 
 logger = loguru_logger.bind(name=__name__)
 
@@ -262,46 +264,6 @@ class FakeKeySource:
         return None
 
 
-class DemoTextRenderer:
-    """Print assistant text in fixed-size chunks with plain rendering.
-
-    Deliberately not the live ``StreamingRenderer``: that only emits complete
-    newline-terminated lines, which would make a whole segment pop out at once
-    and defeat chunked pacing. Chunks are printed with ``end=""`` so the next
-    chunk continues on the same line; :meth:`finish` writes the single closing
-    newline when the text did not already end with one.
-    """
-
-    def __init__(self, console: Console) -> None:
-        """Bind the renderer to one console.
-
-        Args:
-            console: Rich console the chunks are written to.
-        """
-        self._console = console
-        self._needs_newline = False
-
-    def print_chunk(self, chunk: str) -> None:
-        """Print one chunk of assistant text inline.
-
-        Args:
-            chunk: The next few characters of the message, possibly containing
-                newlines. Empty chunks are ignored.
-        """
-        if not chunk:
-            return
-        self._console.print(
-            Text(chunk), end="", markup=False, soft_wrap=True, highlight=False
-        )
-        self._needs_newline = not chunk.endswith("\n")
-
-    def finish(self) -> None:
-        """Close the last assistant message with one newline, if needed."""
-        if self._needs_newline:
-            self._console.print()
-            self._needs_newline = False
-
-
 def render_session_history(
     ui: Any,
     session: Any,
@@ -333,7 +295,6 @@ def render_session_history(
     blocks = list(getattr(session, "messages", None) or [])
     ui.note(f'Restored · "{title}" · {len(blocks)} message blocks')
     root = Path(root) if root is not None else Path(".")
-    renderer = DemoTextRenderer(ui.console)
     pending_calls: dict[str, tuple[str, dict]] = {}
     verbose = bool(getattr(ui, "verbose", False))
     display_param = _display_param_of(tool_manager)
@@ -342,17 +303,19 @@ def render_session_history(
             if block.role == "system":
                 continue
             if block.role == "user":
-                renderer.finish()
                 ui.console.print(Text.assemble(("❯ ", "mito.accent"), block.message))
                 continue
             if block.reasoning_content:
-                renderer.finish()
                 ui.console.print(
                     Text(block.reasoning_content, style="dim"),
                     soft_wrap=True,
                 )
-            renderer.print_chunk(block.message)
-            renderer.finish()
+            # Same markdown pipeline as a live turn: headings, lists, inline
+            # styles and code fences render exactly as they did on screen.
+            # A fresh renderer per message keeps fence state from leaking.
+            stream_renderer = StreamingRenderer(ui.console)
+            stream_renderer.feed(block.message)
+            stream_renderer.flush()
         elif isinstance(block, _ToolCallMessageBlock):
             if not block.finished:
                 continue
@@ -374,7 +337,6 @@ def render_session_history(
                 root=root,
             )
             ui.console.print(Text.assemble(("  ⎿ ", "mito.muted"), preview))
-    renderer.finish()
 
 
 def _display_param_of(tool_manager: Any):
@@ -412,10 +374,11 @@ class DemoPlayer:
 
     The player renders the session's message blocks with synthetic pacing: it
     never calls the orchestrator, never writes into the session, and never
-    touches the CLI's counters. Text is played through :class:`DemoTextRenderer`
-    at ``DEMO_CHAR_CHUNK`` characters per tick; every tick polls the
-    :class:`KeySource` and feeds presses to :class:`DemoControls`, so speed,
-    pause and quit stay live while the demo runs.
+    touches the CLI's counters. Text is played through the same markdown
+    pipeline as a live turn (:class:`StreamingRenderer`) at ``DEMO_CHAR_CHUNK``
+    characters per tick; every tick polls the :class:`KeySource` and feeds
+    presses to :class:`DemoControls`, so speed, pause and quit stay live while
+    the demo runs.
     """
 
     def __init__(
@@ -451,7 +414,6 @@ class DemoPlayer:
         self._root = Path(root) if root is not None else Path(".")
         self._controls = controls if controls is not None else DemoControls()
         self._sleep = sleeper if sleeper is not None else asyncio.sleep
-        self._renderer = DemoTextRenderer(ui.console)
         self._pending_calls: dict[str, tuple[str, dict]] = {}
         self._verbose = bool(getattr(ui, "verbose", False))
 
@@ -466,13 +428,10 @@ class DemoPlayer:
         terminal leaves raw mode.
         """
         self._ui.note(self._header())
-        try:
-            for block in list(self._session.messages):
-                if self._controls.quit_requested:
-                    break
-                await self._render_block(block)
-        finally:
-            self._renderer.finish()
+        for block in list(self._session.messages):
+            if self._controls.quit_requested:
+                break
+            await self._render_block(block)
         self._ui.note("Demo finished. Press any key to return.")
         await self._wait_any_key()
         close = getattr(self._key_source, "close", None)
@@ -539,8 +498,11 @@ class DemoPlayer:
                     Text(block.reasoning_content, style="dim"),
                     soft_wrap=True,
                 )
-            await self._play_text(block.message)
-            self._renderer.finish()
+            # Same markdown pipeline as a live turn; a fresh renderer per
+            # message keeps code-fence state from leaking between messages.
+            stream_renderer = StreamingRenderer(self._ui.console)
+            await self._play_text(block.message, stream_renderer)
+            stream_renderer.flush()
         elif isinstance(block, _ToolCallMessageBlock):
             if not block.finished:
                 return
@@ -563,15 +525,18 @@ class DemoPlayer:
             )
             self._ui.console.print(Text.assemble(("  ⎿ ", "mito.muted"), preview))
 
-    async def _play_text(self, message: str) -> None:
+    async def _play_text(self, message: str, renderer: StreamingRenderer) -> None:
         """Print assistant text in paced chunks, honouring keys and pause.
 
         Each tick polls the key source for ``DEMO_TICK / speed`` seconds, feeds
-        any press to the controls and announces the resulting note. Pausing
-        keeps polling so the user can change speed, resume or quit.
+        any press to the controls and announces the resulting note. Chunks go
+        through the markdown renderer, so completed lines appear styled exactly
+        as a live turn drew them; pausing keeps polling so the user can change
+        speed, resume or quit.
 
         Args:
             message: The assistant text to play.
+            renderer: The markdown renderer this message feeds.
         """
         position = 0
         while position < len(message):
@@ -583,7 +548,7 @@ class DemoPlayer:
             if self._controls.paused:
                 await self._sleep(DEMO_TICK / self._controls.speed)
                 continue
-            self._renderer.print_chunk(message[position : position + DEMO_CHAR_CHUNK])
+            renderer.feed(message[position : position + DEMO_CHAR_CHUNK])
             position += DEMO_CHAR_CHUNK
             await self._sleep(DEMO_TICK / self._controls.speed)
 
@@ -607,7 +572,6 @@ __all__ = [
     "DEMO_TICK",
     "DemoControls",
     "DemoPlayer",
-    "DemoTextRenderer",
     "FakeKeySource",
     "KeySource",
     "TerminalKeySource",
