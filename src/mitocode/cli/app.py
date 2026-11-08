@@ -241,7 +241,13 @@ async def _amain(args: CliArgs, log_path: Any, console: Console) -> int:
     # Saved-session selection runs before bootstrap: it only needs the
     # workspace to exist, and the choice decides what bootstrap restores.
     store = SessionStore(Path(args.workspace))
-    summaries, skipped = store.list_sessions()
+    try:
+        summaries, skipped = store.list_sessions()
+    except SessionLoadError as exc:
+        # The sessions are there but cannot be read.  Starting anyway would
+        # look like "no saved sessions" and the user would overwrite them.
+        ui.error(str(exc))
+        return FAILURE_EXIT_CODE
     if skipped > 0:
         ui.warn(f"{skipped} session file(s) could not be read and were skipped.")
 
@@ -316,6 +322,13 @@ async def _amain(args: CliArgs, log_path: Any, console: Console) -> int:
             if manager.current_title == "New Session":
                 manager.maybe_generate_title()
         else:
+            if restore is not None and boot.restore_error:
+                # The user picked a session and it could not be restored.
+                # Saying nothing would leave them believing it was.
+                ui.warn(
+                    "The selected session could not be restored; starting a "
+                    f"new one. ({boot.restore_error})"
+                )
             await manager.start_new_session(boot.main_session)
         autosaver = SessionAutosaver(manager)
         autosaver.start()
@@ -446,9 +459,19 @@ def _start(argv: Sequence[str] | None) -> int:
 
     console = Console(theme=MITOCODE_THEME)
     workspace_path = Path(args.workspace)
-    if not ensure_workspace(
-        workspace_path, confirm=lambda path: _confirm_workspace(console, path)
-    ):
+    try:
+        created = ensure_workspace(
+            workspace_path, confirm=lambda path: _confirm_workspace(console, path)
+        )
+    except EOFError:
+        # Ctrl+D at the workspace prompt ends the prompt with nothing typed.
+        # The bare exception has no message, so it would reach the user as an
+        # empty "Unexpected error" panel.
+        console.print(
+            Text("  Workspace setup was cancelled; exiting.", style="mito.muted")
+        )
+        return FAILURE_EXIT_CODE
+    if not created:
         console.print(Text("  Workspace was not created; exiting.", style="mito.muted"))
         return FAILURE_EXIT_CODE
 

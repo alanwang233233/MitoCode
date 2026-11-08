@@ -1300,3 +1300,70 @@ def test_new_session_does_not_echo_history(monkeypatch, tmp_path):
     assert boot.received_restore is None
     assert boot.restore_succeeded is False
     assert echo_calls == []
+
+
+def test_unreadable_session_directory_reports_and_exits(monkeypatch, tmp_path, capsys):
+    """会话目录无法读取时必须提示用户并退出，而不是当成"没有存档"."""
+    from mitocode.cli.sessions import SessionLoadError
+
+    def _boom(self):
+        raise SessionLoadError(f"the session directory '{tmp_path}' is unreadable")
+
+    monkeypatch.setattr(app_module.SessionStore, "list_sessions", _boom, raising=False)
+    _install_common_fakes(monkeypatch, tmp_path, _boot(tmp_path))
+
+    assert app_module.main([]) == 1
+
+    output = capsys.readouterr().out
+    assert "unreadable" in output
+
+
+def test_a_failed_restore_is_reported_to_the_user(monkeypatch, tmp_path, capsys):
+    """恢复失败必须告知用户，否则用户以为选中的会话已经恢复."""
+    record = _session_record("20261107T100000Z-aaaaaaaa")
+    _write_record(tmp_path, record)
+
+    boot = _boot(tmp_path)
+    boot.restore_error = "parent chain cycles"
+    _install_common_fakes(monkeypatch, tmp_path, boot)
+
+    async def fake_bootstrap(args, ui, approver, restore=None):
+        # The restore was attempted and failed.
+        boot.restore_succeeded = False
+        return boot
+
+    monkeypatch.setattr(app_module, "bootstrap", fake_bootstrap)
+
+    assert app_module.main([]) == 0
+
+    output = capsys.readouterr().out
+    # The panel wraps, so the text is checked without its line breaks.
+    flattened = " ".join(output.lower().split())
+    assert "could not be restored" in flattened
+    assert "parent chain cycles" in flattened
+
+
+def test_ctrl_d_at_the_workspace_prompt_reports_it(monkeypatch, tmp_path, capsys):
+    """首次工作区确认按 Ctrl+D 必须给出可读的信息，而不是空的 Unexpected error."""
+    def _ensure(workspace_path, *, confirm):
+        # The real implementation asks the user; Ctrl+D ends that prompt.
+        return confirm(workspace_path)
+
+    def _cancel(console, path):
+        raise EOFError()
+
+    monkeypatch.setattr(app_module, "ensure_workspace", _ensure)
+    monkeypatch.setattr(app_module, "_confirm_workspace", _cancel)
+    monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
+    monkeypatch.setattr(
+        app_module, "configure_logging", lambda **kw: tmp_path / "cli.log"
+    )
+
+    assert app_module.main([]) == 1
+
+    output = capsys.readouterr().out
+    assert "cancelled" in output.lower(), (
+        "the user must be told the setup was cancelled; an empty panel tells "
+        "them nothing"
+    )
+    assert "Unexpected error" not in output

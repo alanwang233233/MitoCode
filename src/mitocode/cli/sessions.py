@@ -399,6 +399,10 @@ class SessionStore:
     def save(self, record: Mapping[str, Any]) -> Path:
         """Atomically write *record* as ``<session_id>.json``.
 
+        The write is atomic: the document goes to a private sibling temporary
+        file and is moved into place, so an interrupted save cannot leave a
+        truncated record behind.
+
         Args:
             record: A validated schema document.
 
@@ -476,16 +480,31 @@ class SessionStore:
         cannot be read, parsed or validated is skipped and counted, with
         only the file name and reason logged (never its content).
 
+        A directory that cannot be enumerated at all is a different thing
+        from an empty one: it means the sessions are there but unreadable,
+        so the caller is told instead of being handed a silent "no saved
+        sessions".
+
         Returns:
             A ``(summaries, skipped)`` pair. *summaries* is sorted by
             ``updated_at`` descending; *skipped* is the number of ignored
             ``.json`` files.
+
+        Raises:
+            SessionLoadError: When the sessions directory cannot be listed.
         """
         if not self._sessions_dir.is_dir():
             return [], 0
         summaries: List[SessionSummary] = []
         skipped = 0
-        for path in sorted(self._sessions_dir.iterdir()):
+        try:
+            entries = sorted(self._sessions_dir.iterdir())
+        except OSError as exc:
+            raise SessionLoadError(
+                f"the session directory '{self._sessions_dir}' could not be "
+                f"read: {exc.strerror or 'I/O error'}"
+            ) from exc
+        for path in entries:
             name = path.name
             if name.startswith(".") or not name.endswith(".json"):
                 continue
@@ -656,7 +675,10 @@ async def select_session(
     """
     if not summaries:
         return "new"
-    if len(summaries) == 1:
+    if len(summaries) == 1 and not allow_new:
+        # Nothing to choose between and no new-session row to offer, so the
+        # single session is the answer.  With ``allow_new`` the panel is
+        # shown anyway: the user asked to be able to start a new session.
         return summaries[0].session_id
 
     table = Table(box=None, show_header=True, header_style="bold")

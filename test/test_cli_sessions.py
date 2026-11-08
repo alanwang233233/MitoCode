@@ -872,10 +872,10 @@ def test_select_session_with_no_sessions_returns_new_without_panel():
 
 @pytest.mark.asyncio
 async def test_select_session_with_one_session_returns_it_directly():
-    """1 个会话不打印面板直接返回该 id."""
+    """1 个会话且不允许新建时不打印面板直接返回该 id."""
     ui, buffer, _ = _panel_ui([])
     only = _summary("id-one", "Only session", "2026-11-07T15:00:00Z")
-    assert await select_session(ui, [only]) == "id-one"
+    assert await select_session(ui, [only], allow_new=False) == "id-one"
     assert buffer.getvalue() == ""
 
 
@@ -2022,3 +2022,44 @@ async def test_saved_records_redact_the_key_from_tool_arguments(tmp_path):
 
     assert path is not None
     assert "sk-super-secret-key" not in path.read_text(encoding="utf-8")
+
+
+def test_list_sessions_reports_a_directory_that_cannot_be_read(tmp_path, monkeypatch):
+    """会话目录无法枚举时必须报错，而不是让异常穿透或静默当成空目录."""
+    store = SessionStore(tmp_path)
+    store.sessions_dir.mkdir(parents=True, exist_ok=True)
+
+    def _boom():
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(
+        type(store.sessions_dir), "iterdir", lambda self: _boom(), raising=False
+    )
+
+    with pytest.raises(SessionLoadError) as info:
+        store.list_sessions()
+
+    assert str(store.sessions_dir) in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_select_session_offers_new_with_one_session_when_allowed():
+    """allow_new=True 时即使只有一个会话也要显示面板，让 n 可达."""
+    ui, buffer, _ = _panel_ui(["n"])
+    only = _summary("id-one", "Only session", "2026-11-07T15:00:00Z")
+
+    assert await select_session(ui, [only], allow_new=True) == "new"
+    assert "New session" in buffer.getvalue(), (
+        "the new-session row must be offered; otherwise the user cannot start "
+        "a new session while one is saved"
+    )
+
+
+@pytest.mark.asyncio
+async def test_select_session_with_one_session_and_no_new_stays_quiet():
+    """allow_new=False 时单会话仍直接返回，不打印面板."""
+    ui, buffer, _ = _panel_ui([])
+    only = _summary("id-one", "Only session", "2026-11-07T15:00:00Z")
+
+    assert await select_session(ui, [only], allow_new=False) == "id-one"
+    assert buffer.getvalue() == ""

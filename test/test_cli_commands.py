@@ -1050,7 +1050,9 @@ async def test_sessions_picking_current_session_notes_already_current(tmp_path):
     """Selecting the id that is already current does not reload anything."""
     manager = _FakeManager()
     _write_session_file(tmp_path, _record_for(manager.current_session_id))
-    ctx, buffer = _ctx(tmp_path)
+    # The panel is shown even for a single session, so the new-session row
+    # is reachable; "1" picks the only session.
+    ctx, buffer = _ctx(tmp_path, answers=["1"])
     ctx.state.session_manager = manager
 
     await dispatch("/sessions", ctx)

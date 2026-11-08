@@ -738,7 +738,11 @@ async def _cmd_sessions(ctx: CommandContext, args: List[str]) -> CommandResult:
         return CommandResult()
 
     store = _session_store(ctx)
-    summaries, _skipped = store.list_sessions()
+    try:
+        summaries, _skipped = store.list_sessions()
+    except SessionLoadError as exc:
+        ctx.ui.warn(f"The saved sessions could not be read. ({exc})")
+        return CommandResult()
     choice = await select_session(state.ui, summaries, allow_new=True)
     if choice == manager.current_session_id:
         ctx.ui.note("Already current.")
@@ -791,7 +795,11 @@ async def _cmd_demo(ctx: CommandContext, args: List[str]) -> CommandResult:
         return CommandResult()
 
     store = _session_store(ctx)
-    summaries, _skipped = store.list_sessions()
+    try:
+        summaries, _skipped = store.list_sessions()
+    except SessionLoadError as exc:
+        ctx.ui.warn(f"The saved sessions could not be read. ({exc})")
+        return CommandResult()
     if not summaries:
         ctx.ui.warn("No saved sessions to replay.")
         return CommandResult()
