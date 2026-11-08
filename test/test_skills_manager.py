@@ -158,6 +158,8 @@ async def test_skills_manager_discover_invalid_skill_md_records_issue_rest_disco
 @pytest.mark.asyncio
 async def test_skills_manager_discover_unreadable_skill_md_yields_issue(tmp_path):
     """A SKILL.md unreadable due to file mode becomes an issue, not an exception."""
+    if os.name == "nt":
+        pytest.skip("Windows has no mode bits, so the unreadable case cannot be staged")
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         pytest.skip("root ignores mode bits, so the unreadable case cannot be staged")
     root = tmp_path / "root"
@@ -295,6 +297,8 @@ async def test_skills_manager_discover_plain_file_and_hidden_dir_skipped_silentl
 @pytest.mark.asyncio
 async def test_skills_manager_discover_unlistable_root_yields_issue(tmp_path):
     """A root whose listing is permission-denied yields one issue, nothing raised."""
+    if os.name == "nt":
+        pytest.skip("Windows has no mode bits, so the unlistable case cannot be staged")
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         pytest.skip("root ignores mode bits, so the unlistable case cannot be staged")
     locked_root = tmp_path / "locked-root"
@@ -317,6 +321,8 @@ async def test_skills_manager_discover_unlistable_root_yields_issue(tmp_path):
 @pytest.mark.asyncio
 async def test_skills_manager_discover_unlistable_skill_dir_yields_issue(tmp_path):
     """A skill directory whose listing is permission-denied yields one issue."""
+    if os.name == "nt":
+        pytest.skip("Windows has no mode bits, so the unlistable case cannot be staged")
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         pytest.skip("root ignores mode bits, so the unlistable case cannot be staged")
     root = tmp_path / "root"
@@ -412,8 +418,8 @@ async def test_read_skill_accepts_a_file_at_exactly_the_cap(tmp_path):
     entry = root / "alpha"
     entry.mkdir(parents=True)
     header = f"---\nname: alpha\ndescription: d\n---\n"
-    (entry / "SKILL.md").write_text(
-        header + "x" * (MAX_SKILL_FILE_BYTES - len(header)), encoding="utf-8"
+    (entry / "SKILL.md").write_bytes(
+        (header + "x" * (MAX_SKILL_FILE_BYTES - len(header))).encode("utf-8")
     )
     manager = SkillsManager([root])
     await manager.discover()

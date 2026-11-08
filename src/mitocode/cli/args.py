@@ -12,7 +12,6 @@ import importlib.metadata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
-
 from rich.console import Console
 from rich.table import Table
 
@@ -29,12 +28,6 @@ class CliArgs:  # pylint: disable=too-many-instance-attributes
 
     Attributes:
         workspace: Root directory the agent operates in.
-        model: Provider model name override.
-        api_key: Provider API key override (never printed by the CLI).
-        base_url: Provider endpoint override.
-        timeout: Provider request timeout in seconds.
-        reasoning_effort: Reasoning effort tier override (e.g. ``low``),
-            passed through to the provider when set.
         permission_mode: Approval policy for tool calls, one of ``ask``,
             ``allow`` or ``deny``.
         mcp_config: Explicit MCP server configuration file.
@@ -47,11 +40,6 @@ class CliArgs:  # pylint: disable=too-many-instance-attributes
     """
 
     workspace: Path = field(default_factory=Path.cwd)
-    model: Optional[str] = None
-    api_key: Optional[str] = field(default=None, repr=False)
-    base_url: Optional[str] = None
-    timeout: Optional[float] = None
-    reasoning_effort: Optional[str] = None
     permission_mode: str = "ask"
     mcp_config: Optional[Path] = None
     no_mcp: bool = False
@@ -84,34 +72,6 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Workspace root directory (default: current directory).",
     )
-    parser.add_argument(
-        "-m",
-        "--model",
-        metavar="MODEL",
-        help="Model name override (default: environment or config file).",
-    )
-    parser.add_argument(
-        "--api-key",
-        metavar="KEY",
-        help="API key override (default: environment or config file).",
-    )
-    parser.add_argument(
-        "--base-url",
-        metavar="URL",
-        help="Provider base URL override (default: environment or config file).",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        metavar="SECONDS",
-        help="Provider request timeout in seconds.",
-    )
-    parser.add_argument(
-        "--reasoning-effort",
-        metavar="VALUE",
-        help="Reasoning effort tier, e.g. minimal, low, medium, high.",
-    )
-
     permissions = parser.add_mutually_exclusive_group()
     permissions.add_argument(
         "--permission-mode",
@@ -195,11 +155,6 @@ def parse_args(argv: Sequence[str] | None = None) -> CliArgs:
 
     return CliArgs(
         workspace=namespace.workspace,
-        model=namespace.model,
-        api_key=namespace.api_key,
-        base_url=namespace.base_url,
-        timeout=namespace.timeout,
-        reasoning_effort=namespace.reasoning_effort,
         permission_mode=permission_mode,
         mcp_config=namespace.mcp_config,
         no_mcp=namespace.no_mcp,

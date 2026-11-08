@@ -2013,6 +2013,97 @@ async def test_a_dispatch_cancelled_mid_send_leaves_the_handle_pending_again():
     assert orchestrator.attempts == 2, "the send must be attempted again"
 
 
+# --- has_active_tasks / stop_all --------------------------------------------
+#
+# Session switching must be able to ask "is any detached call still in
+# flight?" and, on a forced switch, to *stop and wait for* that work rather
+# than merely requesting cancellation the way `cancel_all` does.
+
+
+@pytest.mark.asyncio
+async def test_has_active_tasks_reports_a_running_detached_call():
+    """A launched task reads busy; a fresh registry and a finished task do not."""
+    registry = BackgroundRegistry()
+    assert (
+        registry.has_active_tasks() is False
+    ), "a fresh registry holds no work, so it must read idle"
+
+    started = asyncio.Event()
+
+    async def slow_work() -> str:
+        started.set()
+        await asyncio.sleep(LONG_SLEEP_SECONDS)
+        return WORK_RESULT
+
+    handle = registry.launch(slow_work, caller_id=AGENT_ID, timeout=LONG_CEILING_MS)
+    await started.wait()
+
+    assert (
+        registry.has_active_tasks() is True
+    ), "an in-flight detached call must read as active"
+
+    registry.cancel_all()
+    await _drain_loop()
+    assert (
+        registry.has_active_tasks() is False
+    ), "once the task has finished, the registry reads idle again"
+    assert (
+        await registry.collect(handle)
+    ).state is TaskState.CANCELLED, "the cancelled record is still answerable"
+
+
+@pytest.mark.asyncio
+async def test_stop_all_cancels_and_awaits_every_running_task():
+    """stop_all must not return before the cancelled work has unwound.
+
+    ``cancel_all`` only *requests* cancellation; switching sessions has to be
+    certain no task is still writing into a registry that is about to be
+    replaced, so the awaiting is the whole point of ``stop_all``.
+    """
+    registry = BackgroundRegistry()
+    started = asyncio.Event()
+
+    async def slow_work() -> str:
+        started.set()
+        await asyncio.sleep(LONG_SLEEP_SECONDS)
+        return WORK_RESULT
+
+    handle = registry.launch(slow_work, caller_id=AGENT_ID, timeout=LONG_CEILING_MS)
+    await started.wait()
+    task = registry._tasks[handle]  # pylint: disable=protected-access
+    assert registry.has_active_tasks() is True, "precondition: the work is in flight"
+
+    await registry.stop_all()
+
+    assert (
+        registry.has_active_tasks() is False
+    ), "after stop_all returns, no detached call may still be running"
+    assert task.done() is True, "stop_all must have awaited the cancelled task"
+    assert task.cancelled() is True, "the wrapper re-raises its cancellation"
+    snapshot = await registry.collect(handle)
+    assert (
+        snapshot.state is TaskState.CANCELLED
+    ), "the stopped work is recorded as cancelled, never as a success"
+    assert (
+        snapshot.result == "cancelled before it finished"
+    ), "the model is told the work was stopped"
+
+
+@pytest.mark.asyncio
+async def test_stop_all_is_safe_on_an_empty_registry():
+    """Teardown calls this unconditionally, including on a fresh registry."""
+    registry = BackgroundRegistry()
+
+    await registry.stop_all()
+
+    assert (
+        registry.has_active_tasks() is False
+    ), "an empty registry has nothing active before or after"
+    assert (
+        registry.pending_notifications() == []
+    ), "a fresh registry owes nothing after stop_all"
+
+
 @pytest.mark.asyncio
 async def test_a_failed_send_is_retried_and_delivers_on_a_later_dispatch():
     """A failed delivery must not become a failed dispatch call."""
@@ -2158,3 +2249,71 @@ async def test_calling_dispatch_pending_without_awaiting_delivers_nothing():
     assert _handles(registry.pending_notifications()) == [
         handle
     ], "the handle stays owed, which is exactly the invisible stall"
+
+
+@pytest.mark.asyncio
+async def test_has_active_tasks_sees_work_that_outlived_its_wrapper():
+    """wrapper 已结束但 inner 仍在跑时，registry 必须仍然报 busy.
+
+    The wrapper is what the registry tracks, but the wrapper can finish while
+    the work it started keeps running -- a callee that suppresses its own
+    cancellation, or one that awaits inside ``asyncio.shield``.  Reporting
+    "idle" then lets a session switch happen underneath that work, which can
+    still write to the workspace afterwards.
+    """
+    registry = BackgroundRegistry()
+    released = asyncio.Event()
+
+    async def survives_its_wrapper() -> str:
+        # Absorb the cancellations the registry hands out, then keep waiting:
+        # this is the shape the module docstring calls out.
+        for _ in range(3):
+            try:
+                await released.wait()
+            except asyncio.CancelledError:
+                continue
+        return "late"
+
+    handle = registry.launch(survives_its_wrapper, caller_id=AGENT_ID, timeout=20)
+    try:
+        settled = await _settled(registry, handle)
+        assert settled.state is TaskState.TIMEOUT
+
+        # The wrapper is done, but the work is not: the registry must say so.
+        assert registry.has_active_tasks() is True, (
+            "work that outlived its wrapper is still running and must keep "
+            "the registry busy"
+        )
+    finally:
+        released.set()
+        await registry.stop_all()
+        await _drain_loop()
+
+
+@pytest.mark.asyncio
+async def test_stop_all_waits_for_work_that_outlived_its_wrapper():
+    """stop_all 必须等到 inner 结束，而不只是等到 wrapper 结束."""
+    registry = BackgroundRegistry()
+    released = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def survives_its_wrapper() -> str:
+        for _ in range(3):
+            try:
+                await released.wait()
+            except asyncio.CancelledError:
+                continue
+        finished.set()
+        return "late"
+
+    handle = registry.launch(survives_its_wrapper, caller_id=AGENT_ID, timeout=20)
+    settled = await _settled(registry, handle)
+    assert settled.state is TaskState.TIMEOUT
+
+    released.set()
+    await registry.stop_all()
+
+    assert finished.is_set(), (
+        "stop_all returned while the work was still running; a session switch "
+        "that follows it would race that work"
+    )

@@ -95,6 +95,32 @@ ESCAPE_CASE_IDS = (
 )
 
 
+#: Escape cases Windows cannot stage the same way.  A path rooted without a
+#: drive resolves against whatever drive happens to be current there, and a
+#: symlink needs privileges the runner does not grant.
+_WINDOWS_INCOMPATIBLE_ESCAPE_CASES = frozenset(
+    {"absolute-outside-string", "absolute-outside-path-object", "symlink-loop"}
+)
+
+
+def _escape_params():
+    """The escape cases, with the ones Windows cannot stage marked skipped.
+
+    Returns:
+        One ``pytest.param`` per escape case id.
+    """
+    return [
+        pytest.param(
+            case_id,
+            marks=pytest.mark.skipif(
+                case_id in _WINDOWS_INCOMPATIBLE_ESCAPE_CASES and os.name == "nt",
+                reason="Windows resolves a rooted path against the current drive",
+            ),
+        )
+        for case_id in ESCAPE_CASE_IDS
+    ]
+
+
 class _RecordingApprover:
     """An approver that records every request and returns a fixed decision.
 
@@ -537,7 +563,7 @@ async def test_resolve_returns_the_in_root_path_under_the_shipped_default_approv
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case_id", ESCAPE_CASE_IDS)
+@pytest.mark.parametrize("case_id", _escape_params())
 async def test_resolve_asks_the_approver_exactly_once_about_each_escape(
     workspace, spy, root, case_id
 ):
@@ -564,7 +590,7 @@ async def test_resolve_asks_the_approver_exactly_once_about_each_escape(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case_id", ESCAPE_CASE_IDS)
+@pytest.mark.parametrize("case_id", _escape_params())
 async def test_resolve_refuses_every_escape_under_an_approver_that_denies(
     workspace, root, case_id
 ):
@@ -607,6 +633,9 @@ async def test_resolve_returns_the_path_when_the_shipped_default_permits_an_esca
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    os.name == "nt", reason="Windows resolves a rooted path against the current drive"
+)
 async def test_resolve_asks_about_an_absolute_target_without_re_rooting_it(
     workspace, root
 ):
@@ -760,6 +789,7 @@ async def test_resolve_names_the_resolved_root_when_the_workspace_path_is_a_syml
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs extra privileges")
 async def test_resolve_asks_the_approver_about_a_symlink_loop_instead_of_accepting_it(
     workspace, spy, root
 ):
@@ -796,6 +826,7 @@ async def test_resolve_asks_the_approver_about_a_symlink_loop_instead_of_accepti
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs extra privileges")
 async def test_resolve_refuses_a_symlink_loop_with_a_reason_the_module_documents(
     workspace, root
 ):
@@ -819,6 +850,7 @@ async def test_resolve_refuses_a_symlink_loop_with_a_reason_the_module_documents
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs extra privileges")
 async def test_resolve_hands_back_an_approved_loop_un_normalised_so_open_still_fails(
     workspace, root
 ):
@@ -905,9 +937,20 @@ async def test_resolve_escalates_a_target_the_resolved_path_would_have_accepted(
         "relative",
         "absolute-outside",
         "traversal",
-        "symlink-loop",
+        pytest.param(
+            "symlink-loop",
+            marks=pytest.mark.skipif(
+                os.name == "nt", reason="a loop resolves differently on Windows"
+            ),
+        ),
         "nul-relative",
-        "nul-absolute",
+        pytest.param(
+            "nul-absolute",
+            marks=pytest.mark.skipif(
+                os.name == "nt",
+                reason="Windows resolves a rooted path against " "the current drive",
+            ),
+        ),
     ],
 )
 async def test_resolve_without_a_workspace_answers_every_path_and_asks_nothing(
@@ -954,6 +997,7 @@ async def test_resolve_without_a_workspace_answers_every_path_and_asks_nothing(
     ), f"{case_id}: with no workspace there is no escape to approve"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows refuses to remove the cwd")
 @pytest.mark.asyncio
 async def test_resolve_without_a_workspace_raises_when_the_working_directory_is_gone(
     tmp_path,

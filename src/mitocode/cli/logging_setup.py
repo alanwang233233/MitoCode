@@ -15,12 +15,9 @@ the provider API key.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Union
+from typing import Union
 
 from loguru import logger as loguru_logger
-
-DEFAULT_LOG_SUBDIR = Path(".mitocode") / "logs"
-"""Directory below the home directory that holds CLI logs."""
 
 LOG_FILENAME = "cli.log"
 """Name of the log file inside the log directory."""
@@ -47,22 +44,12 @@ DIRECTORY_MODE = 0o700
 PathLike = Union[str, Path]
 
 
-def default_log_dir() -> Path:
-    """Return the default log directory below the current user's home.
-
-    Returns:
-        ``~/.mitocode/logs`` resolved at call time, so tests and embedders can
-        redirect it by changing ``HOME``.
-    """
-    return Path.home() / DEFAULT_LOG_SUBDIR
-
-
 def configure_logging(
     *,
+    log_dir: PathLike,
     debug: bool = False,
-    log_dir: Optional[PathLike] = None,
 ) -> Path:
-    """Remove every loguru sink and route logging to a private file.
+    """Remove every loguru sink and route logging to a private workspace file.
 
     Call this once, before anything else logs, so that no library warning can
     reach the terminal while the REPL owns the screen. The file sink always
@@ -70,9 +57,10 @@ def configure_logging(
     debug mode, which the application later uses for its exit hint.
 
     Args:
+        log_dir: Directory for the log file, normally
+            ``<workspace>/.mitocode/logs``. Required: the CLI never falls back
+            to a location outside the workspace.
         debug: Whether the CLI was started with ``--debug``.
-        log_dir: Directory for the log file. Defaults to
-            :func:`default_log_dir`; tests pass a temporary directory.
 
     Returns:
         Path of the log file, ``<log_dir>/cli.log``.
@@ -80,15 +68,16 @@ def configure_logging(
     Raises:
         OSError: The directory cannot be created, secured or written to.
     """
-    directory = default_log_dir() if log_dir is None else Path(log_dir)
+    # Remove sinks before touching the filesystem: a run whose workspace is
+    # not writable must fail without also writing anything to stderr, and the
+    # caller renders its own error panel.
+    loguru_logger.remove()
+    directory = Path(log_dir)
     directory.mkdir(parents=True, exist_ok=True)
     directory.chmod(DIRECTORY_MODE)
 
     log_path = directory / LOG_FILENAME
 
-    # Removing every sink is the point of the takeover: a stale stderr handler
-    # would print warnings into the REPL.
-    loguru_logger.remove()
     loguru_logger.add(
         str(log_path),
         rotation=ROTATION,
@@ -109,7 +98,6 @@ def configure_logging(
 
 
 __all__ = [
-    "DEFAULT_LOG_SUBDIR",
     "DIRECTORY_MODE",
     "LOG_FILENAME",
     "LOG_FORMAT",
@@ -117,5 +105,4 @@ __all__ = [
     "RETENTION",
     "ROTATION",
     "configure_logging",
-    "default_log_dir",
 ]

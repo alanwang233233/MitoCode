@@ -10,22 +10,35 @@ The startup order is a constraint, not a preference:
 
 1. arguments, version/help and the terminal check (no logging yet, so a
    non-interactive invocation never touches the log directory);
-2. logging takeover, then the console, UI, approver and :func:`bootstrap`, which
-   resolves the workspace, registers tools, starts MCP and creates the main
-   session;
-3. state, event pump task and REPL, in that order, because the pump must be
-   consuming events before the first turn can produce any;
-4. ``SIGINT`` is routed to :meth:`Repl.handle_sigint` when the platform supports
+2. workspace confirmation (when ``.mitocode/config.json`` is missing) and
+   logging takeover, in that order: a declined workspace must not create the
+   log directory, and every log lives inside the workspace;
+3. the workspace lock, taken before anything is written and released on the
+   way out: one workspace runs one CLI, because two instances write the same
+   session records and the last save wins.  A workspace that is already
+   locked is reported with the risk spelled out, and the user decides
+   whether to force entry;
+4. provider setup (interactive when the credential file is missing), then the
+   console's UI, approver, saved-session selection (``SessionStore`` +
+   :func:`~mitocode.cli.sessions.select_session`, which only needs the
+   workspace) and :func:`bootstrap`, which resolves the workspace, registers
+   tools, starts MCP and restores or creates the main session;
+5. state, session manager, autosave task, event pump task and REPL, in that
+   order, because the pump must be consuming events before the first turn can
+   produce any;
+6. ``SIGINT`` is routed to :meth:`Repl.handle_sigint` when the platform supports
    it, then the REPL runs.
 
-Teardown lives in ``finally`` and is equally ordered: the pump task is
-cancelled and awaited first, because it renders into the UI and MCP shutdown
-may log, then ``mcp.stop()`` runs under :func:`asyncio.shield` so a second
+Teardown lives in ``finally`` and is equally ordered: the autosave task is
+stopped first, then the session manager writes its final forced save, then the
+pump task is cancelled and awaited, because it renders into the UI and MCP
+shutdown may log; ``mcp.stop()`` runs under :func:`asyncio.shield` so a second
 ``Ctrl+C`` cannot leave a subprocess behind.  MCP shutdown failures are logged
 and never change the exit code.  The ``try`` starts as soon as
 :func:`bootstrap` returns, so a banner, state, pump, REPL or task-creation
 failure still stops MCP; bootstrap itself rolls back a manager it had already
-started.
+started.  The workspace lock is released after all of that, whatever the exit
+path was.
 
 Errors surface once: configuration and application errors print a red panel and
 return ``1``, a ``KeyboardInterrupt`` during startup returns ``130``, and an
@@ -38,26 +51,46 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+from pathlib import Path
 from typing import Any, NoReturn, Optional, Sequence
 
 from loguru import logger as loguru_logger
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Confirm
 from rich.text import Text
 
+from mitocode import MITOCODE_CONFIG_PATH
 from mitocode.cli.approval import ApprovalPolicy, CliApprover
 from mitocode.cli.args import CliArgs, parse_args, render_help, version_string
-from mitocode.cli.bootstrap import Bootstrapped, bootstrap
-from mitocode.cli.errors import MitoCodeCliError
+from mitocode.cli.bootstrap import Bootstrapped, bootstrap, ensure_workspace
+from mitocode.cli.config import (
+    ask_provider_settings,
+    secret_path,
+    write_secret_file,
+)
+from mitocode.cli.demo import render_session_history
+from mitocode.cli.errors import MitoCodeCliConfigError, MitoCodeCliError
 from mitocode.cli.logging_setup import configure_logging
 from mitocode.cli.pump import EventPump
 from mitocode.cli.repl import Repl
+from mitocode.cli.sessions import (
+    SessionAutosaver,
+    SessionLoadError,
+    SessionManager,
+    SessionStore,
+    select_session,
+)
 from mitocode.cli.state import CliState
 from mitocode.cli.theme import MITOCODE_THEME
 from mitocode.cli.ui import BannerInfo, CliUI
-from mitocode.core.exception.mitocode_exception import MitoCodeBaseError
+from mitocode.core.exception.mitocode_exception import (
+    MitoCodeBaseError,
+    MitoCodeWorkspaceLockError,
+)
 from mitocode.core.mcp.mcp_manager import McpManager
 from mitocode.core.tool.tool_manager import MCP_TOOL_PREFIX
+from mitocode.core.workspace.workspace import WorkspaceLock
 
 NON_INTERACTIVE_EXIT_CODE = 2
 """Exit code for a run without a terminal; the CLI has no pipe mode."""
@@ -168,7 +201,6 @@ def _banner_info(boot: Bootstrapped) -> BannerInfo:
         version=_display_version(),
         model=boot.provider_config.model,
         workspace=boot.resolution.workspace.path,
-        initialized=boot.resolution.initialized,
         tool_count=builtin_count,
         mcp=mcp_states,
     )
@@ -209,12 +241,49 @@ async def _amain(args: CliArgs, log_path: Any, console: Console) -> int:
         MitoCodeBaseError: A workspace, provider or MCP error aborted startup.
         KeyboardInterrupt: The user interrupted startup.
     """
-    ui = CliUI(console, verbose=args.verbose)
+    ui = CliUI(
+        console,
+        verbose=args.verbose,
+        history_path=Path(args.workspace) / MITOCODE_CONFIG_PATH / "history",
+    )
     approver = CliApprover(ui, ApprovalPolicy(args.permission_mode))
-    boot = await bootstrap(args, ui, approver)
+
+    # Saved-session selection runs before bootstrap: it only needs the
+    # workspace to exist, and the choice decides what bootstrap restores.
+    store = SessionStore(Path(args.workspace))
+    try:
+        summaries, skipped = store.list_sessions()
+    except SessionLoadError as exc:
+        # The sessions are there but cannot be read.  Starting anyway would
+        # look like "no saved sessions" and the user would overwrite them.
+        ui.error(str(exc))
+        return FAILURE_EXIT_CODE
+    if skipped > 0:
+        ui.warn(f"{skipped} session file(s) could not be read and were skipped.")
+
+    restore: Optional[dict] = None
+    # Zero or one saved session needs no interactive choice: the panel (and
+    # its prompting, hence EOF/interrupt paths) only exists from two on.
+    if len(summaries) <= 1:
+        choice = summaries[0].session_id if summaries else "new"
+    else:
+        try:
+            choice = await select_session(ui, summaries)
+        except EOFError:
+            return FAILURE_EXIT_CODE
+    if choice != "new":
+        try:
+            restore = store.load(choice)
+        except SessionLoadError as exc:
+            ui.warn(f"Saved session could not be loaded; starting a new one. ({exc})")
+            restore = None
+
+    boot = await bootstrap(args, ui, approver, restore=restore)
 
     pump_task: Optional[asyncio.Task[None]] = None
     state: Optional[CliState] = None
+    manager: Optional[SessionManager] = None
+    autosaver: Optional[SessionAutosaver] = None
     try:
         ui.show_banner(_banner_info(boot))
 
@@ -229,42 +298,287 @@ async def _amain(args: CliArgs, log_path: Any, console: Console) -> int:
             skills_manager=boot.skills_manager,
             ui=ui,
             approver=approver,
-            workspace_initialized=boot.resolution.initialized,
             log_path=log_path,
             main_id=boot.main_session.agent_id,
             mcp_error=boot.mcp_error,
             verbose=args.verbose,
         )
+        manager = SessionManager(
+            store,
+            boot.orchestrator,
+            ui,
+            state=state,
+            provider=boot.provider,
+            workspace=str(Path(args.workspace).resolve()),
+            # A tool that read the credential file would otherwise put the API
+            # key into a session record, which is read back and echoed at
+            # startup.  The same literal the orchestrator scrubs from error
+            # messages is scrubbed from what is written to disk.
+            redact_secrets=(boot.provider_config.api_key,),
+        )
+        state.session_manager = manager
+        if boot.restore_succeeded and restore is not None:
+            manager.attach_record(restore)
+            # A restored session is live in memory but invisible on the fresh
+            # terminal; echoing the transcript is what makes the continuation
+            # legible instead of looking like an empty conversation.
+            render_session_history(
+                ui,
+                boot.main_session,
+                title=manager.current_title,
+                tool_manager=boot.tool_manager,
+                root=Path(args.workspace),
+            )
+            if manager.current_title == "New Session":
+                manager.maybe_generate_title()
+        else:
+            if restore is not None and boot.restore_error:
+                # The user picked a session and it could not be restored.
+                # Saying nothing would leave them believing it was.
+                ui.warn(
+                    "The selected session could not be restored; starting a "
+                    f"new one. ({boot.restore_error})"
+                )
+            await manager.start_new_session(boot.main_session)
+        autosaver = SessionAutosaver(manager)
+        autosaver.start()
+
         pump = EventPump(boot.orchestrator.event_queue, ui, state)
+        state.pump = pump
         pump_task = asyncio.create_task(pump.run())
         repl = Repl(state, ui, pump, approver)
         _install_sigint_handler(asyncio.get_running_loop(), repl)
 
         return await repl.run()
     finally:
-        if pump_task is not None:
-            pump_task.cancel()
-            await asyncio.gather(pump_task, return_exceptions=True)
-        await _stop_mcp(boot.mcp_manager)
-        if state is not None:
-            ui.note(
-                f"Session ended · {state.turn_count} turns "
-                f"· ~{state.estimate_tokens()} tokens"
+        # The teardown steps that stop the autosaver and write the final save
+        # are allowed to fail, but they must never take the cleanup below with
+        # them: a cancelled shutdown (a second Ctrl+C) would otherwise leave
+        # the pump running and the MCP subprocess alive.  The cleanup is in an
+        # inner ``finally`` so it runs whatever happens above it.
+        try:
+            if autosaver is not None:
+                await autosaver.stop()
+            if manager is not None:
+                await manager.shutdown()
+        except BaseException:  # pylint: disable=broad-exception-caught
+            loguru_logger.exception("Session teardown step failed")
+        finally:
+            if pump_task is not None:
+                pump_task.cancel()
+                await asyncio.gather(pump_task, return_exceptions=True)
+            await _stop_mcp(boot.mcp_manager)
+            if state is not None:
+                ui.note(
+                    f"Session ended · {state.turn_count} turns "
+                    f"· ~{state.estimate_tokens()} tokens"
+                )
+            if args.debug:
+                ui.note(f"Log file: {log_path}")
+
+
+def _take_workspace_lock(lock: WorkspaceLock, console: Console) -> bool:
+    """Take the workspace lock, asking the user when it is already held.
+
+    One workspace, one CLI: two instances write the same session records and
+    the last save wins, so one instance's conversation disappears without a
+    trace.  The lock turns that silent conflict into a question, and the
+    question names the risk so the answer is an informed one.
+
+    Args:
+        lock: The lock to take.
+        console: Console the warning and the question are printed to.
+
+    Returns:
+        ``True`` when the run may continue -- the lock was taken, or the user
+        chose to force entry -- ``False`` when the run must stop.
+    """
+    try:
+        acquired = lock.acquire()
+    except MitoCodeWorkspaceLockError as exc:
+        acquired = False
+        unavailable: Optional[str] = str(exc)
+    else:
+        unavailable = None
+
+    if acquired:
+        return True
+
+    content = Text()
+    if unavailable is None:
+        content.append("This workspace is already in use by ")
+        content.append(lock.holder(), style="mito.accent")
+        content.append(".")
+    else:
+        content.append(
+            "MitoCode cannot confirm that this workspace is free, because the "
+            "lock could not be taken.",
+            style="mito.warn",
+        )
+        content.append("\n\n")
+        content.append(unavailable, style="mito.muted")
+    content.append("\n\n")
+    content.append("Running a second MitoCode here is not safe:\n", style="mito.warn")
+    content.append(
+        "\n".join(
+            f"  · {risk}\n"
+            for risk in (
+                "Both instances write the same session records, and the last "
+                "save wins, so one instance's conversation can disappear "
+                "without a trace.",
+                "The autosave of one instance can overwrite the session the "
+                "other one is still writing to.",
+                "/sessions in one instance can switch the other instance's "
+                "session out from under it.",
+                "The background tasks and MCP servers the first instance "
+                "started keep running and keep writing into the workspace.",
             )
-        if args.debug:
-            ui.note(f"Log file: {log_path}")
+        ),
+        style="mito.muted",
+    )
+
+    console.print(
+        Panel(
+            content,
+            title="Workspace lock",
+            border_style="mito.warn",
+            expand=False,
+        )
+    )
+    try:
+        force = Confirm.ask("Force entry anyway?", console=console, default=False)
+    except EOFError:
+        force = False
+    if not force:
+        console.print(
+            Text(
+                "  Another MitoCode may be using this workspace; exiting.",
+                style="mito.muted",
+            )
+        )
+        return False
+    console.print(
+        Text(
+            "  Entering without the lock; session records may be overwritten.",
+            style="mito.warn",
+        )
+    )
+    return True
+
+
+def _confirm_workspace(console: Console, workspace: Path) -> bool:
+    """Ask whether a missing workspace configuration should be created.
+
+    Args:
+        console: Console the panel and the question are printed to.
+        workspace: Workspace root the CLI was pointed at.
+
+    Returns:
+        ``True`` when the user agrees to create the workspace.
+    """
+    config_dir = Path(workspace) / MITOCODE_CONFIG_PATH
+    console.print(
+        Panel(
+            Text.assemble(
+                ("This directory has no MitoCode workspace yet.\n\n", ""),
+                ("Workspace state will live in ", "mito.muted"),
+                (str(config_dir), "mito.accent"),
+                (".", "mito.muted"),
+            ),
+            title="Workspace setup",
+            border_style="mito.accent",
+            expand=False,
+        )
+    )
+    return Confirm.ask("Create the workspace here?", console=console, default=True)
+
+
+def _ensure_provider_settings(workspace: Path, console: Console) -> None:
+    """Create the provider credential file when one is missing.
+
+    Only a missing path triggers the prompts. An existing but unusable entry is
+    left untouched: overwriting it could destroy a credential the user can
+    still repair by hand, and the resolver reports the specific problem.
+
+    Args:
+        workspace: Workspace root that receives the credential file.
+        console: Console used for the setup panel and prompts.
+
+    Raises:
+        EOFError: The user cancelled the prompts with ``Ctrl+D``.
+        MitoCodeCliConfigError: The file cannot be written.
+    """
+    path = secret_path(workspace)
+    if path.exists() or path.is_symlink():
+        return
+    values = ask_provider_settings(console)
+    written = write_secret_file(workspace, values)
+    loguru_logger.debug("Provider configuration written to {}", written)
+
+
+def _run_in_workspace(args: CliArgs, console: Console, workspace_path: Path) -> int:
+    """Take the workspace lock, prepare the provider and run one session.
+
+    The lock is taken before anything is written and released on the way out,
+    so a second MitoCode cannot write over this one's session records.
+
+    Args:
+        args: Parsed command line arguments.
+        console: Themed console the prompts are printed to.
+        workspace_path: Workspace root the CLI was pointed at.
+
+    Returns:
+        The session's exit code, ``0`` for a clean run.
+    """
+    lock = WorkspaceLock(workspace_path)
+    if not _take_workspace_lock(lock, console):
+        return FAILURE_EXIT_CODE
+
+    try:
+        log_dir = workspace_path / MITOCODE_CONFIG_PATH / "logs"
+        try:
+            log_path = configure_logging(debug=args.debug, log_dir=log_dir)
+        except OSError as exc:
+            raise MitoCodeCliConfigError(
+                f"Cannot create the log directory at '{log_dir}': "
+                f"{exc.strerror or 'I/O error'}."
+            ) from exc
+
+        try:
+            _ensure_provider_settings(workspace_path, console)
+        except EOFError:
+            console.print(
+                Text("  Provider setup was cancelled; exiting.", style="mito.muted")
+            )
+            return FAILURE_EXIT_CODE
+
+        return asyncio.run(_amain(args, log_path, console))
+    finally:
+        lock.release()
 
 
 def _start(argv: Sequence[str] | None) -> int:
     """Parse arguments and run one session.
+
+    The workspace check happens before logging is configured, so declining it
+    leaves nothing on disk. Provider setup runs after logging because the
+    credential file is inside the same workspace as the log; cancelling it
+    therefore leaves only the workspace's own ``.mitocode/logs`` behind. There
+    is no home-directory fallback.
 
     Args:
         argv: Argument list without the program name, or ``None`` for
             :data:`sys.argv`.
 
     Returns:
-        ``0`` for version, help or a clean session, or ``2`` without a
+        ``0`` for version, help or a clean session, ``1`` when the user
+        declines the workspace or cancels provider setup, or ``2`` without a
         terminal.
+
+    Raises:
+        MitoCodeCliConfigError: The workspace cannot be created, the log
+            directory cannot be created, or the provider file cannot be
+            written.
     """
     args = parse_args(argv)
 
@@ -283,8 +597,25 @@ def _start(argv: Sequence[str] | None) -> int:
         )
         return NON_INTERACTIVE_EXIT_CODE
 
-    log_path = configure_logging(debug=args.debug)
-    return asyncio.run(_amain(args, log_path, Console(theme=MITOCODE_THEME)))
+    console = Console(theme=MITOCODE_THEME)
+    workspace_path = Path(args.workspace)
+    try:
+        created = ensure_workspace(
+            workspace_path, confirm=lambda path: _confirm_workspace(console, path)
+        )
+    except EOFError:
+        # Ctrl+D at the workspace prompt ends the prompt with nothing typed.
+        # The bare exception has no message, so it would reach the user as an
+        # empty "Unexpected error" panel.
+        console.print(
+            Text("  Workspace setup was cancelled; exiting.", style="mito.muted")
+        )
+        return FAILURE_EXIT_CODE
+    if not created:
+        console.print(Text("  Workspace was not created; exiting.", style="mito.muted"))
+        return FAILURE_EXIT_CODE
+
+    return _run_in_workspace(args, console, workspace_path)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

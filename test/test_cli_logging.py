@@ -11,7 +11,6 @@ from loguru import logger
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from mitocode.cli.logging_setup import (
-    DEFAULT_LOG_SUBDIR,
     LOG_FILENAME,
     LOG_LEVEL,
     RETENTION,
@@ -40,7 +39,10 @@ def test_configure_logging_only_writes_file(tmp_path):
     assert "hello-from-test" in path.read_text(encoding="utf-8")
     assert not any(sink is sys.stderr for sink in _sinks())
     assert not any(sink is sys.stdout for sink in _sinks())
-    assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
+    # Windows has no mode bits: os.chmod there only toggles the read-only
+    # attribute, and access is decided by the directory's ACL.
+    if os.name != "nt":
+        assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
 
 
 def test_configure_logging_removes_previous_sinks(tmp_path):
@@ -56,17 +58,21 @@ def test_configure_logging_removes_previous_sinks(tmp_path):
     assert "after-takeover" not in stale.read_text(encoding="utf-8")
 
 
-def test_default_log_dir_lives_under_home(monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(tmp_path))
+def test_log_dir_is_required(tmp_path):
+    with pytest.raises(TypeError):
+        configure_logging()
 
-    path = configure_logging()
-    logger.info("default-path-line")
-    logger.complete()
 
-    expected_dir = tmp_path / ".mitocode" / "logs"
-    assert path == expected_dir / LOG_FILENAME
-    assert path.is_file()
-    assert "default-path-line" in path.read_text(encoding="utf-8")
+def test_failed_directory_creation_removes_sinks_first(tmp_path):
+    """A failed setup must not leave a stderr sink that can print a traceback."""
+    blocker = tmp_path / "logs"
+    blocker.write_text("not a directory", encoding="utf-8")
+    logger.add(sys.stderr, level="INFO")
+
+    with pytest.raises(OSError):
+        configure_logging(log_dir=blocker)
+
+    assert not any(sink is sys.stderr for sink in _sinks())
 
 
 def test_creates_missing_log_directory_with_private_mode(tmp_path):
@@ -75,7 +81,10 @@ def test_creates_missing_log_directory_with_private_mode(tmp_path):
     configure_logging(log_dir=log_dir)
 
     assert log_dir.is_dir()
-    assert stat.S_IMODE(log_dir.stat().st_mode) == 0o700
+    # Windows has no mode bits: os.chmod there only toggles the read-only
+    # attribute, and access is decided by the directory's ACL.
+    if os.name != "nt":
+        assert stat.S_IMODE(log_dir.stat().st_mode) == 0o700
 
 
 def test_tightens_existing_log_directory_mode(tmp_path):
@@ -85,7 +94,10 @@ def test_tightens_existing_log_directory_mode(tmp_path):
 
     configure_logging(log_dir=log_dir)
 
-    assert stat.S_IMODE(log_dir.stat().st_mode) == 0o700
+    # Windows has no mode bits: os.chmod there only toggles the read-only
+    # attribute, and access is decided by the directory's ACL.
+    if os.name != "nt":
+        assert stat.S_IMODE(log_dir.stat().st_mode) == 0o700
 
 
 def test_file_sink_is_always_debug(tmp_path):
@@ -158,4 +170,3 @@ def test_configuration_constants():
     assert LOG_LEVEL == "DEBUG"
     assert ROTATION == "10 MB"
     assert RETENTION == 5
-    assert DEFAULT_LOG_SUBDIR == Path(".mitocode") / "logs"

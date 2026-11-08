@@ -274,6 +274,13 @@ class BackgroundRegistry:
         # record because the record is handed to callers as a copy and must
         # not carry a live task with it.
         self._tasks: Dict[str, "asyncio.Task[None]"] = {}
+        # handle -> the task running the *work* itself.  The wrapper in
+        # `_tasks` can finish while the work it started keeps running -- a
+        # callee that suppresses its own cancellation, or one that awaits
+        # inside `asyncio.shield`.  Tracking the work separately is what
+        # lets `has_active_tasks` report the truth and `stop_all` wait for
+        # it, instead of returning while it is still writing the workspace.
+        self._inner: Dict[str, "asyncio.Future[Any]"] = {}
         # Handles whose notification has been claimed.  Separate from the
         # record's state: a delivered task is still DONE and still collectable,
         # it just has nothing left to announce.
@@ -643,6 +650,42 @@ class BackgroundRegistry:
             if task is not None and not task.done():
                 task.cancel()
 
+    def has_active_tasks(self) -> bool:
+        """Return whether any detached call is still running.
+
+        The *work* counts as running even when its wrapper has already
+        settled: a callee that suppresses its own cancellation, or one that
+        awaits inside ``asyncio.shield``, keeps going after the wrapper is
+        done.  Reporting "idle" then would let a session switch happen
+        underneath that work, which can still write the workspace afterwards.
+
+        Returns:
+            ``True`` while at least one launched task or its work has not
+            finished.
+        """
+        return any(not task.done() for task in self._tasks.values()) or any(
+            not inner.done() for inner in self._inner.values()
+        )
+
+    async def stop_all(self) -> None:
+        """Cancel every running detached call and wait for it to finish.
+
+        :meth:`cancel_all` only *requests* cancellation and returns before
+        the tasks have unwound; switching sessions must not leave a task
+        writing results into a registry that is about to be replaced, so
+        this awaits every cancelled task and swallows the resulting
+        ``CancelledError``.
+
+        The work itself is awaited too, not just the wrapper that started
+        it: work that outlived its wrapper is still writing the workspace,
+        and a switch that follows this must not race it.
+        """
+        self.cancel_all()
+        running = [task for task in self._tasks.values() if not task.done()]
+        inner_work = [inner for inner in self._inner.values() if not inner.done()]
+        if running or inner_work:
+            await asyncio.gather(*running, *inner_work, return_exceptions=True)
+
     async def _run(self, record: BackgroundTask, coro_factory: CoroFactory) -> None:
         """Run *coro_factory* under its ceiling and settle *record*.
 
@@ -693,6 +736,10 @@ class BackgroundRegistry:
             coro_factory: The factory handed to :meth:`launch`.
         """
         inner = asyncio.ensure_future(coro_factory())
+        # Register the work itself so the registry can tell that it is still
+        # running even after this wrapper has settled, and so `stop_all` can
+        # wait for it instead of returning while it is still going.
+        self._inner[record.handle] = inner
         expired = False
 
         async def _expire() -> None:

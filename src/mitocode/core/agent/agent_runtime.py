@@ -230,7 +230,9 @@ class AgentRuntime:
 
                         session.messages.append(
                             _ToolResultMessageBlock(
-                                tool_call_id=block.id, result=result_str
+                                tool_call_id=block.id,
+                                result=result_str,
+                                success=success,
                             )
                         )
                         completed.add(block.id)
@@ -247,6 +249,7 @@ class AgentRuntime:
                                 _ToolResultMessageBlock(
                                     tool_call_id=block.id,
                                     result="Error: interrupted by user.",
+                                    success=False,
                                 )
                             )
                     raise

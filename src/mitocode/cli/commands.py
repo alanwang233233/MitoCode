@@ -9,7 +9,7 @@ returns an ordinary :class:`CommandResult` so the REPL keeps running.
 Two rules keep commands from taking down the REPL.  Handlers that address an
 agent by id verify the id and warn instead of indexing a missing session, and
 every handler that can fail for a recoverable reason (a bad model number, an
-applied prompt answer, a workspace that cannot be written) reports through
+applied prompt answer) reports through
 :class:`~mitocode.cli.ui.CliUI` rather than raising.  A command's failures are
 never a reason to exit: only ``/exit`` and ``/quit`` return
 ``exit_requested=True``.
@@ -22,17 +22,35 @@ needs a terminal or a network connection.
 
 from __future__ import annotations
 
-import inspect
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
+from types import SimpleNamespace
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    cast,
+)
 
 from rich.table import Table
 from rich.text import Text
 
 from loguru import logger as loguru_logger
 
+from mitocode.core.agent.agent_state import AgentState
+
 from mitocode.cli.config import KNOWN_REASONING_EFFORTS
+from mitocode.cli.demo import DemoPlayer, TerminalKeySource
+from mitocode.cli.sessions import (
+    SessionLoadError,
+    SessionStore,
+    display_messages_from_record,
+    select_session,
+)
 from mitocode.cli.state import CommandContext
 
 if TYPE_CHECKING:
@@ -327,24 +345,6 @@ def _last_assistant_text(session: Any) -> Optional[str]:
     return None
 
 
-async def _resolve(value: Any) -> Any:
-    """Await *value* when it is awaitable, otherwise return it.
-
-    ``Workspace.reload``/``dump`` return a coroutine inside a running event
-    loop and a plain value outside one; handlers always run inside an event
-    loop but spelling the union out keeps both shapes working.
-
-    Args:
-        value: Plain result or awaitable.
-
-    Returns:
-        The resolved value.
-    """
-    if inspect.isawaitable(value):
-        return await value
-    return value
-
-
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -409,6 +409,9 @@ async def _cmd_status(ctx: CommandContext, args: List[str]) -> CommandResult:
     table.add_column("Field", style="mito.muted", no_wrap=True)
     table.add_column("Value")
     table.add_row("session", Text(f"#{state.main_id} {name}"))
+    manager = state.session_manager
+    if manager is not None:
+        table.add_row("title", Text(manager.current_title))
     table.add_row("model", Text(_model_name(state)))
     table.add_row(
         "effort",
@@ -549,6 +552,9 @@ async def _cmd_clear(ctx: CommandContext, args: List[str]) -> CommandResult:
     """
     del args
     state = ctx.state
+    manager = state.session_manager
+    if manager is not None:
+        await manager.save_current(force=True)
     await state.orchestrator.destroy_agent(state.main_id)
     state.main_id = await state.orchestrator.create_agent(
         name="Main", description="Interactive session"
@@ -557,7 +563,307 @@ async def _cmd_clear(ctx: CommandContext, args: List[str]) -> CommandResult:
     state.tool_call_count = 0
     state.total_chars = 0
     state.agents = state.orchestrator.get_tree_snapshot()
+    if manager is not None:
+        await manager.start_new_session(state.main_session())
     ctx.ui.note(f"New session #{state.main_id}.")
+    return CommandResult()
+
+
+async def _confirm_force_stop(ctx: CommandContext) -> bool:
+    """Ask whether a running session may be force-stopped for a switch.
+
+    Busy means an orchestrator task, a RUNNING main session, or a live
+    background tool task.  Refusal is reported as ``Switch cancelled.``
+
+    Args:
+        ctx: Command context carrying state and UI.
+
+    Returns:
+        ``True`` when the session is idle or the user accepted the forced
+        stop; ``False`` when the user refused.
+    """
+    state = ctx.state
+    busy = False
+
+    has_active_tasks = getattr(state.orchestrator, "has_active_tasks", None)
+    if callable(has_active_tasks) and has_active_tasks():
+        busy = True
+
+    if not busy:
+        try:
+            session = state.main_session()
+        except RuntimeError:
+            session = None
+        if (
+            session is not None
+            and getattr(session, "state", None) is AgentState.RUNNING
+        ):
+            busy = True
+
+    if not busy:
+        background = getattr(state.tool_context, "background", None)
+        has_background = getattr(background, "has_active_tasks", None)
+        if callable(has_background) and has_background():
+            busy = True
+
+    if not busy:
+        return True
+    answer = await ctx.ui.ask(
+        "Current session is still running. Force stop and switch? [y/N] "
+    )
+    if answer.strip().lower() in ("y", "yes"):
+        return True
+    ctx.ui.note("Switch cancelled.")
+    return False
+
+
+def _session_is_busy(state: Any) -> bool:
+    """Return whether any work is still running for the current session.
+
+    Args:
+        state: Current CLI state.
+
+    Returns:
+        ``True`` when an orchestrator task, a RUNNING main session or a
+        live background tool task is still going.
+    """
+    has_active_tasks = getattr(state.orchestrator, "has_active_tasks", None)
+    if callable(has_active_tasks) and has_active_tasks():
+        return True
+
+    try:
+        session = state.main_session()
+    except RuntimeError:
+        session = None
+    if session is not None and getattr(session, "state", None) is AgentState.RUNNING:
+        return True
+
+    background = getattr(state.tool_context, "background", None)
+    has_background = getattr(background, "has_active_tasks", None)
+    if callable(has_background) and has_background():
+        return True
+    return False
+
+
+async def _stop_active_work(state: Any) -> bool:
+    """Stop every piece of work still running for the current session.
+
+    The confirmation prompt only records the user's answer; the work itself
+    has to be stopped before anything else happens, or it keeps running
+    underneath whatever comes next.
+
+    Args:
+        state: Current CLI state.
+
+    Returns:
+        ``True`` when no work is left running, ``False`` when some work
+        refused to stop.
+    """
+    orchestrator = state.orchestrator
+    reset_sessions = getattr(orchestrator, "reset_sessions", None)
+    if callable(reset_sessions):
+        try:
+            await cast(Callable[[], Awaitable[None]], reset_sessions)()
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            loguru_logger.exception("Could not stop the running session")
+            ctx_ui = getattr(state, "ui", None)
+            if ctx_ui is not None:
+                ctx_ui.warn(f"The running session could not be stopped: {exc}")
+            return False
+
+    background = getattr(state.tool_context, "background", None)
+    stop_all = getattr(background, "stop_all", None)
+    if callable(stop_all):
+        try:
+            await cast(Callable[[], Awaitable[None]], stop_all)()
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            loguru_logger.exception("Could not stop the background work")
+            ctx_ui = getattr(state, "ui", None)
+            if ctx_ui is not None:
+                ctx_ui.warn(f"The background work could not be stopped: {exc}")
+            return False
+    return not _session_is_busy(state)
+
+
+def _session_store(ctx: CommandContext) -> SessionStore:
+    """Build the session store for the command's workspace.
+
+    Args:
+        ctx: Command context carrying the state's workspace.
+
+    Returns:
+        A store rooted at the workspace's ``.mitocode/sessions`` directory.
+    """
+    return SessionStore(Path(_workspace_path(ctx.state)))
+
+
+@command("save", "/save", "Save the current session to disk now.")
+async def _cmd_save(ctx: CommandContext, args: List[str]) -> CommandResult:
+    """Force-save the current session tree to disk.
+
+    Args:
+        ctx: Command context.
+        args: Unused extra arguments.
+
+    Returns:
+        A default result.
+    """
+    del args
+    manager = ctx.state.session_manager
+    if manager is None:
+        ctx.ui.warn("Session saving is not available in this run.")
+        return CommandResult()
+    path = await manager.save_current(force=True, report_failure=True)
+    if path is None:
+        ctx.ui.warn("No session to save.")
+        return CommandResult()
+    ctx.ui.note(f"Saved session {manager.current_session_id} to {path}.")
+    return CommandResult()
+
+
+@command("sessions", "/sessions", "List saved sessions and switch to one.")
+async def _cmd_sessions(ctx: CommandContext, args: List[str]) -> CommandResult:
+    """Switch the live tree to another saved session or a brand-new one.
+
+    The current session is saved first; a busy session asks for
+    confirmation before its tasks are force-stopped.
+
+    Args:
+        ctx: Command context.
+        args: Unused extra arguments.
+
+    Returns:
+        A default result.
+    """
+    del args
+    state = ctx.state
+    manager = state.session_manager
+    if manager is None:
+        ctx.ui.warn("Session switching is not available in this run.")
+        return CommandResult()
+
+    await manager.save_current()
+    if not await _confirm_force_stop(ctx):
+        return CommandResult()
+
+    store = _session_store(ctx)
+    try:
+        summaries, _skipped = store.list_sessions()
+    except SessionLoadError as exc:
+        ctx.ui.warn(f"The saved sessions could not be read. ({exc})")
+        return CommandResult()
+    choice = await select_session(state.ui, summaries, allow_new=True)
+    if choice == manager.current_session_id:
+        ctx.ui.note("Already current.")
+        return CommandResult()
+    if choice == "new":
+        await manager.switch_new()
+        ctx.ui.note(f'Switched to "{manager.current_title}".')
+        return CommandResult()
+
+    try:
+        record = store.load(choice)
+    except SessionLoadError as exc:
+        ctx.ui.warn(f"Session could not be loaded; staying on the current one. ({exc})")
+        return CommandResult()
+    if await manager.switch_to(record):
+        ctx.ui.note(f'Switched to "{manager.current_title}".')
+        return CommandResult()
+    ctx.ui.warn("Session could not be restored; staying on the current one.")
+    return CommandResult()
+
+
+@command("demo", "/demo", "Replay a saved session as a read-only demo.")
+async def _cmd_demo(ctx: CommandContext, args: List[str]) -> CommandResult:
+    """Replay one saved session with synthetic pacing, read-only.
+
+    The demo never opens the replayed session: the current one stays live and
+    stays current, so after the "press any key" hold the prompt returns to
+    exactly the conversation the user left.
+
+    The order is deliberate.  The session is written to disk first, so the
+    replay shows what is actually stored rather than what a stale file
+    holds.  The work that is still running is then stopped for real -- the
+    confirmation prompt only records the answer, it does not stop anything --
+    and a session that refuses to stop aborts the replay.  Finally the
+    replay reads the stored record rather than the live session, so it never
+    walks a list the event pump is still appending to.
+
+    Args:
+        ctx: Command context.
+        args: Unused extra arguments.
+
+    Returns:
+        A default result.
+    """
+    del args
+    state = ctx.state
+    manager = state.session_manager
+    if manager is None:
+        ctx.ui.warn("Demo playback is not available in this run.")
+        return CommandResult()
+
+    store = _session_store(ctx)
+    try:
+        summaries, _skipped = store.list_sessions()
+    except SessionLoadError as exc:
+        ctx.ui.warn(f"The saved sessions could not be read. ({exc})")
+        return CommandResult()
+    if not summaries:
+        ctx.ui.warn("No saved sessions to replay.")
+        return CommandResult()
+
+    if not await _confirm_force_stop(ctx):
+        return CommandResult()
+
+    # Make sure what is on disk is what the user last saw, so the replay
+    # cannot show a stale conversation.
+    await manager.save_current(force=True)
+
+    # Answering "yes" to the prompt only acknowledges the force stop; the
+    # work has to be stopped here, or it keeps running during the replay.
+    if not await _stop_active_work(state):
+        ctx.ui.warn("The running work could not be stopped; demo not started.")
+        return CommandResult()
+
+    choice = await select_session(state.ui, summaries, allow_new=False)
+    if choice == manager.current_session_id:
+        # The replay reads the stored record, never the live session: the
+        # pump may append to that one while the replay walks the same list.
+        try:
+            record = store.load(choice)
+        except SessionLoadError as exc:
+            ctx.ui.warn(
+                f"Session could not be loaded; staying on the current one. ({exc})"
+            )
+            return CommandResult()
+        title = str(record.get("title", "") or "New Session")
+    else:
+        try:
+            record = store.load(choice)
+        except SessionLoadError as exc:
+            ctx.ui.warn(
+                f"Session could not be loaded; staying on the current one. ({exc})"
+            )
+            return CommandResult()
+        title = str(record.get("title", "") or "New Session")
+
+    # A display session built straight from the record: the orchestrator is
+    # never involved, so the current session cannot be disturbed.
+    session = SimpleNamespace(messages=display_messages_from_record(record))
+
+    pump = getattr(state, "pump", None)
+    if pump is not None:
+        await pump.wait_idle()
+    player = DemoPlayer(
+        state.ui,
+        session,
+        title=title,
+        key_source=TerminalKeySource(),
+        tool_manager=state.tool_manager,
+        root=Path(_workspace_path(state)),
+    )
+    await player.run()
     return CommandResult()
 
 
@@ -673,8 +979,6 @@ async def _cmd_skills(ctx: CommandContext, args: List[str]) -> CommandResult:
             "details are in the log."
         )
     if not skills:
-        # User-level discovery (~/.mitocode/skills) is temporarily disabled
-        # in bootstrap.skills_roots, so only the workspace path is advertised.
         ctx.ui.note(
             "No skills installed. Add a skill as a directory holding a "
             "SKILL.md under .mitocode/skills in this workspace, then run "
@@ -880,50 +1184,6 @@ async def _cmd_cost(ctx: CommandContext, args: List[str]) -> CommandResult:
     """
     del args
     ctx.ui.note(f"Approximate tokens: ~{ctx.state.estimate_tokens()}")
-    return CommandResult()
-
-
-@command("init", "/init", "Persist the in-memory workspace configuration.")
-async def _cmd_init(ctx: CommandContext, args: List[str]) -> CommandResult:
-    """Write the workspace to disk, or reload an already initialized one.
-
-    Args:
-        ctx: Command context.
-        args: Unused extra arguments.
-
-    Returns:
-        A default result.
-    """
-    del args
-    state = ctx.state
-    workspace = state.workspace
-    path = Path(_workspace_path(state))
-
-    if state.workspace_initialized:
-        reload = getattr(workspace, "reload", None)
-        if callable(reload):
-            try:
-                await _resolve(reload())
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                ctx.ui.error(f"Could not reload the workspace: {exc}")
-                return CommandResult()
-        ctx.ui.note(f"Workspace already initialized at {path}.")
-        return CommandResult()
-
-    config_path = getattr(workspace, "config_path", None)
-    try:
-        if isinstance(config_path, Path):
-            config_path.mkdir(parents=True, exist_ok=True)
-        result = await _resolve(workspace.dump())
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-        ctx.ui.error(f"Could not initialize the workspace: {exc}")
-        return CommandResult()
-
-    if result:
-        state.workspace_initialized = True
-        ctx.ui.note(f"Workspace initialized at {path}.")
-    else:
-        ctx.ui.warn("Workspace was not initialized.")
     return CommandResult()
 
 

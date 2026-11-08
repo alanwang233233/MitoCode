@@ -153,7 +153,9 @@ def _make(root: Path, rel: str, content: str = "") -> Path:
     """
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    # Bytes, not text: text mode translates a newline on Windows, so a file
+    # meant to hold CRLF would come out with CRCRLF.
+    path.write_bytes(content.encode("utf-8"))
     return path
 
 
@@ -166,6 +168,8 @@ def _fifo(path: Path) -> Path:
     Returns:
         The same path, for fluent use in tests.
     """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("staging the named-pipe case needs POSIX FIFOs")
     os.mkfifo(path)
     return path
 
@@ -759,6 +763,7 @@ async def test_write_through_a_broken_symlink_lands_on_the_target(root, workspac
     ), f"an in-root target must not reach the approver, got {spy.requests!r}"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs extra privileges")
 @pytest.mark.asyncio
 async def test_write_refuses_a_symlink_loop_target(root, workspace, spy):
     """A symlink loop survives resolution as a symlink, and Write refuses it.

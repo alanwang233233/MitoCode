@@ -1559,3 +1559,211 @@ async def test_blank_redact_secrets_are_ignored():
     assert (
         errors and errors[0]["message"] == "plain boom"
     ), "空串/空白 secret 必须被忽略，否则 replace('') 会撕碎整条消息"
+
+
+# ──────────────────────────────────────────────
+# AgentOrchestrator: 会话切换钩子（忙碌检测 / reset / restore）
+# ──────────────────────────────────────────────
+
+
+def test_has_active_tasks_on_fresh_orchestrator_is_false():
+    """新建 orchestrator 没有任何任务 → has_active_tasks() 为 False."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+
+    assert orchestrator.has_active_tasks() is False, "空注册表不应报告有活动任务"
+
+
+@pytest.mark.asyncio
+async def test_has_active_tasks_tracks_running_and_finished_task():
+    """运行中的任务 → True；任务结束后（槽位已被 finally 清空）→ False."""
+    provider = _GateProvider()
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    session = await orchestrator.create_session(name="busy", provider=provider)
+    assert (
+        orchestrator.has_active_tasks() is False
+    ), "仅有空任务槽（None）的会话不应算作忙碌"
+
+    task = await orchestrator.send_message(session.agent_id, "hi")
+    await asyncio.wait_for(provider.started.wait(), timeout=2.0)
+    assert orchestrator.has_active_tasks() is True, "运行中的任务必须被报告为忙碌"
+
+    provider.gate.set()
+    await asyncio.wait_for(task, timeout=2.0)
+    assert orchestrator.has_active_tasks() is False, "任务结束后不应再报告为忙碌"
+
+
+@pytest.mark.asyncio
+async def test_reset_sessions_cancels_tasks_clears_registry_and_pushes_sync():
+    """reset_sessions → 任务被取消并等待、注册表清空、计数器归零、推一次空树 sync."""
+    provider = _GateProvider()
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    first = await orchestrator.create_session(name="one", provider=provider)
+    second = await orchestrator.create_session(name="two")
+    task = await orchestrator.send_message(first.agent_id, "hi")
+    await asyncio.wait_for(provider.started.wait(), timeout=2.0)
+    _drain_events(orchestrator)
+
+    await orchestrator.reset_sessions()
+
+    assert task.cancelled() is True, "reset 必须硬取消运行中的任务并等待其结束"
+    assert first.state is AgentState.CANCELLED, "被取消任务的会话状态应为 CANCELLED"
+    assert orchestrator._sessions == {}, "整个注册表应被清空"
+    assert orchestrator._tasks == {}, "任务表应被清空"
+    assert orchestrator._counter == 0, "计数器应归零，供下次 create/restore 重头分配"
+    assert orchestrator.has_active_tasks() is False, "reset 后不应再有活动任务"
+
+    events = _drain_events(orchestrator)
+    assert events[-1] == (-1, {"type": "sync", "agents": []}), (
+        "reset 应以一次空树 sync 收尾，实际事件 " f"{events!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reset_sessions_on_empty_registry_is_safe_and_zeroes_counter():
+    """空注册表（销毁后会话已不在）→ reset 不抛异常、计数器归零且推一次 sync."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    session = await orchestrator.create_session(name="gone")
+    await orchestrator.destroy_agent(session.agent_id)
+    _drain_events(orchestrator)
+    assert orchestrator._counter == 1, "前置：destroy 不重置计数器，reset 应负责归零"
+
+    await orchestrator.reset_sessions()
+
+    assert orchestrator._counter == 0, "空注册表下 reset 也应把计数器归零"
+    assert orchestrator._sessions == {}, "注册表应保持为空"
+    assert _drain_events(orchestrator) == [
+        (-1, {"type": "sync", "agents": []})
+    ], "空注册表的 reset 应恰好推送一次空树 sync"
+
+
+@pytest.mark.asyncio
+async def test_restore_tree_rebuilds_sessions_with_original_ids_and_tree():
+    """合法记录 → 原 id 保留、树关系重建、counter 就位且只推一次 sync."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    agents = [
+        {"agent_id": 0, "parent_id": None, "name": "Main", "description": "root"},
+        {"agent_id": 1, "parent_id": 0, "name": "Child", "description": ""},
+    ]
+    _drain_events(orchestrator)
+
+    sessions = await orchestrator.restore_tree(agents)
+
+    assert set(sessions) == {0, 1}, "返回 dict 应以原 agent_id 为键"
+    assert orchestrator.get_session(0) is sessions[0], "原 id 0 应重新注册"
+    assert orchestrator.get_session(1) is sessions[1], "原 id 1 应重新注册"
+    assert sessions[0].name == "Main"
+    assert sessions[0].description == "root"
+    assert sessions[1].parent_id == 0, "子会话的 parent_id 应来自记录"
+    assert sessions[0].sub_agent_ids == [1], "父会话的子列表应按记录重建"
+    assert sessions[1].sub_agent_ids == [], "子会话不应有子代理"
+    assert orchestrator._counter == 2, "计数器应停在最大恢复 id 之上"
+    assert orchestrator._tasks == {0: None, 1: None}, "每个恢复会话应有空任务槽"
+    assert sessions[0].messages == [], "应以 system_prompt='' 构造，不追加 system 块"
+
+    events = _drain_events(orchestrator)
+    assert len(events) == 1, "restore_tree 应恰好推送一次树同步"
+    evt_id, payload = events[0]
+    assert evt_id == -1 and payload["type"] == "sync", "应推送 -1 标识的 sync 事件"
+    assert [node["id"] for node in payload["agents"]] == [
+        0,
+        1,
+    ], "同步快照应按记录顺序包含全部恢复会话"
+
+
+@pytest.mark.asyncio
+async def test_restore_tree_accepts_child_records_before_their_parent():
+    """记录先列子后父 → 两遍构造应正确重建树，不依赖记录顺序."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+    agents = [
+        {"agent_id": 1, "parent_id": 0, "name": "Child"},
+        {"agent_id": 0, "parent_id": None, "name": "Main"},
+    ]
+
+    sessions = await orchestrator.restore_tree(agents)
+
+    assert sessions[0].sub_agent_ids == [1], "父会话子列表应重建而非依赖记录顺序"
+    assert sessions[1].parent_id == 0, "子会话 parent_id 应保留"
+
+
+@pytest.mark.asyncio
+async def test_restore_tree_duplicate_ids_raise_value_error():
+    """重复 agent_id → ValueError，且注册表不被污染."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+
+    with pytest.raises(ValueError):
+        await orchestrator.restore_tree(
+            [
+                {"agent_id": 0, "parent_id": None},
+                {"agent_id": 0, "parent_id": None},
+            ]
+        )
+
+    assert orchestrator._sessions == {}, "校验失败不应留下任何会话"
+
+
+@pytest.mark.asyncio
+async def test_restore_tree_unknown_parent_raises_value_error():
+    """parent_id 指向记录中不存在的 id → ValueError."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+
+    with pytest.raises(ValueError):
+        await orchestrator.restore_tree([{"agent_id": 0, "parent_id": 9}])
+
+    assert orchestrator._sessions == {}, "校验失败不应留下任何会话"
+
+
+@pytest.mark.asyncio
+async def test_restore_tree_parent_cycle_raises_value_error():
+    """parent 链成环（0→1→0）→ ValueError."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+
+    with pytest.raises(ValueError):
+        await orchestrator.restore_tree(
+            [
+                {"agent_id": 0, "parent_id": 1},
+                {"agent_id": 1, "parent_id": 0},
+            ]
+        )
+
+    assert orchestrator._sessions == {}, "校验失败不应留下任何会话"
+
+
+@pytest.mark.asyncio
+async def test_restore_tree_empty_agents_raises_value_error():
+    """空 agents 列表 → ValueError."""
+    orchestrator = AgentOrchestrator(default_provider=EchoProvider())
+
+    with pytest.raises(ValueError):
+        await orchestrator.restore_tree([])
+
+    assert orchestrator._sessions == {}, "校验失败不应留下任何会话"
+
+
+@pytest.mark.asyncio
+async def test_restore_tree_without_default_provider_raises_value_error():
+    """orchestrator 无 default_provider → ValueError."""
+    orchestrator = AgentOrchestrator()
+
+    with pytest.raises(ValueError):
+        await orchestrator.restore_tree([{"agent_id": 0, "parent_id": None}])
+
+
+@pytest.mark.asyncio
+async def test_restore_tree_deep_copies_turn_provider_per_session():
+    """带 turn 的默认 provider → 每个会话拿到独立副本且 turn 归零，原对象不变."""
+    provider = _TurnProvider()
+    provider.turn = 5
+    orchestrator = AgentOrchestrator(default_provider=provider)
+
+    sessions = await orchestrator.restore_tree(
+        [
+            {"agent_id": 0, "parent_id": None},
+            {"agent_id": 1, "parent_id": 0},
+        ]
+    )
+
+    assert sessions[0].provider is not provider, "带 turn 的 provider 必须深拷贝隔离"
+    assert sessions[0].provider.turn == 0, "会话副本的 turn 应从 0 重新开始"
+    assert sessions[1].provider is not sessions[0].provider, "各会话副本互不相同"
+    assert sessions[1].provider.turn == 0, "每个副本的 turn 都应归零"
+    assert provider.turn == 5, "深拷贝不应修改调用方的默认 provider"

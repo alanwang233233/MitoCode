@@ -69,7 +69,9 @@ import math
 import os
 import re
 import signal
-from pathlib import Path
+import subprocess
+import sys
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Optional, Tuple
 
 from mitocode.core.tool.builtin.approval import ApprovalDecision, ApprovalRequest
@@ -104,12 +106,16 @@ _REAP_WAIT_SECONDS = 5.0
 
 
 def _kill_group(pid: int) -> None:
-    """SIGKILL the process group *pid* leads, best effort.
+    """Kill the process group *pid* leads, best effort.
 
-    The shell is launched with ``start_new_session=True``, so it is the
-    leader of its own group and its pgid is its own pid; signalling the group
-    reaches every child and grandchild it spawned, which a bare
+    The shell is launched with ``start_new_session=True``, so on POSIX it is
+    the leader of its own group and its pgid is its own pid; signalling the
+    group reaches every child and grandchild it spawned, which a bare
     ``proc.kill()`` would not.
+
+    Windows has neither process groups nor ``SIGKILL``, and
+    ``os.killpg`` does not exist there at all.  There the shell itself is
+    terminated, which reaches the shell but not the tree it spawned.
 
     Args:
         pid: The pid of the shell whose group should die.
@@ -121,10 +127,96 @@ def _kill_group(pid: int) -> None:
         caller's "timed out" message must reach the model even when the
         cleanup fails.  This is cleanup, not control flow.
     """
+    if sys.platform == "win32":
+        _kill_tree_windows(pid)
+        return
     try:
         os.killpg(os.getpgid(pid), signal.SIGKILL)
     except OSError:
         pass
+
+
+def _kill_tree_windows(pid: int) -> None:
+    """Terminate the process tree rooted at *pid* on Windows.
+
+    Windows has no process groups, so there is nothing for ``killpg`` to
+    signal and a bare ``os.kill`` reaches only the shell -- the children it
+    spawned would survive it.  ``taskkill /T`` walks the tree the way
+    ``killpg`` walks a group on POSIX, so they die with their parent.
+
+    Args:
+        pid: The pid of the process whose tree should die.
+
+    Notes:
+        Best effort, like the POSIX path: a tree that is already gone needs
+        no killing, and a failure must not stop the caller's own cleanup or
+        replace the timeout message the model is waiting for.  The
+        subprocess call is synchronous, which blocks the loop briefly; it
+        runs only on the timeout and cancellation paths.
+    """
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+
+
+def _first_separator(token: str) -> int:
+    """Index of the first path separator in *token*, or ``-1`` if it has none.
+
+    Both separators count.  A Windows command line uses ``\\``, and a token
+    carrying one is path-shaped there, so the option/env exemption has to
+    recognise it too -- otherwise ``--file=C:\\x`` reads as a path on
+    Windows and as an option on POSIX, and the two platforms disagree.
+
+    Args:
+        token: The token to inspect.
+
+    Returns:
+        The index of the earliest ``/`` or ``\\``, or ``-1`` when it has
+        neither.
+    """
+    slash = token.find("/")
+    backslash = token.find("\\")
+    if slash == -1:
+        return backslash
+    if backslash == -1:
+        return slash
+    return min(slash, backslash)
+
+
+def _is_absolute_path(token: str) -> bool:
+    """Return whether *token* names an absolute path on any supported platform.
+
+    ``PurePosixPath`` and ``PureWindowsPath`` are asked in turn: a drive
+    letter (``C:\\x``), a UNC share (``\\\\server\\share\\x``) and a rooted
+    POSIX path (``/x``) each name an absolute location.  The escape scan
+    must not be looser on one platform than on the other -- a Windows path
+    that reaches outside the root has to be flagged there too, or the
+    guardrail would hold on Linux and not on Windows.
+
+    Args:
+        token: The token to inspect.
+
+    Returns:
+        ``True`` when the token is absolute under either spelling.
+    """
+    windows = PureWindowsPath(token)
+    return (
+        PurePosixPath(token).is_absolute()
+        or windows.is_absolute()
+        # A rooted-but-driveless Windows path ("\\x") is absolute against
+        # whatever drive happens to be current.
+        or bool(windows.root)
+    )
 
 
 def scan_for_escape(command: str, root: Path) -> Optional[str]:
@@ -186,15 +278,15 @@ def scan_for_escape(command: str, root: Path) -> Optional[str]:
             continue
         if token.startswith("~"):
             return token
-        if token == ".." or token.startswith("../"):
+        if token == ".." or token.startswith("../") or token.startswith("..\\"):
             return token
         equals = token.find("=")
-        slash = token.find("/")
-        if equals != -1 and (slash == -1 or equals < slash):
+        separator = _first_separator(token)
+        if equals != -1 and (separator == -1 or equals < separator):
             # `--file=/tmp/x` or `FOO=/tmp/x`: an option or an environment
             # assignment, not a path.  The path rules do not apply to it.
             continue
-        if token.startswith("/"):
+        if _is_absolute_path(token):
             try:
                 candidate = Path(token).resolve()
             except (OSError, RuntimeError, ValueError):

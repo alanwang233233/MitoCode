@@ -12,7 +12,7 @@ from __future__ import annotations
 import difflib
 import re
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 from rich.text import Text
 
@@ -69,6 +69,11 @@ def display_path(raw: str, root: Path) -> str:
     expanded absolute path, since pretending they are relative would be
     misleading.
 
+    The path is rendered in the POSIX spelling, whatever the platform: the
+    same relative path has to read the same way in a transcript on every
+    machine, and :mod:`mitocode.core.tool.builtin.file_walker` already
+    renders its relative paths that way.
+
     Args:
         raw: The path as supplied by the model or the user.
         root: Workspace root the display should be relative to.
@@ -82,20 +87,20 @@ def display_path(raw: str, root: Path) -> str:
 
     expanded = Path(str(raw)).expanduser()
     if not expanded.is_absolute():
-        return str(expanded)
+        return expanded.as_posix()
 
     try:
         target = expanded.resolve()
         base = Path(root).expanduser().resolve()
     except (OSError, RuntimeError):
-        return str(expanded)
+        return expanded.as_posix()
 
     if target == base:
         return "."
     try:
-        return str(target.relative_to(base))
+        return target.relative_to(base).as_posix()
     except ValueError:
-        return str(expanded)
+        return expanded.as_posix()
 
 
 def _string(value: Any) -> str:
@@ -568,12 +573,13 @@ def format_result(
     *,
     verbose: bool,
     root: Path,
+    success: Optional[bool] = None,
 ) -> Text:
     """Render a tool result preview, without the ``⎿`` gutter.
 
     ``Edit`` summaries come from the call arguments because its tool output is
     only a confirmation string; ``Write`` and ``Read`` collapse to counts;
-    ``Bash`` and every other tool show their output. An ``Error:`` result is
+    ``Bash`` and every other tool show their output. A failed result is
     preserved verbatim and styled as a failure so the user can act on it.
 
     Args:
@@ -582,6 +588,10 @@ def format_result(
         result: Raw tool output.
         verbose: Disable truncation so the whole output is shown.
         root: Workspace root used to relativise paths.
+        success: The outcome the runtime decided on.  When it is given it is
+            authoritative; when it is ``None`` the outcome is inferred from
+            the ``error:`` prefix, which is all a caller with no runtime
+            verdict can go on.
 
     Returns:
         Styled text whose plain form is the preview the caller prints after the
@@ -590,7 +600,12 @@ def format_result(
     raw = "" if result is None else str(result)
     stripped = raw.strip()
 
-    if stripped.lower().startswith(ERROR_PREFIX):
+    failed = (
+        not success
+        if success is not None
+        else stripped.lower().startswith(ERROR_PREFIX)
+    )
+    if failed:
         body = stripped if verbose else truncate(stripped)
         return _indented_text(body, style="mito.error")
 
