@@ -104,7 +104,11 @@ def _boot(
         args=_args(workspace=tmp_path),
         resolution=SimpleNamespace(workspace=workspace, migrated_from=None),
         provider_config=SimpleNamespace(
-            model="model-x", base_url=None, timeout=60.0, source="flags"
+            model="model-x",
+            base_url=None,
+            timeout=60.0,
+            source="flags",
+            api_key="sk-test-key",
         ),
         tool_manager=ToolManager(),
         tool_context=SimpleNamespace(),
@@ -232,9 +236,19 @@ def _patch_session_fakes(monkeypatch, boot, timeline):
         """Recording stand-in for :class:`SessionManager`."""
 
         def __init__(
-            self, store, orchestrator, ui, *, state, provider, workspace, clock=None
+            self,
+            store,
+            orchestrator,
+            ui,
+            *,
+            state,
+            provider,
+            workspace,
+            clock=None,
+            redact_secrets=(),
         ):
             timeline.append("manager-created")
+            boot.redacted_secrets = tuple(redact_secrets)
             boot.session_manager = self
             self.store = store
             self.state = state
@@ -464,6 +478,18 @@ def test_cancelling_the_pump_precedes_stopping_mcp(monkeypatch, tmp_path):
 
     assert app_module.main([]) == 0
     assert events.index("pump-cancelled") < events.index("mcp-stopped")
+
+
+def test_the_manager_receives_the_api_key_to_scrub_from_records(monkeypatch, tmp_path):
+    """会话记录可能包含工具读到的凭据，manager 必须知道要脱敏的字面量."""
+    boot = _boot(tmp_path)
+    _install_common_fakes(monkeypatch, tmp_path, boot)
+
+    app_module.main([])
+
+    assert boot.redacted_secrets == ("sk-test-key",), (
+        "the manager must be told which literal to scrub before writing a " "record"
+    )
 
 
 def test_mcp_stop_failure_is_not_fatal(monkeypatch, tmp_path):

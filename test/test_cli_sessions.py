@@ -1958,3 +1958,67 @@ def test_display_messages_from_record_rebuilds_blocks(tmp_path):
     assert getattr(blocks[0], "role", "") == "user"
     assert getattr(blocks[0], "message", "") == "hello"
     assert display_messages_from_record({"agents": [], "main_agent_id": 0}) == []
+
+
+@pytest.mark.asyncio
+async def test_saved_records_do_not_contain_the_api_key(tmp_path):
+    """会话记录不得写入 API key：工具输出可能包含凭据文件内容."""
+    orchestrator, main, _ = await _orchestrator_with_tree()
+    state = _manager_state(main_id=main.agent_id)
+    store = SessionStore(tmp_path)
+    manager = SessionManager(
+        store,
+        orchestrator,
+        _FakeUI(),
+        state=state,
+        provider=_ManagerProvider(),
+        workspace=str(tmp_path),
+        clock=_FrozenClock(),
+        redact_secrets=("sk-super-secret-key",),
+    )
+    await manager.start_new_session(main)
+
+    secret = "sk-super-secret-key"
+    main.messages.append(
+        _ToolResultMessageBlock("call_1", f"the key is {secret}", success=True)
+    )
+
+    path = await manager.save_current(force=True)
+
+    assert path is not None
+    written = path.read_text(encoding="utf-8")
+    assert secret not in written, (
+        "the API key must never be written into a session record; the record is "
+        "read back and echoed at startup"
+    )
+    assert "***" in written or "REDACTED" in written
+
+
+@pytest.mark.asyncio
+async def test_saved_records_redact_the_key_from_tool_arguments(tmp_path):
+    """工具参数里的凭据同样不得落盘."""
+    orchestrator, main, _ = await _orchestrator_with_tree()
+    state = _manager_state(main_id=main.agent_id)
+    store = SessionStore(tmp_path)
+    manager = SessionManager(
+        store,
+        orchestrator,
+        _FakeUI(),
+        state=state,
+        provider=_ManagerProvider(),
+        workspace=str(tmp_path),
+        clock=_FrozenClock(),
+        redact_secrets=("sk-super-secret-key",),
+    )
+    await manager.start_new_session(main)
+
+    call = _ToolCallMessageBlock("Read", "call_2")
+    call.arguments_string = '{"api_key": "sk-super-secret-key"}'
+    call.parameter = {"api_key": "sk-super-secret-key"}
+    call.finished = True
+    main.messages.append(call)
+
+    path = await manager.save_current(force=True)
+
+    assert path is not None
+    assert "sk-super-secret-key" not in path.read_text(encoding="utf-8")

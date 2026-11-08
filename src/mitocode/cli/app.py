@@ -294,6 +294,11 @@ async def _amain(args: CliArgs, log_path: Any, console: Console) -> int:
             state=state,
             provider=boot.provider,
             workspace=str(Path(args.workspace).resolve()),
+            # A tool that read the credential file would otherwise put the API
+            # key into a session record, which is read back and echoed at
+            # startup.  The same literal the orchestrator scrubs from error
+            # messages is scrubbed from what is written to disk.
+            redact_secrets=(boot.provider_config.api_key,),
         )
         state.session_manager = manager
         if boot.restore_succeeded and restore is not None:

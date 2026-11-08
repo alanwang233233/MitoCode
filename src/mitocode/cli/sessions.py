@@ -20,7 +20,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Mapping, Optional, Tuple
+from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
 from loguru import logger as loguru_logger
 from rich.table import Table
@@ -121,7 +121,44 @@ def is_valid_session_id(value: object) -> bool:
     return bool(_SESSION_ID_PATTERN.fullmatch(value))
 
 
-def block_to_dict(block: Any) -> Optional[dict]:
+def redact_secrets_in(text: str, secrets: Sequence[str]) -> str:
+    """Replace every literal secret in *text* with a placeholder.
+
+    Args:
+        text: Text that may contain a secret.
+        secrets: Literal secret values to replace.
+
+    Returns:
+        The text with every non-blank secret replaced by ``***``.
+    """
+    for secret in secrets:
+        if secret and secret.strip():
+            text = text.replace(secret, "***")
+    return text
+
+
+def _redact_value(value: Any, secrets: Sequence[str]) -> Any:
+    """Return *value* with every literal secret replaced.
+
+    Args:
+        value: A string, or a structure that may contain strings.
+        secrets: Literal secret values to replace.
+
+    Returns:
+        The value with the secrets replaced; the type is preserved for the
+        containers it can walk.
+    """
+    if isinstance(value, str):
+        return redact_secrets_in(value, secrets)
+    if isinstance(value, Mapping):
+        return {key: _redact_value(item, secrets) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        rebuilt = [_redact_value(item, secrets) for item in value]
+        return type(value)(rebuilt) if isinstance(value, tuple) else rebuilt
+    return value
+
+
+def block_to_dict(block: Any, secrets: Sequence[str] = ()) -> Optional[dict]:
     """Serialize one history block into its JSON record form.
 
     A tool result carries the ``success`` flag the runtime decided on.  It
@@ -129,8 +166,14 @@ def block_to_dict(block: Any) -> Optional[dict]:
     content, because a failure does not have to start with ``error:`` and a
     successful tool may well print that word.
 
+    Every string in the record is scrubbed of the literal secrets the
+    caller knows about.  A tool that read the credential file would
+    otherwise put the API key into the record, which is read back and
+    echoed at startup.
+
     Args:
         block: One entry from ``AgentSession.messages``.
+        secrets: Literal secret values to replace before writing.
 
     Returns:
         The record dict, or ``None`` for a block type this schema does not
@@ -140,17 +183,17 @@ def block_to_dict(block: Any) -> Optional[dict]:
         return {
             "kind": "text",
             "role": block.role,
-            "message": block.message,
-            "reasoning_content": block.reasoning_content,
+            "message": redact_secrets_in(block.message, secrets),
+            "reasoning_content": redact_secrets_in(block.reasoning_content, secrets),
         }
     if isinstance(block, _ToolCallMessageBlock):
         return {
             "kind": "tool_call",
             "id": block.id,
             "name": block.name,
-            "arguments_string": block.arguments_string,
-            "parameter": block.parameter,
-            "reasoning_content": block.reasoning_content,
+            "arguments_string": redact_secrets_in(block.arguments_string, secrets),
+            "parameter": _redact_value(block.parameter, secrets),
+            "reasoning_content": redact_secrets_in(block.reasoning_content, secrets),
             "finished": block.finished,
             "parse_error": block.parse_error,
         }
@@ -158,7 +201,7 @@ def block_to_dict(block: Any) -> Optional[dict]:
         return {
             "kind": "tool_result",
             "tool_call_id": block.tool_call_id,
-            "content": str(block.content),
+            "content": redact_secrets_in(str(block.content), secrets),
             "success": bool(getattr(block, "success", True)),
         }
     return None
@@ -216,6 +259,7 @@ def serialize_tree(
     model: str,
     workspace: str,
     updated_at: str,
+    secrets: Sequence[str] = (),
 ) -> dict:
     """Serialize the whole session tree into one record dict.
 
@@ -232,6 +276,7 @@ def serialize_tree(
         model: Provider model name for display only.
         workspace: Absolute workspace path, display/diagnostic only.
         updated_at: ISO-8601 UTC last-write timestamp.
+        secrets: Literal secret values scrubbed from every string written.
 
     Returns:
         The complete schema record, ready for ``SessionStore.save``.
@@ -249,10 +294,12 @@ def serialize_tree(
                 "description": str(node.get("description", "") or ""),
                 "parent_id": node.get("parent_id"),
                 "sub_agent_ids": list(node.get("sub_agent") or []),
-                "system_prompt": session.system_prompt,
+                "system_prompt": redact_secrets_in(session.system_prompt, secrets),
                 "messages": [
                     record
-                    for record in (block_to_dict(block) for block in session.messages)
+                    for record in (
+                        block_to_dict(block, secrets) for block in session.messages
+                    )
                     if record is not None
                 ],
             }
@@ -724,6 +771,7 @@ class SessionManager:
         provider: Any,
         workspace: str,
         clock: Any = None,
+        redact_secrets: Sequence[str] = (),
     ) -> None:
         """Wire the manager to its collaborators.
 
@@ -738,6 +786,10 @@ class SessionManager:
             workspace: Absolute workspace path written into records.
             clock: ``datetime``-like factory for timestamps; tests inject a
                 frozen clock, production uses ``datetime.now``.
+            redact_secrets: Literal secret values scrubbed from every string
+                written to a record.  A tool that read the credential file
+                would otherwise put the API key into the record, which is
+                read back and echoed at startup.
         """
         self._store = store
         self._orchestrator = orchestrator
@@ -746,6 +798,9 @@ class SessionManager:
         self._provider = provider
         self._workspace = workspace
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._redact_secrets: tuple[str, ...] = tuple(
+            secret for secret in redact_secrets if secret and secret.strip()
+        )
         self._lock = asyncio.Lock()
         self._current_session_id: Optional[str] = None
         self._current_title: str = _NEW_SESSION_TITLE
@@ -793,11 +848,14 @@ class SessionManager:
                     "description": str(node.get("description", "") or ""),
                     "parent_id": node.get("parent_id"),
                     "sub_agent_ids": list(node.get("sub_agent") or []),
-                    "system_prompt": getattr(session, "system_prompt", ""),
+                    "system_prompt": redact_secrets_in(
+                        getattr(session, "system_prompt", ""), self._redact_secrets
+                    ),
                     "messages": [
                         record
                         for record in (
-                            block_to_dict(block) for block in session.messages
+                            block_to_dict(block, self._redact_secrets)
+                            for block in session.messages
                         )
                         if record is not None
                     ],
@@ -906,6 +964,7 @@ class SessionManager:
             model=self._model(),
             workspace=self._workspace,
             updated_at="",
+            secrets=self._redact_secrets,
         )
         fingerprint = json.dumps(record, sort_keys=True, ensure_ascii=False)
         if not force and fingerprint == self._last_fingerprint:
