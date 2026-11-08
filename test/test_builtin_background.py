@@ -2249,3 +2249,71 @@ async def test_calling_dispatch_pending_without_awaiting_delivers_nothing():
     assert _handles(registry.pending_notifications()) == [
         handle
     ], "the handle stays owed, which is exactly the invisible stall"
+
+
+@pytest.mark.asyncio
+async def test_has_active_tasks_sees_work_that_outlived_its_wrapper():
+    """wrapper 已结束但 inner 仍在跑时，registry 必须仍然报 busy.
+
+    The wrapper is what the registry tracks, but the wrapper can finish while
+    the work it started keeps running -- a callee that suppresses its own
+    cancellation, or one that awaits inside ``asyncio.shield``.  Reporting
+    "idle" then lets a session switch happen underneath that work, which can
+    still write to the workspace afterwards.
+    """
+    registry = BackgroundRegistry()
+    released = asyncio.Event()
+
+    async def survives_its_wrapper() -> str:
+        # Absorb the cancellations the registry hands out, then keep waiting:
+        # this is the shape the module docstring calls out.
+        for _ in range(3):
+            try:
+                await released.wait()
+            except asyncio.CancelledError:
+                continue
+        return "late"
+
+    handle = registry.launch(survives_its_wrapper, caller_id=AGENT_ID, timeout=20)
+    try:
+        settled = await _settled(registry, handle)
+        assert settled.state is TaskState.TIMEOUT
+
+        # The wrapper is done, but the work is not: the registry must say so.
+        assert registry.has_active_tasks() is True, (
+            "work that outlived its wrapper is still running and must keep "
+            "the registry busy"
+        )
+    finally:
+        released.set()
+        await registry.stop_all()
+        await _drain_loop()
+
+
+@pytest.mark.asyncio
+async def test_stop_all_waits_for_work_that_outlived_its_wrapper():
+    """stop_all 必须等到 inner 结束，而不只是等到 wrapper 结束."""
+    registry = BackgroundRegistry()
+    released = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def survives_its_wrapper() -> str:
+        for _ in range(3):
+            try:
+                await released.wait()
+            except asyncio.CancelledError:
+                continue
+        finished.set()
+        return "late"
+
+    handle = registry.launch(survives_its_wrapper, caller_id=AGENT_ID, timeout=20)
+    settled = await _settled(registry, handle)
+    assert settled.state is TaskState.TIMEOUT
+
+    released.set()
+    await registry.stop_all()
+
+    assert finished.is_set(), (
+        "stop_all returned while the work was still running; a session switch "
+        "that follows it would race that work"
+    )
