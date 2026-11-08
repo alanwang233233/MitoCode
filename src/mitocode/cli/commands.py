@@ -608,6 +608,74 @@ async def _confirm_force_stop(ctx: CommandContext) -> bool:
     return False
 
 
+def _session_is_busy(state: Any) -> bool:
+    """Return whether any work is still running for the current session.
+
+    Args:
+        state: Current CLI state.
+
+    Returns:
+        ``True`` when an orchestrator task, a RUNNING main session or a
+        live background tool task is still going.
+    """
+    has_active_tasks = getattr(state.orchestrator, "has_active_tasks", None)
+    if callable(has_active_tasks) and has_active_tasks():
+        return True
+
+    try:
+        session = state.main_session()
+    except RuntimeError:
+        session = None
+    if session is not None and getattr(session, "state", None) is AgentState.RUNNING:
+        return True
+
+    background = getattr(state.tool_context, "background", None)
+    has_background = getattr(background, "has_active_tasks", None)
+    if callable(has_background) and has_background():
+        return True
+    return False
+
+
+async def _stop_active_work(state: Any) -> bool:
+    """Stop every piece of work still running for the current session.
+
+    The confirmation prompt only records the user's answer; the work itself
+    has to be stopped before anything else happens, or it keeps running
+    underneath whatever comes next.
+
+    Args:
+        state: Current CLI state.
+
+    Returns:
+        ``True`` when no work is left running, ``False`` when some work
+        refused to stop.
+    """
+    orchestrator = state.orchestrator
+    reset_sessions = getattr(orchestrator, "reset_sessions", None)
+    if callable(reset_sessions):
+        try:
+            await reset_sessions()
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            loguru_logger.exception("Could not stop the running session")
+            ctx_ui = getattr(state, "ui", None)
+            if ctx_ui is not None:
+                ctx_ui.warn(f"The running session could not be stopped: {exc}")
+            return False
+
+    background = getattr(state.tool_context, "background", None)
+    stop_all = getattr(background, "stop_all", None)
+    if callable(stop_all):
+        try:
+            await stop_all()
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            loguru_logger.exception("Could not stop the background work")
+            ctx_ui = getattr(state, "ui", None)
+            if ctx_ui is not None:
+                ctx_ui.warn(f"The background work could not be stopped: {exc}")
+            return False
+    return not _session_is_busy(state)
+
+
 def _session_store(ctx: CommandContext) -> SessionStore:
     """Build the session store for the command's workspace.
 
@@ -700,6 +768,14 @@ async def _cmd_demo(ctx: CommandContext, args: List[str]) -> CommandResult:
     stays current, so after the "press any key" hold the prompt returns to
     exactly the conversation the user left.
 
+    The order is deliberate.  The session is written to disk first, so the
+    replay shows what is actually stored rather than what a stale file
+    holds.  The work that is still running is then stopped for real -- the
+    confirmation prompt only records the answer, it does not stop anything --
+    and a session that refuses to stop aborts the replay.  Finally the
+    replay reads the stored record rather than the live session, so it never
+    walks a list the event pump is still appending to.
+
     Args:
         ctx: Command context.
         args: Unused extra arguments.
@@ -722,12 +798,29 @@ async def _cmd_demo(ctx: CommandContext, args: List[str]) -> CommandResult:
 
     if not await _confirm_force_stop(ctx):
         return CommandResult()
-    await manager.save_current()
+
+    # Make sure what is on disk is what the user last saw, so the replay
+    # cannot show a stale conversation.
+    await manager.save_current(force=True)
+
+    # Answering "yes" to the prompt only acknowledges the force stop; the
+    # work has to be stopped here, or it keeps running during the replay.
+    if not await _stop_active_work(state):
+        ctx.ui.warn("The running work could not be stopped; demo not started.")
+        return CommandResult()
 
     choice = await select_session(state.ui, summaries, allow_new=False)
     if choice == manager.current_session_id:
-        session = state.main_session()
-        title = manager.current_title
+        # The replay reads the stored record, never the live session: the
+        # pump may append to that one while the replay walks the same list.
+        try:
+            record = store.load(choice)
+        except SessionLoadError as exc:
+            ctx.ui.warn(
+                f"Session could not be loaded; staying on the current one. ({exc})"
+            )
+            return CommandResult()
+        title = str(record.get("title", "") or "New Session")
     else:
         try:
             record = store.load(choice)
@@ -736,10 +829,11 @@ async def _cmd_demo(ctx: CommandContext, args: List[str]) -> CommandResult:
                 f"Session could not be loaded; staying on the current one. ({exc})"
             )
             return CommandResult()
-        # A display session built straight from the record: the orchestrator
-        # is never involved, so the current session cannot be disturbed.
-        session = SimpleNamespace(messages=display_messages_from_record(record))
         title = str(record.get("title", "") or "New Session")
+
+    # A display session built straight from the record: the orchestrator is
+    # never involved, so the current session cannot be disturbed.
+    session = SimpleNamespace(messages=display_messages_from_record(record))
 
     pump = getattr(state, "pump", None)
     if pump is not None:

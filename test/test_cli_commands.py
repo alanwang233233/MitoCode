@@ -1205,7 +1205,9 @@ async def test_demo_replays_the_current_session_in_place(tmp_path, monkeypatch):
     assert len(_FakePlayer.instances) == 1
     player = _FakePlayer.instances[0]
     assert player.run_calls == 1
-    assert player.session is ctx.state.main_session()
+    # The replay reads the stored record, not the live session: the pump may
+    # append to the live one while the replay walks the list.
+    assert player.session is not ctx.state.main_session()
     assert player.title == "Saved one"
     assert wait_idle_calls == [True]
     assert manager.switched_to == [] and manager.switch_new_calls == 0
@@ -1284,3 +1286,116 @@ async def test_status_shows_the_session_title(tmp_path):
 
     assert "title" in buffer.getvalue()
     assert "Fix the parser bug" in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_demo_saves_the_session_before_replaying(tmp_path, monkeypatch):
+    """回放前必须把当前会话落盘，回放的是磁盘上已保存的内容."""
+    import mitocode.cli.commands as commands_module
+
+    monkeypatch.setattr(commands_module, "DemoPlayer", _FakePlayer)
+    monkeypatch.setattr(commands_module, "TerminalKeySource", lambda: object())
+    _FakePlayer.instances.clear()
+
+    manager = _FakeManager()
+    _write_session_file(tmp_path, _record_for(manager.current_session_id))
+    ctx, buffer = _ctx(tmp_path, answers=["y"])
+    ctx.state.session_manager = manager
+
+    await dispatch("/demo", ctx)
+
+    assert manager.saved_calls, "the session must be written to disk before the replay"
+    assert manager.saved_calls[0][0] is True, (
+        "the save must be forced: an unchanged fingerprint would skip the "
+        "write and the replay would show a stale conversation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_demo_stops_active_work_before_replaying(tmp_path, monkeypatch):
+    """确认强制停止后必须真正停止活跃工作，再开始回放."""
+    import mitocode.cli.commands as commands_module
+
+    monkeypatch.setattr(commands_module, "DemoPlayer", _FakePlayer)
+    monkeypatch.setattr(commands_module, "TerminalKeySource", lambda: object())
+    _FakePlayer.instances.clear()
+
+    manager = _FakeManager()
+    _write_session_file(tmp_path, _record_for(manager.current_session_id))
+    ctx, buffer = _ctx(tmp_path, answers=["y"])
+    ctx.state.session_manager = manager
+
+    stopped = []
+
+    async def fake_stop_all():
+        stopped.append(True)
+
+    ctx.state.tool_context = SimpleNamespace(
+        background=SimpleNamespace(stop_all=fake_stop_all)
+    )
+
+    await dispatch("/demo", ctx)
+
+    assert stopped, (
+        "the demo must actually stop the running work; answering 'yes' to the "
+        "force-stop prompt only acknowledges it"
+    )
+
+
+@pytest.mark.asyncio
+async def test_demo_replays_a_snapshot_not_the_live_session(tmp_path, monkeypatch):
+    """回放必须基于快照，而不是与 pump 共读同一个 live session 对象."""
+    import mitocode.cli.commands as commands_module
+
+    monkeypatch.setattr(commands_module, "DemoPlayer", _FakePlayer)
+    monkeypatch.setattr(commands_module, "TerminalKeySource", lambda: object())
+    _FakePlayer.instances.clear()
+
+    manager = _FakeManager()
+    _write_session_file(tmp_path, _record_for(manager.current_session_id))
+    ctx, buffer = _ctx(tmp_path, answers=["y"])
+    ctx.state.session_manager = manager
+
+    await dispatch("/demo", ctx)
+
+    player = _FakePlayer.instances[0]
+    assert player.session is not ctx.state.main_session(), (
+        "the replay must not read the live session: the pump may append to it "
+        "while the replay walks the same list"
+    )
+
+
+@pytest.mark.asyncio
+async def test_demo_refuses_to_start_while_work_is_active(tmp_path, monkeypatch):
+    """工作仍在运行时不得开始回放：先真正停止，停不掉就拒绝."""
+    import mitocode.cli.commands as commands_module
+
+    monkeypatch.setattr(commands_module, "DemoPlayer", _FakePlayer)
+    monkeypatch.setattr(commands_module, "TerminalKeySource", lambda: object())
+    _FakePlayer.instances.clear()
+
+    manager = _FakeManager()
+    _write_session_file(tmp_path, _record_for(manager.current_session_id))
+    ctx, buffer = _ctx(tmp_path, answers=["y"])
+    ctx.state.session_manager = manager
+
+    class _BusyBackground:
+        """Background registry that refuses to stop."""
+
+        def has_active_tasks(self):
+            """Report work in flight."""
+            return True
+
+        async def stop_all(self):
+            """Fail to stop the work."""
+            raise RuntimeError("cannot stop")
+
+    ctx.state.tool_context = SimpleNamespace(background=_BusyBackground())
+
+    await dispatch("/demo", ctx)
+
+    assert not _FakePlayer.instances, (
+        "the replay must not start while work that could not be stopped is "
+        "still running"
+    )
+    assert "could not be stopped" in buffer.getvalue().lower()
