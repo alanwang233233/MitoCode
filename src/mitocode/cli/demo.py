@@ -16,12 +16,20 @@ import asyncio
 import os
 import select
 import sys
-import termios
 from pathlib import Path
 from typing import Any, List, Optional, Protocol
 
 from loguru import logger as loguru_logger
 from rich.text import Text
+
+try:
+    import termios
+except ImportError:  # pragma: no cover - exercised on Windows
+    # ``termios`` is POSIX-only.  This module is imported unconditionally by
+    # the CLI, so a hard import would make the whole application unusable on
+    # Windows -- even for ``--help``.  The key source degrades to "no keys"
+    # instead, and the demo simply cannot be controlled from the keyboard.
+    termios = None  # type: ignore[assignment]
 
 # noinspection PyProtectedMember
 from mitocode.core.agent.agent_session import (
@@ -174,16 +182,19 @@ class TerminalKeySource:
     """Read arrow keys, space, ``q``, Esc and Ctrl+C in raw terminal mode.
 
     Uses :mod:`termios` (``ICANON``/``ECHO``/``ISIG`` off) plus :func:`select`
-    with the poll timeout. When stdin is not a TTY the source degrades to a
-    source that never yields a key. The original terminal attributes are
-    restored on :meth:`close`; a failed restore is logged, never raised, and
-    ``close`` is idempotent.
+    with the poll timeout. When stdin is not a TTY -- or when the platform
+    has no :mod:`termios` at all -- the source degrades to a source that
+    never yields a key. The original terminal attributes are restored on
+    :meth:`close`; a failed restore is logged, never raised, and ``close``
+    is idempotent.
     """
 
     def __init__(self) -> None:
         """Switch stdin into raw mode when possible, else degrade silently."""
         self._original = None
         self._closed = False
+        if termios is None:
+            return
         try:
             fd = sys.stdin.fileno()
             attrs = termios.tcgetattr(fd)
@@ -206,6 +217,8 @@ class TerminalKeySource:
         Returns:
             The mapped key name, or ``None`` when nothing arrived in time.
         """
+        if termios is None:
+            return None
         try:
             ready, _, _ = select.select([sys.stdin], [], [], timeout)
         except (OSError, ValueError):
@@ -223,7 +236,7 @@ class TerminalKeySource:
         if self._closed:
             return
         self._closed = True
-        if self._original is None:
+        if self._original is None or termios is None:
             return
         try:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, self._original)

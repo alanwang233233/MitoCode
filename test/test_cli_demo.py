@@ -769,3 +769,44 @@ async def test_demo_player_closes_key_source_when_cancelled(tmp_path):
     assert (
         closable.close_calls == 1
     ), "a cancelled playback must still restore the terminal"
+
+
+def test_demo_module_imports_without_termios(monkeypatch):
+    """没有 termios 的平台（如 Windows）上 CLI 必须仍能导入.
+
+    ``mitocode.cli.app`` imports this module unconditionally, so a
+    top-level ``import termios`` made the whole CLI unusable on Windows --
+    even for ``--help`` and ``--version``, which never touch the demo.
+    """
+    import builtins
+    import importlib
+    import sys
+
+    real_import = builtins.__import__
+
+    def _no_termios(name, *args, **kwargs):
+        if name == "termios":
+            raise ImportError("No module named 'termios'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_termios)
+    monkeypatch.delitem(sys.modules, "mitocode.cli.demo", raising=False)
+
+    module = importlib.import_module("mitocode.cli.demo")
+
+    assert module is not None
+    # The key source must degrade instead of raising.
+    source = module.TerminalKeySource()
+    source.close()
+    source.close()
+
+
+def test_terminal_key_source_without_termios_yields_no_keys(monkeypatch):
+    """没有 termios 时按键源不得抛异常，只是不产出按键."""
+    import mitocode.cli.demo as demo_module
+
+    monkeypatch.setattr(demo_module, "termios", None, raising=False)
+
+    source = demo_module.TerminalKeySource()
+    assert source.poll(0.01) is None
+    source.close()
