@@ -2,6 +2,19 @@
 
 MitoCode is an interactive coding agent that runs in your terminal.
 
+## Platform support
+
+MitoCode runs on Linux and macOS, and its test suite runs on Windows too.
+The `bash` tool is the one POSIX-only piece: it needs `/bin/sh`, process
+groups and `pgrep`, so on Windows it is skipped rather than emulated.
+Everything else — the CLI, the session store, the file tools and the
+workspace lock — works on all three.
+
+The private-permission promise below (`0o700` directory, `0o600` file) is a
+POSIX one. Windows has no such mode bits: `os.chmod` there only toggles the
+read-only attribute and access is decided by the directory's ACL. On
+Windows, keep the workspace somewhere only your own account can read.
+
 ## Interactive CLI
 
 Install the project, then start it from a terminal (the CLI intentionally has
@@ -17,8 +30,9 @@ Provider settings come from one place only: the workspace-local
 The first time mitocode sees a directory without a workspace, it asks before
 creating `.mitocode/` there (declining exits), and the first time it sees
 that file is missing, it collects the credentials interactively and writes
-them with private permissions (`0o700` directory, `0o600` file). Nothing is
-read from the environment, and nothing is written outside the workspace.
+them with private permissions (`0o700` directory, `0o600` file; see the
+platform note above). Nothing is read from the environment, and nothing is
+written outside the workspace.
 
 `mitocode` opens a REPL in the current directory; pass `-w/--workspace PATH`
 to work elsewhere. Type `/help` for the available slash commands and `/exit`
@@ -29,7 +43,9 @@ to work elsewhere. Type `/help` for the available slash commands and `/exit`
 
 Every conversation is persisted under `<workspace>/.mitocode/sessions/` as one
 JSON file per session. The directory is created with `0o700` and each record is
-written with `0o600`, so session history stays private to the workspace.
+written with `0o600`, so session history stays private to the workspace on
+POSIX; on Windows the same files are protected by the workspace's own
+directory permissions instead.
 
 - **Startup choice**: with no saved session the CLI starts a new one; with
   exactly one it restores it directly and echoes the previous conversation as

@@ -102,6 +102,29 @@ def new_session_id() -> str:
     return f"{stamp}-{secrets.token_hex(4)}"
 
 
+def _make_private(descriptor: int, path: Path) -> None:
+    """Restrict a freshly created file to its owner, as far as the platform allows.
+
+    ``os.fchmod`` is the right call -- it acts on the descriptor, so the mode
+    cannot be raced by a path swap -- but Windows only gained it in Python
+    3.13, and the project supports 3.10.  Where it is missing the file is
+    chmod'ed by path instead, which is all the platform offers there.
+
+    Args:
+        descriptor: The open descriptor of the file to restrict.
+        path: The path the descriptor was opened for.
+    """
+    fchmod = getattr(os, "fchmod", None)
+    try:
+        if fchmod is not None:
+            fchmod(descriptor, 0o600)
+        else:
+            os.chmod(path, 0o600)
+    except OSError:
+        # The mode is a hardening measure, not a precondition for the write.
+        pass
+
+
 def is_valid_session_id(value: object) -> bool:
     """Return whether *value* is safe to use as a session file stem.
 
@@ -434,7 +457,7 @@ class SessionStore:
         tmp_path = Path(tmp_name)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                os.fchmod(handle.fileno(), 0o600)
+                _make_private(fd, tmp_path)
                 json.dump(dict(record), handle, ensure_ascii=False, indent=2)
                 handle.flush()
                 os.fsync(handle.fileno())

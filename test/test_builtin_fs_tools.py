@@ -166,6 +166,8 @@ def _fifo(path: Path) -> Path:
     Returns:
         The same path, for fluent use in tests.
     """
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("staging the named-pipe case needs POSIX FIFOs")
     os.mkfifo(path)
     return path
 

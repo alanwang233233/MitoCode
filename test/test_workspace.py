@@ -72,7 +72,7 @@ class TestConvertToPath:
     def test_returns_path_from_string(self):
         result = Workspace._convert_to_path("/tmp/foo/bar")
         assert isinstance(result, Path)
-        assert str(result) == "/tmp/foo/bar"
+        assert result == Path("/tmp/foo/bar")
 
     def test_returns_path_unchanged_when_already_path(self):
         p = Path("/some/where")

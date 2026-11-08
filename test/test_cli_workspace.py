@@ -263,7 +263,10 @@ def test_ensure_workspace_fails_when_mitocode_is_a_file(tmp_path):
     assert not (tmp_path / ".mitocode" / "config.json").exists()
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root can write a read-only directory")
+@pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="the read-only directory rule is POSIX-only, and root can write one anyway",
+)
 def test_ensure_workspace_fails_when_the_directory_is_not_writable(tmp_path):
     os.chmod(tmp_path, 0o500)
     try:
