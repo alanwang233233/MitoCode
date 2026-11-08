@@ -236,7 +236,7 @@ def _requires_a_posix_shell(request):
     tests that actually run a command need ``/bin/sh``, ``pgrep`` and process
     groups, none of which Windows has.
     """
-    if os.name == "nt" and request.node.name.startswith("test_bash_"):
+    if os.name == "nt" and "bash" in request.node.name:
         pytest.skip("the bash tool needs a POSIX shell")
 
 

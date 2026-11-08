@@ -633,6 +633,9 @@ async def test_resolve_returns_the_path_when_the_shipped_default_permits_an_esca
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    os.name == "nt", reason="Windows resolves a rooted path against the current drive"
+)
 async def test_resolve_asks_about_an_absolute_target_without_re_rooting_it(
     workspace, root
 ):
@@ -786,6 +789,7 @@ async def test_resolve_names_the_resolved_root_when_the_workspace_path_is_a_syml
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs extra privileges")
 async def test_resolve_asks_the_approver_about_a_symlink_loop_instead_of_accepting_it(
     workspace, spy, root
 ):
@@ -822,6 +826,7 @@ async def test_resolve_asks_the_approver_about_a_symlink_loop_instead_of_accepti
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs extra privileges")
 async def test_resolve_refuses_a_symlink_loop_with_a_reason_the_module_documents(
     workspace, root
 ):
@@ -845,6 +850,7 @@ async def test_resolve_refuses_a_symlink_loop_with_a_reason_the_module_documents
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs extra privileges")
 async def test_resolve_hands_back_an_approved_loop_un_normalised_so_open_still_fails(
     workspace, root
 ):
@@ -931,9 +937,20 @@ async def test_resolve_escalates_a_target_the_resolved_path_would_have_accepted(
         "relative",
         "absolute-outside",
         "traversal",
-        "symlink-loop",
+        pytest.param(
+            "symlink-loop",
+            marks=pytest.mark.skipif(
+                os.name == "nt", reason="a loop resolves differently on Windows"
+            ),
+        ),
         "nul-relative",
-        "nul-absolute",
+        pytest.param(
+            "nul-absolute",
+            marks=pytest.mark.skipif(
+                os.name == "nt",
+                reason="Windows resolves a rooted path against " "the current drive",
+            ),
+        ),
     ],
 )
 async def test_resolve_without_a_workspace_answers_every_path_and_asks_nothing(
