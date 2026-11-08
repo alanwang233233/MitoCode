@@ -15,9 +15,91 @@ on:
         type: string
         description: "Branch to check out (set when triggered via run-ci)"
 
+env:
+  PYTHON_VERSION: "3.14"
+
 jobs:
-  ci:
-    name: Test and Analyze
+  # ============================================================
+  # 1. 单元测试矩阵：Linux / macOS / Windows 并行执行
+  #    覆盖率门槛只在 ubuntu 上生效，其余平台只跑用例，
+  #    避免平台分支差异导致覆盖率抖动。
+  # ============================================================
+  unit-tests:
+    name: Unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      # 一个平台失败不取消其他平台，保证一次拿到三份结果
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            coverage: true
+          - os: macos-latest
+            coverage: false
+          - os: windows-latest
+            coverage: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.head_ref || github.head_ref || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+          python -m pip install pytest-cov
+
+      # bash 统一三个平台的 shell，命令保持一致（Windows runner 自带 Git Bash）
+      # PYTHONUNBUFFERED：输出进管道后仍实时刷新，避免日志等到结束才出现
+      - name: Run pytest with coverage
+        if: ${{ matrix.coverage }}
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -o pipefail
+          python -m pytest test/ \
+            --cov=src/mitocode \
+            --cov-report=xml \
+            --cov-report=term \
+            --cov-fail-under=80 \
+            --junitxml=report.xml 2>&1 | tee pytest-output.txt
+
+      - name: Run pytest
+        if: ${{ !matrix.coverage }}
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -o pipefail
+          python -m pytest test/ \
+            --junitxml=report.xml 2>&1 | tee pytest-output.txt
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ matrix.os }}
+          path: |
+            report.xml
+            coverage.xml
+            pytest-output.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ============================================================
+  # 2. 静态检查与安全扫描：与测试矩阵并行，不等待测试结果
+  # ============================================================
+  static-analysis:
+    name: Static analysis
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -32,27 +114,15 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
       - name: Install dependencies
         run: |
           python -m pip install -r requirements.txt -r requirements-dev.txt
-          python -m pip install black pylint pyright pytest-cov
+          python -m pip install black pylint pyright
 
-      # ===== 1. pytest + coverage =====
-      - name: Run pytest with coverage
-        id: pytest
-        run: |
-          set -o pipefail
-          stdbuf -i0 -o0 -e0 python -m pytest test/ \
-            --cov=src/mitocode \
-            --cov-report=xml \
-            --cov-report=term \
-            --cov-fail-under=80 \
-            --junitxml=report.xml 2>&1 | tee pytest-cov-output.txt
-
-      # ===== 2. gitleaks =====
+      # ===== gitleaks =====
       - name: Run gitleaks scan
         id: gitleaks
         continue-on-error: true
@@ -61,13 +131,20 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: ""
 
-      # ===== 3. black =====
+      # ===== black =====
       - name: Run black formatter
         id: black
         run: |
           black src test --target-version=py310
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "false" > black-changed.txt
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "true" > black-changed.txt
+          fi
 
-      # ===== 6. pylint =====
+      # ===== pylint =====
       - name: Run pylint
         id: pylint
         run: |
@@ -87,20 +164,23 @@ jobs:
               sys.exit(1)
           PY
 
-      # ===== 7. pyright =====
+      # ===== pyright =====
       - name: Run pyright
         id: pyright
         run: |
           pyright src | tee pyright-output.txt
 
       # ===== 提交代码变更 =====
+      # 测试在独立 job 中并行执行，此处只以 lint/类型检查结果为准
       - name: Commit and push changes
         id: commit
         if: |
           (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.pr_number != '')) &&
-          steps.pytest.outcome == 'success' &&
           steps.pylint.outcome == 'success' &&
           steps.pyright.outcome == 'success'
+        env:
+          # 分支名来自不可信输入，通过环境变量传入，避免拼进 shell 脚本被注入
+          HEAD_REF: ${{ inputs.head_ref || github.head_ref }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -110,19 +190,97 @@ jobs:
             echo "committed=false" >> "$GITHUB_OUTPUT"
           else
             git commit -m "ci: auto-format code"
-            git push origin HEAD:${{ inputs.head_ref || github.head_ref }}
+            git push origin "HEAD:$HEAD_REF"
             echo "committed=true" >> "$GITHUB_OUTPUT"
           fi
+
+      # 自动提交结果需要跨 job 传给汇总，用文件承载（report job 里没有该步骤）
+      - name: Record commit status
+        if: always()
+        env:
+          COMMIT_OUTCOME: ${{ steps.commit.outcome }}
+          COMMIT_FLAG: ${{ steps.commit.outputs.committed }}
+        run: |
+          if [ "$COMMIT_OUTCOME" = "success" ]; then
+            if [ "$COMMIT_FLAG" = "true" ]; then
+              echo "已自动提交 ✅" > commit-status.txt
+            else
+              echo "无变更可提交" > commit-status.txt
+            fi
+          elif [ "$COMMIT_OUTCOME" = "skipped" ]; then
+            echo "未执行（前置阻塞步骤未通过）" > commit-status.txt
+          else
+            echo "待执行" > commit-status.txt
+          fi
+
+      # 供汇总 job 判断 black 是否产生了格式化变更
+      - name: Upload static analysis state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-analysis-state
+          path: |
+            black-changed.txt
+            commit-status.txt
+            gitleak-result.json
+            pylint-report.json
+            pyright-output.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ============================================================
+  # 3. 汇总：等测试矩阵与静态检查都结束后统一出报告
+  # ============================================================
+  report:
+    name: CI summary
+    needs: [unit-tests, static-analysis]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.head_ref || github.head_ref || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # 主平台报告下载到仓库根目录，供 ci_summary.py 解析 pytest / coverage 数字
+      - name: Download primary test reports
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: test-reports-ubuntu-latest
+          path: .
+
+      # 全平台报告下载到 test-reports/<os>/，用于生成跨平台表格
+      - name: Download all test reports
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-reports-*
+          path: test-reports
+
+      - name: Download static analysis state
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: static-analysis-state
+          path: .
 
       # ===== 生成 CI 汇总 =====
       - name: Generate CI summary
         id: summary
         if: always()
         env:
-          CI_COMMIT_STATUS: |
-            ${{ steps.commit.outcome == 'success' && (steps.commit.outputs.committed == 'true' && '已自动提交 ✅' || '无变更可提交') || (steps.commit.outcome == 'skipped' && '未执行（前置阻塞步骤未通过）' || '待执行') }}
+          CI_TEST_MATRIX_RESULT: ${{ needs.unit-tests.result }}
         run: |
           python chore/ci_summary.py --repo-root .
+          cat ci-summary.md
 
       # ===== 发布 PR 评论 =====
       - name: Publish PR comment
@@ -156,3 +314,4 @@ jobs:
             pyright-output.txt
             ci-summary.md
             ci-summary.json
+          if-no-files-found: ignore

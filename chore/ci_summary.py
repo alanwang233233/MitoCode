@@ -57,6 +57,53 @@ def parse_pytest_report(xml_path: Path) -> dict:
     }
 
 
+def parse_test_matrix(test_reports_dir: Path) -> list[dict]:
+    """解析跨平台测试矩阵产物（test-reports/<artifact>/report.xml）。
+
+    Args:
+        test_reports_dir: 存放各平台 artifact 解压结果的目录。
+
+    Returns:
+        每个平台一条记录，包含 platform 与 parse_pytest_report 的字段；
+        目录不存在或为空时返回空列表。
+    """
+    if not test_reports_dir.is_dir():
+        return []
+
+    results: list[dict] = []
+    for entry in sorted(test_reports_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        report = entry / "report.xml"
+        if not report.exists():
+            continue
+        result = parse_pytest_report(report)
+        result["platform"] = entry.name.removeprefix("test-reports-")
+        results.append(result)
+
+    # 固定展示顺序，避免不同平台的目录排序漂移
+    order = ("ubuntu", "macos", "windows")
+
+    def sort_key(item: dict) -> int:
+        name = item["platform"]
+        for index, prefix in enumerate(order):
+            if prefix in name:
+                return index
+        return len(order)
+
+    results.sort(key=sort_key)
+    return results
+
+
+def _read_pytest_output(repo_root: Path) -> str:
+    """读取 pytest 控制台输出，兼容带/不带覆盖率两种文件名。"""
+    for name in ("pytest-output.txt", "pytest-cov-output.txt"):
+        path = repo_root / name
+        if path.exists():
+            return path.read_text(encoding="utf-8", errors="replace")
+    return ""
+
+
 def parse_coverage(xml_path: Path) -> dict:
     """解析 coverage.xml 获取总体覆盖率。"""
     text = _read_text(xml_path)
@@ -116,6 +163,9 @@ def parse_pip_audit(output_path: Path) -> dict:
 
 def parse_licenses(csv_path: Path) -> dict:
     """运行 check_licence.py 并解析结果。"""
+    if not csv_path.exists():
+        return {"passed": True, "rc": 0, "risks": [], "count": 0}
+
     script = Path(__file__).with_name("check_licence.py")
     rc, stdout, _stderr = _run([sys.executable, str(script), str(csv_path)])
     risks = []
@@ -131,7 +181,16 @@ def parse_licenses(csv_path: Path) -> dict:
 
 
 def black_changed(repo_root: Path) -> bool:
-    """检查 black 是否修改了文件。"""
+    """判断 black 是否产生了格式化变更。
+
+    优先读取 static-analysis job 上传的 black-changed.txt：汇总 job 是新
+    检出的工作区，git status 无法反映另一个 job 中的格式化结果；本地直接
+    运行汇总脚本时才回退到 git status。
+    """
+    flag = _read_text(repo_root / "black-changed.txt").strip().lower()
+    if flag in {"true", "false"}:
+        return flag == "true"
+
     rc, stdout, _stderr = _run(["git", "status", "--porcelain"], cwd=repo_root)
     return any(line.startswith((" M", "M ", "??")) for line in stdout.splitlines())
 
@@ -206,6 +265,8 @@ def generate_markdown(
     eff_u_code_result: dict,
     commit_status: str,
     repo_root: Path,
+    matrix_result: list[dict] | None = None,
+    matrix_job_result: str = "",
 ) -> str:
     """生成 PR 评论 markdown。"""
 
@@ -242,6 +303,26 @@ def generate_markdown(
         lines.append("- **pylint**: ⚪ 无数据/未运行")
     lines.append("")
 
+    # 跨平台单元测试矩阵
+    lines.append("### 跨平台单元测试")
+    lines.append("")
+    if matrix_result:
+        if matrix_job_result and matrix_job_result != "success":
+            lines.append(f"- **矩阵任务结果**: ❌ {matrix_job_result}")
+        else:
+            lines.append("- **矩阵任务结果**: ✅ success")
+        lines.append("")
+        lines.append("| 平台 | 结果 | 用例数 | 失败 | 错误 | 跳过 |")
+        lines.append("| --- | :---: | ---: | ---: | ---: | ---: |")
+        for item in matrix_result:
+            lines.append(
+                f"| {item['platform']} | {'✅ 通过' if item['passed'] else '❌ 失败'} "
+                f"| {item['tests']} | {item['failures']} | {item['errors']} | {item['skipped']} |"
+            )
+    else:
+        lines.append("- ⚪ 未取得任何平台的测试报告")
+    lines.append("")
+
     # 信息展示区
     lines.append("### 信息展示")
     if (repo_root / "pip-audit-output.txt").exists():
@@ -257,7 +338,7 @@ def generate_markdown(
     lines.append("<details>")
     lines.append("<summary>📋 pytest 详细</summary>")
     lines.append("")
-    lines.append(f"```xml\n{_read_text(Path('pytest-cov-output.txt'))}\n```")
+    lines.append(f"```text\n{_read_pytest_output(repo_root)}\n```")
     lines.append("</details>")
     lines.append("")
 
@@ -320,12 +401,17 @@ def main() -> int:
     pylint_result = parse_pylint(repo_root / "pylint-report.json")
     pyright_result = parse_pyright(repo_root / "pyright-output.txt")
     eff_u_code_result = parse_eff_u_code(repo_root / "eff-u-code-output.txt")
+    # 跨平台测试矩阵：各平台 artifact 解压到 test-reports/<artifact>/
+    matrix_result = parse_test_matrix(repo_root / "test-reports")
+    matrix_job_result = os.environ.get("CI_TEST_MATRIX_RESULT", "")
 
     # black 是否修改文件通过 git status 判断
     changed = black_changed(repo_root)
 
-    # 提交状态由 CI 后续步骤注入环境变量，若不存在则显示未知
-    commit_status = os.environ.get("CI_COMMIT_STATUS", "待执行")
+    # 提交状态由 static-analysis job 写文件传递（report job 中不存在该步骤）
+    commit_status = _read_text(repo_root / "commit-status.txt").strip()
+    if not commit_status:
+        commit_status = os.environ.get("CI_COMMIT_STATUS", "待执行")
 
     markdown = generate_markdown(
         pytest_result,
@@ -339,6 +425,8 @@ def main() -> int:
         eff_u_code_result,
         commit_status,
         repo_root,
+        matrix_result,
+        matrix_job_result,
     )
 
     if args.dry_run:
@@ -358,6 +446,8 @@ def main() -> int:
         "pylint": pylint_result,
         "pyright": pyright_result,
         "eff_u_code": eff_u_code_result,
+        "test_matrix": matrix_result,
+        "test_matrix_job_result": matrix_job_result,
     }
     (repo_root / "ci-summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
