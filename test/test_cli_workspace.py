@@ -191,7 +191,10 @@ def test_ensure_workspace_creates_private_configuration(tmp_path):
     document = json.loads(config.read_text(encoding="utf-8"))
     assert document["name"] == tmp_path.name
     assert document["version"] == APP_VERSION
-    assert stat.S_IMODE((tmp_path / ".mitocode").stat().st_mode) == 0o700
+    # Windows has no mode bits: os.chmod there only toggles the read-only
+    # attribute, and access is decided by the directory's ACL.
+    if os.name != "nt":
+        assert stat.S_IMODE((tmp_path / ".mitocode").stat().st_mode) == 0o700
     assert Workspace(tmp_path, tmp_path.name, APP_VERSION).config_file == config
 
 

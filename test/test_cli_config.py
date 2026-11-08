@@ -387,8 +387,11 @@ def test_write_secret_file_is_private_and_drops_blank_values(tmp_path):
     assert path == secret_path(tmp_path)
     document = json.loads(path.read_text(encoding="utf-8"))
     assert document == {"api_key": "k", "model": "m", "timeout": 30.0}
-    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    # Windows has no mode bits: os.chmod there only toggles the read-only
+    # attribute, and access is decided by the directory's ACL.
+    if os.name != "nt":
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert not path.with_name(path.name + ".tmp").exists()
 
 

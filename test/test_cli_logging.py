@@ -39,7 +39,10 @@ def test_configure_logging_only_writes_file(tmp_path):
     assert "hello-from-test" in path.read_text(encoding="utf-8")
     assert not any(sink is sys.stderr for sink in _sinks())
     assert not any(sink is sys.stdout for sink in _sinks())
-    assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
+    # Windows has no mode bits: os.chmod there only toggles the read-only
+    # attribute, and access is decided by the directory's ACL.
+    if os.name != "nt":
+        assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
 
 
 def test_configure_logging_removes_previous_sinks(tmp_path):
@@ -78,7 +81,10 @@ def test_creates_missing_log_directory_with_private_mode(tmp_path):
     configure_logging(log_dir=log_dir)
 
     assert log_dir.is_dir()
-    assert stat.S_IMODE(log_dir.stat().st_mode) == 0o700
+    # Windows has no mode bits: os.chmod there only toggles the read-only
+    # attribute, and access is decided by the directory's ACL.
+    if os.name != "nt":
+        assert stat.S_IMODE(log_dir.stat().st_mode) == 0o700
 
 
 def test_tightens_existing_log_directory_mode(tmp_path):
@@ -88,7 +94,10 @@ def test_tightens_existing_log_directory_mode(tmp_path):
 
     configure_logging(log_dir=log_dir)
 
-    assert stat.S_IMODE(log_dir.stat().st_mode) == 0o700
+    # Windows has no mode bits: os.chmod there only toggles the read-only
+    # attribute, and access is decided by the directory's ACL.
+    if os.name != "nt":
+        assert stat.S_IMODE(log_dir.stat().st_mode) == 0o700
 
 
 def test_file_sink_is_always_debug(tmp_path):

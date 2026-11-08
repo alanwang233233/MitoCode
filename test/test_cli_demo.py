@@ -417,7 +417,7 @@ async def test_demo_player_replays_user_assistant_reasoning_and_tools(tmp_path):
     assert "thinking hard" in output
     assert "Answer body" in output
     assert "● Read" in output
-    assert "/tmp/demo/a.py" in output
+    assert "/tmp/demo/a.py" in output.replace("\\", "/")
     assert "⎿ 120 lines" in output
     # reasoning dim 行在 assistant 正文之前
     assert output.index("thinking hard") < output.index("Answer body")

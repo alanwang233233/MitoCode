@@ -76,11 +76,14 @@ def test_display_path_root_itself_is_a_dot(tmp_path):
 
 
 def test_display_path_outside_root_is_unchanged(tmp_path):
-    assert display_path("/etc/hosts", tmp_path) == "/etc/hosts"
+    outside = tmp_path.parent / "outside.txt"
+    assert display_path(str(outside), tmp_path) == outside.as_posix()
 
 
 def test_display_path_expands_home(monkeypatch, tmp_path):
+    # Windows expands ``~`` from USERPROFILE, POSIX from HOME.
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     assert display_path("~/src/a.py", tmp_path) == "src/a.py"
 
 

@@ -492,8 +492,11 @@ def test_save_writes_readable_json_with_tight_permissions(tmp_path):
     with open(path, encoding="utf-8") as fh:
         loaded = json.load(fh)
     assert loaded["session_id"] == "20261107T152000Z-1a2b3c4d"
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert stat.S_IMODE(store.sessions_dir.stat().st_mode) == 0o700
+    # Windows has no mode bits: os.chmod there only toggles the read-only
+    # attribute, and access is decided by the directory's ACL.
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(store.sessions_dir.stat().st_mode) == 0o700
 
 
 def test_save_leaves_no_tmp_files_on_success(tmp_path):

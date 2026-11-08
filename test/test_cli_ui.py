@@ -371,6 +371,7 @@ def test_alt_enter_and_ctrl_j_insert_newlines_and_ctrl_l_clears():
     assert event.app.invalidated == 1
 
 
+@pytest.mark.skipif(os.name == "nt", reason="building a real session needs a console")
 def test_build_prompt_session_sets_history_completion_and_toolbar(tmp_path):
     ui, _ = _ui()
     ui.show_banner(BannerInfo("0.1.0", "model-x", tmp_path, 1, {}))

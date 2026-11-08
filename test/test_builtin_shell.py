@@ -228,19 +228,16 @@ async def _kill_matching(pattern: str) -> None:
 # --- fixtures ----------------------------------------------------------------
 
 
-def pytest_collection_modifyitems(items):
-    """Skip the shell-execution tests where there is no POSIX shell.
+@pytest.fixture(autouse=True)
+def _requires_a_posix_shell(request):
+    """Skip the tests that run a command where there is no POSIX shell.
 
     The escape scan is pure string and path logic and runs everywhere; the
     tests that actually run a command need ``/bin/sh``, ``pgrep`` and process
     groups, none of which Windows has.
     """
-    if os.name == "nt":
-        for item in items:
-            if item.name.startswith("test_bash_"):
-                item.add_marker(
-                    pytest.mark.skip(reason="the bash tool needs a POSIX shell")
-                )
+    if os.name == "nt" and request.node.name.startswith("test_bash_"):
+        pytest.skip("the bash tool needs a POSIX shell")
 
 
 @pytest.fixture(autouse=True)

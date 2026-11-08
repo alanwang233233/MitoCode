@@ -95,6 +95,32 @@ ESCAPE_CASE_IDS = (
 )
 
 
+#: Escape cases Windows cannot stage the same way.  A path rooted without a
+#: drive resolves against whatever drive happens to be current there, and a
+#: symlink needs privileges the runner does not grant.
+_WINDOWS_INCOMPATIBLE_ESCAPE_CASES = frozenset(
+    {"absolute-outside-string", "absolute-outside-path-object", "symlink-loop"}
+)
+
+
+def _escape_params():
+    """The escape cases, with the ones Windows cannot stage marked skipped.
+
+    Returns:
+        One ``pytest.param`` per escape case id.
+    """
+    return [
+        pytest.param(
+            case_id,
+            marks=pytest.mark.skipif(
+                case_id in _WINDOWS_INCOMPATIBLE_ESCAPE_CASES and os.name == "nt",
+                reason="Windows resolves a rooted path against the current drive",
+            ),
+        )
+        for case_id in ESCAPE_CASE_IDS
+    ]
+
+
 class _RecordingApprover:
     """An approver that records every request and returns a fixed decision.
 
@@ -537,7 +563,7 @@ async def test_resolve_returns_the_in_root_path_under_the_shipped_default_approv
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case_id", ESCAPE_CASE_IDS)
+@pytest.mark.parametrize("case_id", _escape_params())
 async def test_resolve_asks_the_approver_exactly_once_about_each_escape(
     workspace, spy, root, case_id
 ):
@@ -564,7 +590,7 @@ async def test_resolve_asks_the_approver_exactly_once_about_each_escape(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case_id", ESCAPE_CASE_IDS)
+@pytest.mark.parametrize("case_id", _escape_params())
 async def test_resolve_refuses_every_escape_under_an_approver_that_denies(
     workspace, root, case_id
 ):
@@ -954,6 +980,7 @@ async def test_resolve_without_a_workspace_answers_every_path_and_asks_nothing(
     ), f"{case_id}: with no workspace there is no escape to approve"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows refuses to remove the cwd")
 @pytest.mark.asyncio
 async def test_resolve_without_a_workspace_raises_when_the_working_directory_is_gone(
     tmp_path,
