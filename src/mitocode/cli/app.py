@@ -323,21 +323,30 @@ async def _amain(args: CliArgs, log_path: Any, console: Console) -> int:
 
         return await repl.run()
     finally:
-        if autosaver is not None:
-            await autosaver.stop()
-        if manager is not None:
-            await manager.shutdown()
-        if pump_task is not None:
-            pump_task.cancel()
-            await asyncio.gather(pump_task, return_exceptions=True)
-        await _stop_mcp(boot.mcp_manager)
-        if state is not None:
-            ui.note(
-                f"Session ended · {state.turn_count} turns "
-                f"· ~{state.estimate_tokens()} tokens"
-            )
-        if args.debug:
-            ui.note(f"Log file: {log_path}")
+        # The teardown steps that stop the autosaver and write the final save
+        # are allowed to fail, but they must never take the cleanup below with
+        # them: a cancelled shutdown (a second Ctrl+C) would otherwise leave
+        # the pump running and the MCP subprocess alive.  The cleanup is in an
+        # inner ``finally`` so it runs whatever happens above it.
+        try:
+            if autosaver is not None:
+                await autosaver.stop()
+            if manager is not None:
+                await manager.shutdown()
+        except BaseException:  # pylint: disable=broad-exception-caught
+            loguru_logger.exception("Session teardown step failed")
+        finally:
+            if pump_task is not None:
+                pump_task.cancel()
+                await asyncio.gather(pump_task, return_exceptions=True)
+            await _stop_mcp(boot.mcp_manager)
+            if state is not None:
+                ui.note(
+                    f"Session ended · {state.turn_count} turns "
+                    f"· ~{state.estimate_tokens()} tokens"
+                )
+            if args.debug:
+                ui.note(f"Log file: {log_path}")
 
 
 def _confirm_workspace(console: Console, workspace: Path) -> bool:

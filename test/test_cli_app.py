@@ -479,6 +479,132 @@ def test_mcp_stop_failure_is_not_fatal(monkeypatch, tmp_path):
     assert attempts == ["stop"]
 
 
+def test_manager_shutdown_failure_still_cancels_pump_and_stops_mcp(
+    monkeypatch, tmp_path
+):
+    """关机时 manager.shutdown 抛异常，pump 与 MCP 仍必须被清理."""
+    events = []
+
+    async def fake_stop():
+        events.append("mcp-stopped")
+
+    boot = _boot(tmp_path, stop=fake_stop)
+    _install_common_fakes(monkeypatch, tmp_path, boot, events=events)
+
+    class ExplodingManager:
+        """Manager whose shutdown fails the way a second Ctrl+C would."""
+
+        def __init__(self, *args, **kwargs):
+            self.shutdown_calls = 0
+
+        @property
+        def current_session_id(self):
+            return "fake-session-id"
+
+        @property
+        def current_title(self):
+            return "New Session"
+
+        async def save_current(self, *, force=False, report_failure=False):
+            return None
+
+        async def start_new_session(self, main_session):
+            return None
+
+        def attach_record(self, record):
+            return None
+
+        def maybe_generate_title(self):
+            return None
+
+        async def shutdown(self):
+            self.shutdown_calls += 1
+            raise RuntimeError("shutdown blew up")
+
+    monkeypatch.setattr(app_module, "SessionManager", ExplodingManager)
+
+    assert app_module.main([]) == 0
+    # The MCP server must be stopped even though the shutdown step failed:
+    # otherwise a subprocess is left behind.
+    assert "mcp-stopped" in events
+    assert "pump-cancelled" in events
+
+
+def test_autosaver_failure_still_cancels_pump_and_stops_mcp(monkeypatch, tmp_path):
+    """关机时 autosaver.stop 抛异常，pump 与 MCP 仍必须被清理."""
+    events = []
+
+    async def fake_stop():
+        events.append("mcp-stopped")
+
+    boot = _boot(tmp_path, stop=fake_stop)
+    _install_common_fakes(monkeypatch, tmp_path, boot, events=events)
+
+    class ExplodingAutosaver:
+        """Autosaver whose stop fails."""
+
+        def __init__(self, manager, interval=30.0):
+            self.manager = manager
+
+        def start(self):
+            return None
+
+        async def stop(self):
+            raise RuntimeError("autosaver blew up")
+
+    monkeypatch.setattr(app_module, "SessionAutosaver", ExplodingAutosaver)
+
+    assert app_module.main([]) == 0
+    assert "mcp-stopped" in events
+    assert "pump-cancelled" in events
+
+
+def test_shutdown_cancellation_still_cancels_pump_and_stops_mcp(monkeypatch, tmp_path):
+    """第二次 Ctrl+C 造成的 CancelledError 也不得跳过 pump 与 MCP 的清理."""
+    events = []
+
+    async def fake_stop():
+        events.append("mcp-stopped")
+
+    boot = _boot(tmp_path, stop=fake_stop)
+    _install_common_fakes(monkeypatch, tmp_path, boot, events=events)
+
+    class CancellingManager:
+        """Manager whose shutdown is cancelled, as a second Ctrl+C does."""
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @property
+        def current_session_id(self):
+            return "fake-session-id"
+
+        @property
+        def current_title(self):
+            return "New Session"
+
+        async def save_current(self, *, force=False, report_failure=False):
+            return None
+
+        async def start_new_session(self, main_session):
+            return None
+
+        def attach_record(self, record):
+            return None
+
+        def maybe_generate_title(self):
+            return None
+
+        async def shutdown(self):
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(app_module, "SessionManager", CancellingManager)
+
+    assert app_module.main([]) == 0
+    assert "mcp-stopped" in events
+    assert "pump-cancelled" in events
+
+
 def test_missing_mcp_manager_is_skipped(monkeypatch, tmp_path):
     boot = _boot(tmp_path)
     boot.mcp_manager = None
