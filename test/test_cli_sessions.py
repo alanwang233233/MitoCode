@@ -1448,6 +1448,8 @@ class _FakeSwitchOrchestrator:
         reset_count: How many times ``reset_sessions`` ran.
         fail_restore: When set, ``restore_tree`` inserts the first agent and
             then raises, leaving half-restored state for the caller to clean.
+        fail_create: When set, ``create_session`` raises instead of
+            registering a session.
     """
 
     def __init__(self):
@@ -1455,6 +1457,7 @@ class _FakeSwitchOrchestrator:
         self.counter = 0
         self.reset_count = 0
         self.fail_restore = False
+        self.fail_create = False
 
     async def reset_sessions(self):
         """Clear the registry and restart ids at zero."""
@@ -1464,6 +1467,8 @@ class _FakeSwitchOrchestrator:
 
     async def create_session(self, name="", description="", **kwargs):
         """Create and register one session with a fresh id."""
+        if self.fail_create:
+            raise ValueError("create boom")
         session = AgentSession(
             agent_id=self.counter,
             name=name,
@@ -1478,6 +1483,9 @@ class _FakeSwitchOrchestrator:
     async def restore_tree(self, agents):
         """Rebuild sessions from records, keeping original ids."""
         if self.fail_restore:
+            # Fail only the first attempt: a rollback restores the previous
+            # tree through the same method and must be able to succeed.
+            self.fail_restore = False
             first = agents[0]
             self.sessions[int(first["agent_id"])] = AgentSession(
                 agent_id=int(first["agent_id"]),
@@ -1609,7 +1617,7 @@ async def test_switch_to_saves_old_tree_and_restores_new_one(tmp_path):
 
 @pytest.mark.asyncio
 async def test_switch_to_failure_cleans_registry_and_keeps_current(tmp_path):
-    """恢复失败返回 False：reset 再跑一次清掉半恢复残留，当前会话不变."""
+    """恢复失败返回 False：半恢复残留被清掉，当前会话被还原."""
     orchestrator = _FakeSwitchOrchestrator()
     state = _manager_state(main_id=0)
     manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
@@ -1627,8 +1635,82 @@ async def test_switch_to_failure_cleans_registry_and_keeps_current(tmp_path):
     assert manager.current_session_id == old_id
     assert manager.current_title == "New Session"
     assert state.main_id == main.agent_id
-    assert orchestrator.reset_count == 2
-    assert orchestrator.sessions == {}
+    # The half-restored leftovers are gone and the previous tree is back,
+    # so the registry is not left empty.
+    assert orchestrator.sessions
+    assert orchestrator.get_session(main.agent_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_switch_to_failure_keeps_the_live_session_usable(tmp_path):
+    """恢复失败后当前会话仍能取到，且后续保存不再静默失效."""
+    orchestrator = _FakeSwitchOrchestrator()
+    state = _manager_state(main_id=0)
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+    main = await orchestrator.create_session(
+        name="Main", description="Interactive session"
+    )
+    state.main_id = main.agent_id
+    await manager.start_new_session(main)
+    orchestrator.fail_restore = True
+
+    record = _switch_record(workspace=str(tmp_path))
+    assert await manager.switch_to(record) is False
+
+    # The live session must still be reachable through the orchestrator, so
+    # the next turn can run instead of raising "Main agent #N does not exist".
+    assert orchestrator.get_session(state.main_id) is not None
+
+    # And saving must still reach the disk instead of silently no-oping.
+    orchestrator.fail_restore = False
+    main.append_user_prompt("after the failed switch")
+    path = await manager.save_current(force=True)
+    assert path is not None
+    assert path.is_file()
+
+
+@pytest.mark.asyncio
+async def test_switch_to_failure_restores_the_previous_session(tmp_path):
+    """恢复失败时旧会话被重建，而不是留下一个空注册表."""
+    orchestrator = _FakeSwitchOrchestrator()
+    state = _manager_state(main_id=0)
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+    main = await orchestrator.create_session(
+        name="Main", description="Interactive session"
+    )
+    state.main_id = main.agent_id
+    await manager.start_new_session(main)
+    main.append_user_prompt("keep me")
+    orchestrator.fail_restore = True
+
+    record = _switch_record(workspace=str(tmp_path))
+    assert await manager.switch_to(record) is False
+
+    # The old session is back in the registry with its messages intact.
+    restored = orchestrator.get_session(state.main_id)
+    assert restored is not None
+    assert any(
+        getattr(block, "message", "") == "keep me" for block in restored.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_switch_new_failure_keeps_the_cli_usable(tmp_path):
+    """switch_new 建新会话失败时不得把异常抛给 REPL，也不得留下空注册表."""
+    orchestrator = _FakeSwitchOrchestrator()
+    state = _manager_state(main_id=0)
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+    main = await orchestrator.create_session(
+        name="Main", description="Interactive session"
+    )
+    state.main_id = main.agent_id
+    await manager.start_new_session(main)
+
+    orchestrator.fail_create = True
+    # The failure must be contained: no exception escapes to the REPL.
+    await manager.switch_new()
+
+    assert orchestrator.get_session(state.main_id) is not None
 
 
 @pytest.mark.asyncio

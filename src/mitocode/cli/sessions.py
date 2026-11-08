@@ -771,6 +771,84 @@ class SessionManager:
         """Return the provider's default model name for record display."""
         return str(getattr(self._provider, "default_model", "") or "")
 
+    def _snapshot_agents(self) -> List[dict]:
+        """Return the live tree as agent records, for a switch rollback.
+
+        The snapshot is taken before the registry is reset, so a restore that
+        fails can put the previous conversation back instead of leaving the
+        CLI without a main session.
+
+        Returns:
+            One record per live agent, in tree-snapshot order.  Empty when
+            there is no live tree to preserve.
+        """
+        agents: List[dict] = []
+        for node in self._orchestrator.get_tree_snapshot():
+            agent_id = node.get("id")
+            session = self._orchestrator.get_session(agent_id)
+            if session is None:
+                continue
+            agents.append(
+                {
+                    "agent_id": agent_id,
+                    "name": str(node.get("name", "") or ""),
+                    "description": str(node.get("description", "") or ""),
+                    "parent_id": node.get("parent_id"),
+                    "sub_agent_ids": list(node.get("sub_agent") or []),
+                    "system_prompt": getattr(session, "system_prompt", ""),
+                    "messages": [
+                        record
+                        for record in (
+                            block_to_dict(block) for block in session.messages
+                        )
+                        if record is not None
+                    ],
+                }
+            )
+        return agents
+
+    async def _restore_agents(self, agents: List[dict]) -> bool:
+        """Rebuild the tree from *agents*, restoring each session's messages.
+
+        Args:
+            agents: Agent records in the shape ``serialize_tree`` produces.
+
+        Returns:
+            ``True`` when the tree was rebuilt, ``False`` when it could not
+            be restored — in which case the caller must not leave the state
+            pointing at a session that does not exist.
+        """
+        if not agents:
+            return False
+        try:
+            sessions = await self._orchestrator.restore_tree(agents)
+            for agent_id, session in sessions.items():
+                agent_record = _agent_record({"agents": agents}, agent_id)
+                if agent_record is not None:
+                    restore_agent_messages(session, agent_record)
+        except Exception:  # pylint: disable=broad-exception-caught
+            loguru_logger.exception("Session rollback failed")
+            return False
+        return True
+
+    async def _ensure_main_session(self) -> None:
+        """Guarantee that the state points at a session that exists.
+
+        Called after a failed switch: the registry may be empty, in which
+        case a fresh main session is created so the next turn still runs and
+        saving still reaches the disk.
+        """
+        if self._orchestrator.get_session(self._state.main_id) is not None:
+            return
+        try:
+            session = await self._orchestrator.create_session(
+                name="Main", description="Interactive session"
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            loguru_logger.exception("Could not recreate the main session")
+            return
+        self._state.main_id = session.agent_id
+
     def _first_user_text(self) -> str:
         """Return the main session's first non-blank user message.
 
@@ -1001,8 +1079,9 @@ class SessionManager:
         """Switch the live tree to a loaded record, all under the save lock.
 
         The old tree is saved first, then the registry is reset and the new
-        tree restored; a failure anywhere in the restore leaves a clean
-        registry and the current session untouched.
+        tree restored.  A failure anywhere in the restore puts the previous
+        tree back, so the session the user was in stays usable and saving
+        keeps working.
 
         Args:
             record: A validated schema document (typically from
@@ -1010,13 +1089,15 @@ class SessionManager:
 
         Returns:
             ``True`` on success; ``False`` when the restore failed, in which
-                case the current session identity is unchanged.
+                case the previous session has been restored.
         """
         async with self._lock:
             await self._cancel_title_task_locked()
             await self._stop_background_locked()
             await self._save_locked(force=False, report_failure=False)
             await self._drain_pump()
+            previous_agents = self._snapshot_agents()
+            previous_main_id = self._state.main_id
             await self._orchestrator.reset_sessions()
             try:
                 sessions = await self._orchestrator.restore_tree(
@@ -1036,6 +1117,14 @@ class SessionManager:
                     exc,
                 )
                 await self._orchestrator.reset_sessions()
+                # Put the previous tree back: an empty registry would leave
+                # the state pointing at a session that no longer exists, so
+                # the next turn could not run and no save would reach disk.
+                if not await self._restore_agents(previous_agents):
+                    self._state.main_id = previous_main_id
+                    await self._ensure_main_session()
+                else:
+                    self._state.main_id = previous_main_id
                 await self._drain_pump()
                 return False
             self._state.main_id = main_agent_id
@@ -1050,17 +1139,32 @@ class SessionManager:
 
         The old session is saved first; the new one gets a fresh disk id, the
         default title and zeroed counters, and its empty record is written
-        immediately so a crash never leaves the new session unsaved.
+        immediately so a crash never leaves the new session unsaved.  A
+        failure to create the new session is contained: the previous tree is
+        restored and the exception never reaches the REPL.
         """
         async with self._lock:
             await self._cancel_title_task_locked()
             await self._stop_background_locked()
             await self._save_locked(force=False, report_failure=False)
             await self._drain_pump()
+            previous_agents = self._snapshot_agents()
+            previous_main_id = self._state.main_id
             await self._orchestrator.reset_sessions()
-            main_session = await self._orchestrator.create_session(
-                name="Main", description="Interactive session"
-            )
+            try:
+                main_session = await self._orchestrator.create_session(
+                    name="Main", description="Interactive session"
+                )
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                loguru_logger.exception("Starting a new session failed: %s", exc)
+                await self._orchestrator.reset_sessions()
+                if not await self._restore_agents(previous_agents):
+                    self._state.main_id = previous_main_id
+                    await self._ensure_main_session()
+                else:
+                    self._state.main_id = previous_main_id
+                await self._drain_pump()
+                return
             self._state.main_id = main_session.agent_id
             self._register_new_locked()
             self._reset_counters_locked()
