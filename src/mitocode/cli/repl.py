@@ -38,6 +38,7 @@ without persistence support is skipped silently.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from typing import TYPE_CHECKING, Optional
 
@@ -127,7 +128,17 @@ class Repl:  # pylint: disable=too-many-instance-attributes
         """
         initial = (self.state.args.initial_prompt or "").strip()
 
-        with patch_stdout(raw=True):
+        with contextlib.ExitStack() as stack:
+            try:
+                stack.enter_context(patch_stdout(raw=True))
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                # prompt_toolkit could not take the terminal over -- a
+                # Windows terminal with no console behind it, for one.  The
+                # loop still works without the patch; refusing to start
+                # would be a worse answer than an unpainted screen.
+                loguru_logger.debug(
+                    "Stdout could not be patched for the prompt: {}", exc
+                )
             if initial:
                 await self._run_turn_reported(initial)
             while not self._shutdown.is_set():

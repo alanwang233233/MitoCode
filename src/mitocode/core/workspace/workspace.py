@@ -391,9 +391,14 @@ class Workspace:
         """
         try:
             resolved = self.resolve_within(target)
+            # The walk below reads the path with lstat, and a path carrying
+            # an embedded NUL is rejected there rather than by resolve().
+            # Both answers are "not inside the root", so both belong in the
+            # same place: a caller asking a yes/no question must not get an
+            # exception instead.
+            return self._is_fully_resolved(resolved)
         except (ValueError, TypeError, OSError, RuntimeError):
             return False
-        return self._is_fully_resolved(resolved)
 
     @staticmethod
     def _is_fully_resolved(path: Path) -> bool:

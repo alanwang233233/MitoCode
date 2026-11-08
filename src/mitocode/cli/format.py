@@ -69,6 +69,11 @@ def display_path(raw: str, root: Path) -> str:
     expanded absolute path, since pretending they are relative would be
     misleading.
 
+    The path is rendered in the POSIX spelling, whatever the platform: the
+    same relative path has to read the same way in a transcript on every
+    machine, and :mod:`mitocode.core.tool.builtin.file_walker` already
+    renders its relative paths that way.
+
     Args:
         raw: The path as supplied by the model or the user.
         root: Workspace root the display should be relative to.
@@ -82,20 +87,20 @@ def display_path(raw: str, root: Path) -> str:
 
     expanded = Path(str(raw)).expanduser()
     if not expanded.is_absolute():
-        return str(expanded)
+        return expanded.as_posix()
 
     try:
         target = expanded.resolve()
         base = Path(root).expanduser().resolve()
     except (OSError, RuntimeError):
-        return str(expanded)
+        return expanded.as_posix()
 
     if target == base:
         return "."
     try:
-        return str(target.relative_to(base))
+        return target.relative_to(base).as_posix()
     except ValueError:
-        return str(expanded)
+        return expanded.as_posix()
 
 
 def _string(value: Any) -> str:
