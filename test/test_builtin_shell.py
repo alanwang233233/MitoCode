@@ -203,7 +203,10 @@ def _kill_survivors(pids: list) -> None:
     """
     for pid in pids:
         try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
+            if hasattr(os, "killpg"):
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGTERM)
         except OSError:
             pass
 
@@ -223,6 +226,21 @@ async def _kill_matching(pattern: str) -> None:
 
 
 # --- fixtures ----------------------------------------------------------------
+
+
+def pytest_collection_modifyitems(items):
+    """Skip the shell-execution tests where there is no POSIX shell.
+
+    The escape scan is pure string and path logic and runs everywhere; the
+    tests that actually run a command need ``/bin/sh``, ``pgrep`` and process
+    groups, none of which Windows has.
+    """
+    if os.name == "nt":
+        for item in items:
+            if item.name.startswith("test_bash_"):
+                item.add_marker(
+                    pytest.mark.skip(reason="the bash tool needs a POSIX shell")
+                )
 
 
 @pytest.fixture(autouse=True)
@@ -314,6 +332,7 @@ def test_scan_for_escape_allows_an_absolute_path_inside_the_root(root):
     ), "an in-root absolute path is the common case and must never prompt"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs extra privileges")
 def test_scan_for_escape_compares_resolved_paths_through_a_symlink(root):
     """A token reaching the root *through* a symlink is still inside it.
 
@@ -398,6 +417,37 @@ def test_scan_for_escape_does_not_flag_option_or_env_shapes(root, token):
     assert (
         scan_for_escape(f"probe {token}", root) is None
     ), f"{token!r} is an option/env shape, not a path, and must not be flagged"
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["C:\\Windows\\System32", "D:/data/secret", "\\\\server\\share\\x"],
+)
+def test_scan_for_escape_flags_a_windows_absolute_path(root, token):
+    """A Windows absolute path is flagged: the guardrail is not POSIX-only.
+
+    A drive letter, a drive-relative spelling and a UNC share each name an
+    absolute location.  A scan that only recognises ``/`` would wave all
+    three through on Windows, so the guardrail would be looser there than
+    on POSIX -- which is the wrong way round.
+    """
+    assert (
+        scan_for_escape(f"cat {token}", root) == token
+    ), f"{token!r} names an absolute location and must reach the approver"
+
+
+def test_scan_for_escape_flags_a_token_starting_with_dotdot_backslash(root):
+    """A token starting ``..\\`` climbs out of the root and is flagged."""
+    assert (
+        scan_for_escape("cat ..\\outside.txt", root) == "..\\outside.txt"
+    ), "a ..\\-prefixed token must be flagged verbatim"
+
+
+def test_scan_for_escape_does_not_flag_a_windows_option_shape(root):
+    """``--file=C:\\x`` is an option on every platform, not a path."""
+    assert (
+        scan_for_escape("probe --file=C:\\x", root) is None
+    ), "an option shape is not a path and must not prompt the approver"
 
 
 def test_scan_for_escape_flags_a_path_token_when_the_slash_precedes_the_equals(root):
