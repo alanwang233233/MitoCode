@@ -439,3 +439,37 @@ def test_write_failure_leaves_no_temporary_file(tmp_path, monkeypatch):
     secret_dir = secret_path(tmp_path).parent
     assert list(secret_dir.glob("*.tmp")) == []
     assert not secret_path(tmp_path).exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs extra privileges")
+def test_write_secret_file_refuses_a_secret_dir_outside_the_workspace(tmp_path):
+    """.mitocode/secret 指向工作区外时，密钥不得被写到工作区外."""
+    outside = tmp_path.parent / f"outside-{tmp_path.name}"
+    outside.mkdir()
+    (tmp_path / ".mitocode").mkdir()
+    (tmp_path / ".mitocode" / "secret").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(MitoCodeCliConfigError) as info:
+        write_secret_file(tmp_path, {"api_key": "sk-leaked", "model": "m"})
+
+    # The key must not have landed outside the workspace.
+    assert not (outside / "provider.json").exists()
+    assert "sk-leaked" not in str(info.value)
+    assert str(outside) in str(info.value)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs extra privileges")
+def test_write_secret_file_refuses_a_secret_file_outside_the_workspace(tmp_path):
+    """provider.json 指向工作区外的符号链接时不得把密钥写到那里."""
+    outside = tmp_path.parent / f"outside-file-{tmp_path.name}"
+    outside.mkdir()
+    target = outside / "provider.json"
+    (tmp_path / ".mitocode").mkdir()
+    (tmp_path / ".mitocode" / "secret").mkdir()
+    secret_path(tmp_path).symlink_to(target)
+
+    with pytest.raises(MitoCodeCliConfigError) as info:
+        write_secret_file(tmp_path, {"api_key": "sk-leaked", "model": "m"})
+
+    assert not target.exists()
+    assert "sk-leaked" not in str(info.value)

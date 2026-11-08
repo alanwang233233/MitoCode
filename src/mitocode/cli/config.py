@@ -208,6 +208,33 @@ def ask_provider_settings(
     return values
 
 
+def _is_inside(root: Path, candidate: Path) -> bool:
+    """Return whether *candidate* resolves to a location under *root*.
+
+    Both sides are resolved first, so a symlink anywhere on the path is
+    followed before the comparison.  ``root`` is resolved as well, which
+    keeps the answer stable when the workspace itself is reached through a
+    symlink.
+
+    Args:
+        root: Directory that must contain the candidate.
+        candidate: Path to test.
+
+    Returns:
+        ``True`` when the resolved candidate is the root itself or lives
+        under it.
+    """
+    try:
+        resolved_root = root.resolve()
+        resolved_candidate = candidate.resolve()
+    except OSError:
+        return False
+    return (
+        resolved_candidate == resolved_root
+        or resolved_root in resolved_candidate.parents
+    )
+
+
 def write_secret_file(workspace: Path, values: Mapping[str, object]) -> Path:
     """Write the provider credential file with private permissions.
 
@@ -217,6 +244,11 @@ def write_secret_file(workspace: Path, values: Mapping[str, object]) -> Path:
     is malformed: the user may still be able to repair it by hand, and silently
     discarding a credential would be destructive.
 
+    The credential must stay inside the workspace: a ``.mitocode/secret``
+    directory or a ``provider.json`` file that is a symlink pointing
+    elsewhere would otherwise write the key outside the workspace it belongs
+    to.
+
     Args:
         workspace: Workspace root that receives ``.mitocode/secret/``.
         values: Settings to persist; blank optional entries are dropped.
@@ -225,9 +257,9 @@ def write_secret_file(workspace: Path, values: Mapping[str, object]) -> Path:
         The path that was written.
 
     Raises:
-        MitoCodeCliConfigError: The file already exists, or the directory or
-            file cannot be created. The message names the path and never a
-            value.
+        MitoCodeCliConfigError: The file already exists, the credential path
+            resolves outside the workspace, or the directory or file cannot be
+            created. The message names the path and never a value.
     """
     path = secret_path(workspace)
     if path.exists() or path.is_symlink():
@@ -235,6 +267,16 @@ def write_secret_file(workspace: Path, values: Mapping[str, object]) -> Path:
             f"The provider configuration at '{path}' already exists; it was "
             "not overwritten. Repair or remove it by hand, then run mitocode "
             "again."
+        )
+    if not _is_inside(Path(workspace), path.parent):
+        try:
+            resolved = path.parent.resolve()
+        except OSError:
+            resolved = path.parent
+        raise MitoCodeCliConfigError(
+            f"The credential directory '{path.parent}' resolves to '{resolved}', "
+            f"which is outside the workspace '{Path(workspace)}'. Refusing to "
+            "write the provider configuration there."
         )
     payload = {
         key: value
