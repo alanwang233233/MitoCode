@@ -6,6 +6,7 @@ of ``/demo``.  No test touches a real terminal: keys come from
 ``StringIO`` console.
 """
 
+import asyncio
 import os
 import sys
 from io import StringIO
@@ -688,3 +689,83 @@ async def test_demo_player_waits_for_any_key_after_finish(tmp_path):
     output = buffer.getvalue()
     assert "Press any key to return" in output
     assert keys._keys == [], "等待阶段消费了确认按键"
+
+
+@pytest.mark.asyncio
+async def test_demo_player_closes_key_source_when_playback_raises(tmp_path):
+    """回放中抛异常时也必须 close，否则终端停在 raw 模式（无回显、Ctrl+C 失效）."""
+
+    class _ClosableFake(FakeKeySource):
+        """Fake that counts ``close`` calls."""
+
+        def __init__(self, keys: List[str]) -> None:
+            super().__init__(keys)
+            self.close_calls = 0
+
+        def close(self) -> None:
+            """Count one close call."""
+            self.close_calls += 1
+
+    class _ExplodingUI:
+        """UI whose note() raises the way a broken renderer would."""
+
+        verbose = False
+
+        class console:
+            @staticmethod
+            def print(*args, **kwargs):
+                return None
+
+        def note(self, message):
+            """Fail on the first note."""
+            raise RuntimeError("render boom")
+
+    closable = _ClosableFake([])
+    session = SimpleNamespace(messages=[_PlainTextMessageBlock("user", "hi")])
+    player = DemoPlayer(
+        _ExplodingUI(), session, title="T", key_source=closable, root=tmp_path
+    )
+
+    with pytest.raises(RuntimeError):
+        await player.run()
+
+    assert closable.close_calls == 1, (
+        "the key source must be closed even when playback fails; otherwise the "
+        "terminal keeps the raw attributes the demo installed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_demo_player_closes_key_source_when_cancelled(tmp_path):
+    """回放被取消时也必须 close."""
+
+    class _ClosableFake(FakeKeySource):
+        """Fake that counts ``close`` calls."""
+
+        def __init__(self, keys: List[str]) -> None:
+            super().__init__(keys)
+            self.close_calls = 0
+
+        def close(self) -> None:
+            """Count one close call."""
+            self.close_calls += 1
+
+    closable = _ClosableFake([])
+    session = SimpleNamespace(messages=[_PlainTextMessageBlock("user", "hi")])
+    player = DemoPlayer(
+        _ui(tmp_path / "history")[0],
+        session,
+        title="T",
+        key_source=closable,
+        root=tmp_path,
+    )
+
+    task = asyncio.ensure_future(player.run())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert (
+        closable.close_calls == 1
+    ), "a cancelled playback must still restore the terminal"

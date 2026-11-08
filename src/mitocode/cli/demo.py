@@ -424,19 +424,29 @@ class DemoPlayer:
         calls are skipped. When playback ends -- naturally or via
         ``q``/``esc``/``ctrl+c`` -- the terminal holds the last frame behind a
         "press any key" prompt, so the user decides when the console returns
-        to the prompt. On return the key source is closed exactly once so the
-        terminal leaves raw mode.
+        to the prompt. The key source is closed exactly once so the terminal
+        leaves raw mode.
+
+        The close happens in a ``finally``: the key source installs the raw
+        terminal attributes, and only closing them restores the user's shell.
+        A rendering failure or a cancellation would otherwise leave the
+        terminal without an echo and with a dead Ctrl+C.
+
+        Raises:
+            asyncio.CancelledError: When the playback task is cancelled.
         """
-        self._ui.note(self._header())
-        for block in list(self._session.messages):
-            if self._controls.quit_requested:
-                break
-            await self._render_block(block)
-        self._ui.note("Demo finished. Press any key to return.")
-        await self._wait_any_key()
-        close = getattr(self._key_source, "close", None)
-        if close is not None:
-            close()
+        try:
+            self._ui.note(self._header())
+            for block in list(self._session.messages):
+                if self._controls.quit_requested:
+                    break
+                await self._render_block(block)
+            self._ui.note("Demo finished. Press any key to return.")
+            await self._wait_any_key()
+        finally:
+            close = getattr(self._key_source, "close", None)
+            if close is not None:
+                close()
 
     async def _wait_any_key(self) -> None:
         """Poll the key source until any key arrives.
