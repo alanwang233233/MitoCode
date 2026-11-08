@@ -1095,10 +1095,13 @@ class SessionManager:
             await self._cancel_title_task_locked()
             await self._stop_background_locked()
             await self._save_locked(force=False, report_failure=False)
-            await self._drain_pump()
             previous_agents = self._snapshot_agents()
             previous_main_id = self._state.main_id
+            # Stop the event source before draining: draining a queue that a
+            # still-running turn keeps filling can wait for the whole turn,
+            # and messages appended while waiting are lost with the reset.
             await self._orchestrator.reset_sessions()
+            await self._drain_pump()
             try:
                 sessions = await self._orchestrator.restore_tree(
                     record.get("agents") or []
@@ -1147,10 +1150,12 @@ class SessionManager:
             await self._cancel_title_task_locked()
             await self._stop_background_locked()
             await self._save_locked(force=False, report_failure=False)
-            await self._drain_pump()
             previous_agents = self._snapshot_agents()
             previous_main_id = self._state.main_id
+            # Stop the event source before draining, for the same reason as in
+            # switch_to: a live turn would otherwise keep the queue filled.
             await self._orchestrator.reset_sessions()
+            await self._drain_pump()
             try:
                 main_session = await self._orchestrator.create_session(
                     name="Main", description="Interactive session"

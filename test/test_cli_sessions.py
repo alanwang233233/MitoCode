@@ -1749,6 +1749,70 @@ async def test_switch_to_drains_real_pump_without_hanging(tmp_path):
     assert await manager.switch_to(_switch_record(workspace=str(tmp_path))) is True
 
 
+class _OrderRecordingPump:
+    """Pump stand-in that records when the drain happened."""
+
+    def __init__(self, events):
+        self.events = events
+
+    async def wait_idle(self):
+        """Record that the pump was drained."""
+        self.events.append("drain")
+
+
+class _OrderRecordingOrchestrator(_FakeSwitchOrchestrator):
+    """Orchestrator fake that records when the tree was reset."""
+
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+
+    async def reset_sessions(self):
+        """Record the reset before clearing the registry."""
+        self.events.append("reset")
+        await super().reset_sessions()
+
+
+@pytest.mark.asyncio
+async def test_switch_to_stops_the_event_source_before_draining(tmp_path):
+    """切换先停事件源再排空：排空一个仍在入队的活跃 turn 会一直等."""
+    events = []
+    orchestrator = _OrderRecordingOrchestrator(events)
+    state = _manager_state(main_id=0)
+    state.pump = _OrderRecordingPump(events)
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+    main = await orchestrator.create_session(
+        name="Main", description="Interactive session"
+    )
+    state.main_id = main.agent_id
+    await manager.start_new_session(main)
+
+    assert await manager.switch_to(_switch_record(workspace=str(tmp_path))) is True
+
+    # The event source must be stopped first: draining a queue a live turn
+    # keeps filling can block the switch indefinitely.
+    assert events.index("reset") < events.index("drain")
+
+
+@pytest.mark.asyncio
+async def test_switch_new_stops_the_event_source_before_draining(tmp_path):
+    """switch_new 同样先停事件源再排空."""
+    events = []
+    orchestrator = _OrderRecordingOrchestrator(events)
+    state = _manager_state(main_id=0)
+    state.pump = _OrderRecordingPump(events)
+    manager, ui, store, clock = _make_manager(tmp_path, orchestrator, state)
+    main = await orchestrator.create_session(
+        name="Main", description="Interactive session"
+    )
+    state.main_id = main.agent_id
+    await manager.start_new_session(main)
+
+    await manager.switch_new()
+
+    assert events.index("reset") < events.index("drain")
+
+
 @pytest.mark.asyncio
 async def test_switch_new_destroys_old_tree_and_starts_fresh(tmp_path):
     """switch_new 销毁旧树、新建 #0 Main，新 id 与 New Session 标题落盘."""
