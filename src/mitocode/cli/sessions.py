@@ -401,7 +401,9 @@ class SessionStore:
 
         The write is atomic: the document goes to a private sibling temporary
         file and is moved into place, so an interrupted save cannot leave a
-        truncated record behind.
+        truncated record behind.  Two CLI instances in one workspace are kept
+        apart by the workspace lock, which is taken once for the whole run
+        rather than per write.
 
         Args:
             record: A validated schema document.

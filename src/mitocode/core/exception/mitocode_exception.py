@@ -40,6 +40,15 @@ class MitoCodeWorkspaceDumpError(MitoCodeWorkspaceError):
     """Raised when persisting the workspace configuration fails."""
 
 
+class MitoCodeWorkspaceLockError(MitoCodeWorkspaceError):
+    """Raised when the workspace lock cannot be taken or released.
+
+    This is a technical failure -- the lock file could not be created or
+    opened -- and is deliberately distinct from "another process holds the
+    lock", which is a conflict the user can decide about.
+    """
+
+
 class MitoCodeWorkspacePathError(MitoCodeWorkspaceError, builtins.ValueError):
     """Raised when a path argument resolves outside the workspace root.
 

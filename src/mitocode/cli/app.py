@@ -13,15 +13,20 @@ The startup order is a constraint, not a preference:
 2. workspace confirmation (when ``.mitocode/config.json`` is missing) and
    logging takeover, in that order: a declined workspace must not create the
    log directory, and every log lives inside the workspace;
-3. provider setup (interactive when the credential file is missing), then the
+3. the workspace lock, taken before anything is written and released on the
+   way out: one workspace runs one CLI, because two instances write the same
+   session records and the last save wins.  A workspace that is already
+   locked is reported with the risk spelled out, and the user decides
+   whether to force entry;
+4. provider setup (interactive when the credential file is missing), then the
    console's UI, approver, saved-session selection (``SessionStore`` +
    :func:`~mitocode.cli.sessions.select_session`, which only needs the
    workspace) and :func:`bootstrap`, which resolves the workspace, registers
    tools, starts MCP and restores or creates the main session;
-4. state, session manager, autosave task, event pump task and REPL, in that
+5. state, session manager, autosave task, event pump task and REPL, in that
    order, because the pump must be consuming events before the first turn can
    produce any;
-5. ``SIGINT`` is routed to :meth:`Repl.handle_sigint` when the platform supports
+6. ``SIGINT`` is routed to :meth:`Repl.handle_sigint` when the platform supports
    it, then the REPL runs.
 
 Teardown lives in ``finally`` and is equally ordered: the autosave task is
@@ -32,7 +37,8 @@ shutdown may log; ``mcp.stop()`` runs under :func:`asyncio.shield` so a second
 and never change the exit code.  The ``try`` starts as soon as
 :func:`bootstrap` returns, so a banner, state, pump, REPL or task-creation
 failure still stops MCP; bootstrap itself rolls back a manager it had already
-started.
+started.  The workspace lock is released after all of that, whatever the exit
+path was.
 
 Errors surface once: configuration and application errors print a red panel and
 return ``1``, a ``KeyboardInterrupt`` during startup returns ``130``, and an
@@ -78,9 +84,13 @@ from mitocode.cli.sessions import (
 from mitocode.cli.state import CliState
 from mitocode.cli.theme import MITOCODE_THEME
 from mitocode.cli.ui import BannerInfo, CliUI
-from mitocode.core.exception.mitocode_exception import MitoCodeBaseError
+from mitocode.core.exception.mitocode_exception import (
+    MitoCodeBaseError,
+    MitoCodeWorkspaceLockError,
+)
 from mitocode.core.mcp.mcp_manager import McpManager
 from mitocode.core.tool.tool_manager import MCP_TOOL_PREFIX
+from mitocode.core.workspace.workspace import WorkspaceLock
 
 NON_INTERACTIVE_EXIT_CODE = 2
 """Exit code for a run without a terminal; the CLI has no pipe mode."""
@@ -367,6 +377,95 @@ async def _amain(args: CliArgs, log_path: Any, console: Console) -> int:
                 ui.note(f"Log file: {log_path}")
 
 
+def _take_workspace_lock(lock: WorkspaceLock, console: Console) -> bool:
+    """Take the workspace lock, asking the user when it is already held.
+
+    One workspace, one CLI: two instances write the same session records and
+    the last save wins, so one instance's conversation disappears without a
+    trace.  The lock turns that silent conflict into a question, and the
+    question names the risk so the answer is an informed one.
+
+    Args:
+        lock: The lock to take.
+        console: Console the warning and the question are printed to.
+
+    Returns:
+        ``True`` when the run may continue -- the lock was taken, or the user
+        chose to force entry -- ``False`` when the run must stop.
+    """
+    try:
+        acquired = lock.acquire()
+    except MitoCodeWorkspaceLockError as exc:
+        acquired = False
+        unavailable: Optional[str] = str(exc)
+    else:
+        unavailable = None
+
+    if acquired:
+        return True
+
+    content = Text()
+    if unavailable is None:
+        content.append("This workspace is already in use by ")
+        content.append(lock.holder(), style="mito.accent")
+        content.append(".")
+    else:
+        content.append(
+            "MitoCode cannot confirm that this workspace is free, because the "
+            "lock could not be taken.",
+            style="mito.warn",
+        )
+        content.append("\n\n")
+        content.append(unavailable, style="mito.muted")
+    content.append("\n\n")
+    content.append("Running a second MitoCode here is not safe:\n", style="mito.warn")
+    content.append(
+        "\n".join(
+            f"  · {risk}\n"
+            for risk in (
+                "Both instances write the same session records, and the last "
+                "save wins, so one instance's conversation can disappear "
+                "without a trace.",
+                "The autosave of one instance can overwrite the session the "
+                "other one is still writing to.",
+                "/sessions in one instance can switch the other instance's "
+                "session out from under it.",
+                "The background tasks and MCP servers the first instance "
+                "started keep running and keep writing into the workspace.",
+            )
+        ),
+        style="mito.muted",
+    )
+
+    console.print(
+        Panel(
+            content,
+            title="Workspace lock",
+            border_style="mito.warn",
+            expand=False,
+        )
+    )
+    try:
+        force = Confirm.ask("Force entry anyway?", console=console, default=False)
+    except EOFError:
+        force = False
+    if not force:
+        console.print(
+            Text(
+                "  Another MitoCode may be using this workspace; exiting.",
+                style="mito.muted",
+            )
+        )
+        return False
+    console.print(
+        Text(
+            "  Entering without the lock; session records may be overwritten.",
+            style="mito.warn",
+        )
+    )
+    return True
+
+
 def _confirm_workspace(console: Console, workspace: Path) -> bool:
     """Ask whether a missing workspace configuration should be created.
 
@@ -415,6 +514,47 @@ def _ensure_provider_settings(workspace: Path, console: Console) -> None:
     values = ask_provider_settings(console)
     written = write_secret_file(workspace, values)
     loguru_logger.debug("Provider configuration written to {}", written)
+
+
+def _run_in_workspace(args: CliArgs, console: Console, workspace_path: Path) -> int:
+    """Take the workspace lock, prepare the provider and run one session.
+
+    The lock is taken before anything is written and released on the way out,
+    so a second MitoCode cannot write over this one's session records.
+
+    Args:
+        args: Parsed command line arguments.
+        console: Themed console the prompts are printed to.
+        workspace_path: Workspace root the CLI was pointed at.
+
+    Returns:
+        The session's exit code, ``0`` for a clean run.
+    """
+    lock = WorkspaceLock(workspace_path)
+    if not _take_workspace_lock(lock, console):
+        return FAILURE_EXIT_CODE
+
+    try:
+        log_dir = workspace_path / MITOCODE_CONFIG_PATH / "logs"
+        try:
+            log_path = configure_logging(debug=args.debug, log_dir=log_dir)
+        except OSError as exc:
+            raise MitoCodeCliConfigError(
+                f"Cannot create the log directory at '{log_dir}': "
+                f"{exc.strerror or 'I/O error'}."
+            ) from exc
+
+        try:
+            _ensure_provider_settings(workspace_path, console)
+        except EOFError:
+            console.print(
+                Text("  Provider setup was cancelled; exiting.", style="mito.muted")
+            )
+            return FAILURE_EXIT_CODE
+
+        return asyncio.run(_amain(args, log_path, console))
+    finally:
+        lock.release()
 
 
 def _start(argv: Sequence[str] | None) -> int:
@@ -475,24 +615,7 @@ def _start(argv: Sequence[str] | None) -> int:
         console.print(Text("  Workspace was not created; exiting.", style="mito.muted"))
         return FAILURE_EXIT_CODE
 
-    log_dir = workspace_path / MITOCODE_CONFIG_PATH / "logs"
-    try:
-        log_path = configure_logging(debug=args.debug, log_dir=log_dir)
-    except OSError as exc:
-        raise MitoCodeCliConfigError(
-            f"Cannot create the log directory at '{log_dir}': "
-            f"{exc.strerror or 'I/O error'}."
-        ) from exc
-
-    try:
-        _ensure_provider_settings(workspace_path, console)
-    except EOFError:
-        console.print(
-            Text("  Provider setup was cancelled; exiting.", style="mito.muted")
-        )
-        return FAILURE_EXIT_CODE
-
-    return asyncio.run(_amain(args, log_path, console))
+    return _run_in_workspace(args, console, workspace_path)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

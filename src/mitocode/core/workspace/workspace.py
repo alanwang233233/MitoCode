@@ -2,20 +2,48 @@
 
 import asyncio
 import json
+import os
 import shutil
+import socket
 import stat
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Union, Awaitable
+from typing import Optional, Union, Awaitable
 
 from mitocode import MITOCODE_CONFIG_PATH, APP_VERSION
 from mitocode.core.exception.mitocode_exception import (
     MitoCodePathConvertError,
     MitoCodeWorkspaceInitError,
     MitoCodeWorkspaceDumpError,
+    MitoCodeWorkspaceLockError,
     MitoCodeWorkspacePathError,
     MitoCodeWorkspaceTooOldError,
     MitoCodeAppTooOldError,
 )
+
+try:  # POSIX advisory locking.
+    import fcntl
+except ImportError:  # pragma: no cover - the branch depends on the platform
+    fcntl = None  # type: ignore[assignment]
+
+try:  # Windows byte-range locking.
+    import msvcrt
+except ImportError:  # pragma: no cover - the branch depends on the platform
+    msvcrt = None  # type: ignore[assignment]
+
+
+WORKSPACE_LOCK_FILENAME = "workspace.lock"
+"""Name of the lock file inside the workspace configuration directory."""
+
+_LOCK_PAYLOAD_SIZE = 1024
+"""Bytes reserved at the start of the lock file for the holder description."""
+
+_LOCK_OFFSET = 65536
+"""Byte the lock is taken on, far beyond the description.
+
+The two regions must not overlap: on Windows a locked byte cannot be
+written to, and the description is rewritten on every acquisition.
+"""
 
 
 # noinspection DuplicatedCode
@@ -610,3 +638,198 @@ class Workspace:
                 json.dump(content, f)
 
         await asyncio.to_thread(_write)
+
+
+class WorkspaceLock:
+    """An advisory lock that keeps a single MitoCode CLI per workspace.
+
+    Two CLIs in one workspace write the same session records: each keeps its
+    own conversation in memory, each autosaves, and the last write wins, so
+    one instance's history disappears without a trace.  The lock turns that
+    silent conflict into an explicit question the user answers.
+
+    The lock is an operating-system lock on a file inside the workspace
+    rather than a flag in that file's contents.  The kernel releases it when
+    the process exits for any reason, so a crashed run leaves nothing to
+    clean up and a stale lock cannot block the next start.
+
+    The lock is advisory: it coordinates the processes that take it, which
+    are the CLI instances.
+    """
+
+    def __init__(self, workspace_path: Union[str, Path]) -> None:
+        """Prepare a lock for one workspace.
+
+        Args:
+            workspace_path: Workspace root the lock belongs to.
+        """
+        self._path = (
+            Path(workspace_path) / MITOCODE_CONFIG_PATH / WORKSPACE_LOCK_FILENAME
+        )
+        self._fd: Optional[int] = None
+
+    @property
+    def path(self) -> Path:
+        """Path of the file the lock is taken on."""
+        return self._path
+
+    def acquire(self) -> bool:
+        """Take the lock without waiting for it.
+
+        Returns:
+            ``True`` when the lock was taken, ``False`` when another process
+            already holds it.
+
+        Raises:
+            MitoCodeWorkspaceLockError: The lock file could not be created
+                or opened, so the caller cannot tell whether the workspace is
+                free.
+        """
+        if self._fd is not None:
+            return True
+
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as exc:
+            raise MitoCodeWorkspaceLockError(
+                f"Cannot open the workspace lock file '{self._path}': "
+                f"{exc.strerror or 'I/O error'}."
+            ) from exc
+
+        try:
+            locked = self._lock_fd(fd)
+        except MitoCodeWorkspaceLockError:
+            os.close(fd)
+            raise
+        if not locked:
+            os.close(fd)
+            return False
+
+        self._fd = fd
+        self._write_holder(fd)
+        return True
+
+    def release(self) -> None:
+        """Release the lock.
+
+        Calling it without holding the lock, or calling it twice, does
+        nothing.
+
+        The lock file itself is left in place on purpose: removing it would
+        race with a process that is about to open it, and two holders could
+        end up locking two different files.  It is a kilobyte inside the
+        workspace's own configuration directory.
+        """
+        fd = self._fd
+        if fd is None:
+            return
+        self._fd = None
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            elif msvcrt is not None:
+                os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def holder(self) -> str:
+        """Describe the process that holds the lock.
+
+        Returns:
+            A short description of the holder, or a generic one when the lock
+            file cannot be read or holds nothing usable.
+        """
+        info = self._read_holder()
+        if not info:
+            return "another MitoCode process"
+        pid = info.get("pid")
+        if not isinstance(pid, int):
+            return "another MitoCode process"
+        started = info.get("started_at")
+        if isinstance(started, str) and started:
+            return f"MitoCode process {pid} (started {started})"
+        return f"MitoCode process {pid}"
+
+    def _read_holder(self) -> dict:
+        """Read the holder description from the lock file.
+
+        Returns:
+            The parsed description, or an empty mapping when the file cannot
+            be read or holds nothing usable.
+        """
+        try:
+            raw = self._path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return {}
+        if not raw:
+            return {}
+        try:
+            info = json.loads(raw)
+        except ValueError:
+            return {}
+        return info if isinstance(info, dict) else {}
+
+    @staticmethod
+    def _lock_fd(fd: int) -> bool:
+        """Take an exclusive, non-blocking lock on *fd*.
+
+        Args:
+            fd: An open descriptor for the lock file.
+
+        Returns:
+            ``True`` when the lock was taken, ``False`` when another process
+            holds it.
+
+        Raises:
+            MitoCodeWorkspaceLockError: The platform offers no locking
+                primitive, so exclusivity cannot be guaranteed.
+        """
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return False
+            return True
+        if msvcrt is not None:
+            try:
+                os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            except OSError:
+                return False
+            return True
+        raise MitoCodeWorkspaceLockError(
+            "This platform provides no file locking, so a single MitoCode "
+            "per workspace cannot be enforced."
+        )
+
+    @staticmethod
+    def _write_holder(fd: int) -> None:
+        """Write the holder description into the lock file.
+
+        The description is best effort: the lock is already held, so a
+        failure here only costs the user the name of the other process.
+
+        Args:
+            fd: The open descriptor of the lock file.
+        """
+        payload = json.dumps(
+            {
+                "pid": os.getpid(),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "host": socket.gethostname(),
+            }
+        ).encode("utf-8")
+        padded = payload[:_LOCK_PAYLOAD_SIZE].ljust(_LOCK_PAYLOAD_SIZE, b" ")
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, padded)
+            os.fsync(fd)
+        except OSError:
+            pass

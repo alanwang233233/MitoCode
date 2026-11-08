@@ -480,6 +480,74 @@ def test_cancelling_the_pump_precedes_stopping_mcp(monkeypatch, tmp_path):
     assert events.index("pump-cancelled") < events.index("mcp-stopped")
 
 
+def test_a_failed_restore_is_reported_to_the_user(monkeypatch, tmp_path, capsys):
+    """恢复失败必须告知用户，否则用户以为选中的会话已经恢复."""
+    record = _session_record("20261107T100000Z-aaaaaaaa")
+    _write_record(tmp_path, record)
+
+    boot = _boot(tmp_path)
+    boot.restore_error = "parent chain cycles"
+    _install_common_fakes(monkeypatch, tmp_path, boot)
+
+    async def fake_bootstrap(args, ui, approver, restore=None):
+        # The restore was attempted and failed.
+        boot.restore_succeeded = False
+        return boot
+
+    monkeypatch.setattr(app_module, "bootstrap", fake_bootstrap)
+
+    assert app_module.main([]) == 0
+
+    output = capsys.readouterr().out
+    # The panel wraps, so the text is checked without its line breaks.
+    flattened = " ".join(output.lower().split())
+    assert "could not be restored" in flattened
+    assert "parent chain cycles" in flattened
+
+
+def test_ctrl_d_at_the_workspace_prompt_reports_it(monkeypatch, tmp_path, capsys):
+    """首次工作区确认按 Ctrl+D 必须给出可读的信息，而不是空的 Unexpected error."""
+
+    def _ensure(workspace_path, *, confirm):
+        # The real implementation asks the user; Ctrl+D ends that prompt.
+        return confirm(workspace_path)
+
+    def _cancel(console, path):
+        raise EOFError()
+
+    monkeypatch.setattr(app_module, "ensure_workspace", _ensure)
+    monkeypatch.setattr(app_module, "_confirm_workspace", _cancel)
+    monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
+    monkeypatch.setattr(
+        app_module, "configure_logging", lambda **kw: tmp_path / "cli.log"
+    )
+
+    assert app_module.main([]) == 1
+
+    output = capsys.readouterr().out
+    assert "cancelled" in output.lower(), (
+        "the user must be told the setup was cancelled; an empty panel tells "
+        "them nothing"
+    )
+    assert "Unexpected error" not in output
+
+
+def test_unreadable_session_directory_reports_and_exits(monkeypatch, tmp_path, capsys):
+    """会话目录无法读取时必须提示用户并退出，而不是当成"没有存档"."""
+    from mitocode.cli.sessions import SessionLoadError
+
+    def _boom(self):
+        raise SessionLoadError(f"the session directory '{tmp_path}' is unreadable")
+
+    monkeypatch.setattr(app_module.SessionStore, "list_sessions", _boom, raising=False)
+    _install_common_fakes(monkeypatch, tmp_path, _boot(tmp_path))
+
+    assert app_module.main([]) == 1
+
+    output = capsys.readouterr().out
+    assert "unreadable" in output
+
+
 def test_the_manager_receives_the_api_key_to_scrub_from_records(monkeypatch, tmp_path):
     """会话记录可能包含工具读到的凭据，manager 必须知道要脱敏的字面量."""
     boot = _boot(tmp_path)
@@ -1302,68 +1370,131 @@ def test_new_session_does_not_echo_history(monkeypatch, tmp_path):
     assert echo_calls == []
 
 
-def test_unreadable_session_directory_reports_and_exits(monkeypatch, tmp_path, capsys):
-    """会话目录无法读取时必须提示用户并退出，而不是当成"没有存档"."""
-    from mitocode.cli.sessions import SessionLoadError
+def _answer_confirm(monkeypatch, answer):
+    """Make the startup confirmation return a fixed answer.
 
-    def _boom(self):
-        raise SessionLoadError(f"the session directory '{tmp_path}' is unreadable")
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        answer: Value ``Confirm.ask`` returns.
 
-    monkeypatch.setattr(app_module.SessionStore, "list_sessions", _boom, raising=False)
-    _install_common_fakes(monkeypatch, tmp_path, _boot(tmp_path))
+    Returns:
+        The list of prompts the confirmation was asked with.
+    """
+    asked = []
 
-    assert app_module.main([]) == 1
+    def _ask(prompt, **_kwargs):
+        asked.append(prompt)
+        return answer
 
-    output = capsys.readouterr().out
-    assert "unreadable" in output
+    monkeypatch.setattr(app_module.Confirm, "ask", staticmethod(_ask))
+    return asked
 
 
-def test_a_failed_restore_is_reported_to_the_user(monkeypatch, tmp_path, capsys):
-    """恢复失败必须告知用户，否则用户以为选中的会话已经恢复."""
-    record = _session_record("20261107T100000Z-aaaaaaaa")
-    _write_record(tmp_path, record)
+def test_the_workspace_is_locked_while_the_cli_runs(monkeypatch, tmp_path):
+    """运行期间 workspace 必须被锁住，另一个实例进不来."""
+    from mitocode.core.workspace.workspace import WorkspaceLock
 
+    observed = {}
     boot = _boot(tmp_path)
-    boot.restore_error = "parent chain cycles"
-    _install_common_fakes(monkeypatch, tmp_path, boot)
 
     async def fake_bootstrap(args, ui, approver, restore=None):
-        # The restore was attempted and failed.
-        boot.restore_succeeded = False
+        boot.restore_succeeded = restore is not None
+        other = WorkspaceLock(tmp_path)
+        observed["acquired"] = other.acquire()
+        if observed["acquired"]:
+            other.release()
         return boot
 
+    _install_common_fakes(monkeypatch, tmp_path, boot)
     monkeypatch.setattr(app_module, "bootstrap", fake_bootstrap)
 
-    assert app_module.main([]) == 0
-
-    output = capsys.readouterr().out
-    # The panel wraps, so the text is checked without its line breaks.
-    flattened = " ".join(output.lower().split())
-    assert "could not be restored" in flattened
-    assert "parent chain cycles" in flattened
-
-
-def test_ctrl_d_at_the_workspace_prompt_reports_it(monkeypatch, tmp_path, capsys):
-    """首次工作区确认按 Ctrl+D 必须给出可读的信息，而不是空的 Unexpected error."""
-    def _ensure(workspace_path, *, confirm):
-        # The real implementation asks the user; Ctrl+D ends that prompt.
-        return confirm(workspace_path)
-
-    def _cancel(console, path):
-        raise EOFError()
-
-    monkeypatch.setattr(app_module, "ensure_workspace", _ensure)
-    monkeypatch.setattr(app_module, "_confirm_workspace", _cancel)
-    monkeypatch.setattr(app_module, "_is_interactive", lambda: True)
-    monkeypatch.setattr(
-        app_module, "configure_logging", lambda **kw: tmp_path / "cli.log"
+    assert app_module.main(["-w", str(tmp_path)]) == 0
+    assert observed["acquired"] is False, (
+        "the workspace must be locked for the whole run; otherwise a second "
+        "CLI can start on top of this one"
     )
 
-    assert app_module.main([]) == 1
 
-    output = capsys.readouterr().out
-    assert "cancelled" in output.lower(), (
-        "the user must be told the setup was cancelled; an empty panel tells "
-        "them nothing"
-    )
-    assert "Unexpected error" not in output
+def test_the_workspace_lock_is_released_when_the_cli_exits(monkeypatch, tmp_path):
+    """退出后必须释放锁，下一次启动才能拿到."""
+    from mitocode.core.workspace.workspace import WorkspaceLock
+
+    _install_common_fakes(monkeypatch, tmp_path, _boot(tmp_path))
+
+    assert app_module.main(["-w", str(tmp_path)]) == 0
+
+    other = WorkspaceLock(tmp_path)
+    assert other.acquire() is True, "the lock must be released when the CLI exits"
+    other.release()
+
+
+def test_a_held_workspace_lock_warns_and_names_the_risk(monkeypatch, tmp_path, capsys):
+    """锁被占用时必须警告用户，并说明强制进入的风险."""
+    from mitocode.core.workspace.workspace import WorkspaceLock
+
+    holder = WorkspaceLock(tmp_path)
+    assert holder.acquire() is True
+    try:
+        _install_common_fakes(monkeypatch, tmp_path, _boot(tmp_path))
+        asked = _answer_confirm(monkeypatch, False)
+
+        assert app_module.main(["-w", str(tmp_path)]) == 1
+
+        output = capsys.readouterr().out
+        assert asked, "the user must be asked whether to force entry"
+        assert "already" in output.lower() or "in use" in output.lower()
+        # The risk must be spelled out, not just announced.
+        assert "overwrite" in output.lower()
+        assert "background" in output.lower()
+    finally:
+        holder.release()
+
+
+def test_the_user_can_refuse_to_force_entry(monkeypatch, tmp_path):
+    """用户拒绝强制进入时 CLI 不得启动."""
+    from mitocode.core.workspace.workspace import WorkspaceLock
+
+    started = []
+    boot = _boot(tmp_path)
+
+    async def fake_bootstrap(args, ui, approver, restore=None):
+        started.append(True)
+        boot.restore_succeeded = restore is not None
+        return boot
+
+    holder = WorkspaceLock(tmp_path)
+    assert holder.acquire() is True
+    try:
+        _install_common_fakes(monkeypatch, tmp_path, boot)
+        monkeypatch.setattr(app_module, "bootstrap", fake_bootstrap)
+        _answer_confirm(monkeypatch, False)
+
+        assert app_module.main(["-w", str(tmp_path)]) == 1
+        assert not started, "the CLI must not start while another one holds the lock"
+    finally:
+        holder.release()
+
+
+def test_forcing_entry_starts_the_cli_despite_the_held_lock(monkeypatch, tmp_path):
+    """用户确认风险后可以强制进入."""
+    from mitocode.core.workspace.workspace import WorkspaceLock
+
+    started = []
+    boot = _boot(tmp_path)
+
+    async def fake_bootstrap(args, ui, approver, restore=None):
+        started.append(True)
+        boot.restore_succeeded = restore is not None
+        return boot
+
+    holder = WorkspaceLock(tmp_path)
+    assert holder.acquire() is True
+    try:
+        _install_common_fakes(monkeypatch, tmp_path, boot)
+        monkeypatch.setattr(app_module, "bootstrap", fake_bootstrap)
+        _answer_confirm(monkeypatch, True)
+
+        assert app_module.main(["-w", str(tmp_path)]) == 0
+        assert started, "the CLI must start when the user forces entry"
+    finally:
+        holder.release()
