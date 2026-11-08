@@ -425,7 +425,7 @@ async def test_demo_player_replays_user_assistant_reasoning_and_tools(tmp_path):
 
 @pytest.mark.asyncio
 async def test_demo_player_error_result_gets_error_style(tmp_path):
-    """error: 开头的结果内容保留并套用 mito.error 颜色."""
+    """运行时报失败的结果保留原文并套用 mito.error 颜色."""
     buffer = StringIO()
     console = Console(
         file=buffer,
@@ -435,7 +435,9 @@ async def test_demo_player_error_result_gets_error_style(tmp_path):
         theme=MITOCODE_THEME,
     )
     ui = CliUI(console, history_path=tmp_path / "history")
-    blocks = [_ToolResultMessageBlock("call_9", "error: something broke badly")]
+    blocks = [
+        _ToolResultMessageBlock("call_9", "error: something broke badly", success=False)
+    ]
     player, _session = _player(ui, blocks, [], root=tmp_path)
     await player.run()
     output = buffer.getvalue()

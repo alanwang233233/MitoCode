@@ -89,13 +89,28 @@ class _ToolCallMessageBlock(_MessageBlock):
 
 
 class _ToolResultMessageBlock(_MessageBlock):
-    """Stores the execution results returned from local tools."""
+    """Stores the execution results returned from local tools.
 
-    def __init__(self, tool_call_id: str, result: str):
+    Attributes:
+        success: Whether the tool call succeeded.  The runtime decides this
+            and it is carried here so the outcome survives a save and a
+            reload; the content alone cannot tell a failure from a success.
+    """
+
+    def __init__(self, tool_call_id: str, result: str, success: bool = True):
+        """Store the result and its outcome.
+
+        Args:
+            tool_call_id: Id of the call this result answers.
+            result: The tool's output.
+            success: Whether the call succeeded.  Defaults to ``True`` for
+                the callers that have no failure to report.
+        """
         super().__init__()
         self.role = "tool"
         self.tool_call_id = tool_call_id
         self.content = result
+        self.success = success
         self.finished = True
 
 

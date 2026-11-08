@@ -348,6 +348,7 @@ def render_session_history(
                 block.content,
                 verbose=verbose,
                 root=root,
+                success=bool(getattr(block, "success", True)),
             )
             ui.console.print(Text.assemble(("  ⎿ ", "mito.muted"), preview))
 
@@ -545,6 +546,7 @@ class DemoPlayer:
                 block.content,
                 verbose=self._verbose,
                 root=self._root,
+                success=bool(getattr(block, "success", True)),
             )
             self._ui.console.print(Text.assemble(("  ⎿ ", "mito.muted"), preview))
 

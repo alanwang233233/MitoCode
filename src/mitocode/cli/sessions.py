@@ -32,7 +32,6 @@ from mitocode.core.agent.agent_session import (
     _ToolCallMessageBlock,
     _ToolResultMessageBlock,
 )
-from mitocode.cli.format import ERROR_PREFIX
 
 SCHEMA_VERSION = 1
 """Version of the on-disk session record schema written by this module."""
@@ -125,10 +124,10 @@ def is_valid_session_id(value: object) -> bool:
 def block_to_dict(block: Any) -> Optional[dict]:
     """Serialize one history block into its JSON record form.
 
-    Tool results carry no ``success`` field at runtime, so it is inferred
-    from the ``error:`` prefix rule shared with :mod:`mitocode.cli.format`
-    and :mod:`mitocode.cli.pump`: a result whose stripped content starts
-    with ``error:`` (case-insensitive) is saved as a failure.
+    A tool result carries the ``success`` flag the runtime decided on.  It
+    is written out as it is: the outcome cannot be recovered from the
+    content, because a failure does not have to start with ``error:`` and a
+    successful tool may well print that word.
 
     Args:
         block: One entry from ``AgentSession.messages``.
@@ -156,13 +155,11 @@ def block_to_dict(block: Any) -> Optional[dict]:
             "parse_error": block.parse_error,
         }
     if isinstance(block, _ToolResultMessageBlock):
-        content = str(block.content)
-        success = not content.strip().lower().startswith(ERROR_PREFIX)
         return {
             "kind": "tool_result",
             "tool_call_id": block.tool_call_id,
-            "content": content,
-            "success": success,
+            "content": str(block.content),
+            "success": bool(getattr(block, "success", True)),
         }
     return None
 
@@ -204,6 +201,7 @@ def _block_from_dict(data: Mapping[str, Any]) -> Optional[Any]:
         return _ToolResultMessageBlock(
             str(data.get("tool_call_id", "") or ""),
             str(data.get("content", "") or ""),
+            success=bool(data.get("success", True)),
         )
     return None
 

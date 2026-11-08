@@ -345,16 +345,20 @@ class EventPump:
         name, args = self._calls.pop((agent_id, call_id), ("", {}))
         raw = event.get("result")
         result = "" if raw is None else str(raw)
+        # The runtime's verdict is authoritative: a failure does not have to
+        # start with "error:" and a successful tool may well print that word.
+        success = event.get("success")
         preview = format_result(
             name,
             args,
             result,
             verbose=bool(self._state.verbose),
             root=self._root(),
+            success=success if isinstance(success, bool) else None,
         )
-        failed = event.get(
-            "success", True
-        ) is False or preview.plain.strip().lower().startswith(ERROR_PREFIX)
+        failed = success is False or preview.plain.strip().lower().startswith(
+            ERROR_PREFIX
+        )
         if failed:
             preview = Text(preview.plain, style="mito.error")
 

@@ -177,8 +177,8 @@ def test_unfinished_tool_call_block_stays_unfinished():
     assert restored.arguments_string == '{"file_'
 
 
-def test_tool_result_block_round_trips_and_infers_success():
-    """tool_result 无 success 字段；按 error: 前缀推定 success."""
+def test_tool_result_block_round_trips_and_keeps_the_success_flag():
+    """tool_result 携带运行时决定的 success 字段."""
     ok = _ToolResultMessageBlock("call_1", "120 lines")
     record = block_to_dict(ok)
     assert record == {
@@ -191,12 +191,55 @@ def test_tool_result_block_round_trips_and_infers_success():
     assert isinstance(restored, _ToolResultMessageBlock)
     assert restored.tool_call_id == "call_1"
     assert restored.content == "120 lines"
+    assert restored.success is True
     assert block_to_dict(restored)["success"] is True
 
-    failed = _ToolResultMessageBlock("call_2", "Error: no such file")
+    failed = _ToolResultMessageBlock("call_2", "Error: no such file", success=False)
     assert block_to_dict(failed)["success"] is False
-    failed_upper = _ToolResultMessageBlock("call_3", "  ERROR: permission denied")
+    failed_upper = _ToolResultMessageBlock(
+        "call_3", "  ERROR: permission denied", success=False
+    )
     assert block_to_dict(failed_upper)["success"] is False
+
+
+def test_tool_result_block_carries_the_runtime_success_flag():
+    """success 由运行时决定，不再从 error: 前缀推断.
+
+    The runtime knows whether a tool call succeeded; the content does not.
+    A failure whose message does not start with "error:" -- "Invalid
+    argument. missing 'path'" is one -- used to be written to disk as a
+    success and read back as one.
+    """
+    failed = _ToolResultMessageBlock("call_1", "Invalid argument. missing 'path'")
+    failed.success = False
+
+    record = block_to_dict(failed)
+    assert (
+        record["success"] is False
+    ), "a runtime failure must not be recorded as a success"
+
+    restored = _block_from_dict(record)
+    assert restored.success is False, "the success flag must survive the round trip"
+    assert block_to_dict(restored)["success"] is False
+
+
+def test_tool_result_block_does_not_infer_success_from_the_prefix():
+    """前缀规则已移除：内容看起来像错误但运行时说是成功，就是成功."""
+    ok = _ToolResultMessageBlock("call_1", "Error: this is part of the output")
+    ok.success = True
+
+    assert block_to_dict(ok)["success"] is True
+
+    restored = _block_from_dict(block_to_dict(ok))
+    assert restored.success is True
+
+
+def test_tool_result_block_defaults_to_success():
+    """没有 success 信息的块默认按成功处理."""
+    block = _ToolResultMessageBlock("call_1", "output")
+
+    assert block.success is True
+    assert block_to_dict(block)["success"] is True
 
 
 def test_block_from_dict_returns_none_for_unknown_or_bad_records():
