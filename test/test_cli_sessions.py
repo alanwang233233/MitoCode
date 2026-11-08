@@ -553,6 +553,81 @@ def test_validate_record_reports_each_violation():
     assert validate_record(dict(good, agents=dangling)) is not None
 
 
+def test_validate_record_rejects_duplicate_agent_ids():
+    """两个 agent 共用同一个 agent_id 时校验必须拒绝."""
+    good = _valid_record("20261107T152000Z-1a2b3c4d")
+    duplicated = [
+        dict(good["agents"][0]),
+        {
+            "agent_id": 0,
+            "name": "Twin",
+            "description": "",
+            "parent_id": None,
+            "sub_agent_ids": [],
+            "system_prompt": "",
+            "messages": [],
+        },
+    ]
+    reason = validate_record(dict(good, agents=duplicated))
+    assert reason is not None
+    assert "duplicate" in reason.lower()
+
+
+def test_validate_record_rejects_a_parent_cycle():
+    """父子链成环时校验必须拒绝，而不是留给 restore_tree 报错."""
+    good = _valid_record("20261107T152000Z-1a2b3c4d")
+    cyclic = [
+        {
+            "agent_id": 0,
+            "name": "Main",
+            "description": "",
+            "parent_id": 1,
+            "sub_agent_ids": [1],
+            "system_prompt": "",
+            "messages": [],
+        },
+        {
+            "agent_id": 1,
+            "name": "Sub",
+            "description": "",
+            "parent_id": 0,
+            "sub_agent_ids": [0],
+            "system_prompt": "",
+            "messages": [],
+        },
+    ]
+    reason = validate_record(dict(good, agents=cyclic))
+    assert reason is not None
+    assert "cycle" in reason.lower()
+
+
+def test_validate_record_accepts_a_valid_deep_parent_chain():
+    """合法的多级父子链不应被环检测误伤."""
+    good = _valid_record("20261107T152000Z-1a2b3c4d")
+    chained = [
+        dict(good["agents"][0], parent_id=None),
+        {
+            "agent_id": 1,
+            "name": "Child",
+            "description": "",
+            "parent_id": 0,
+            "sub_agent_ids": [2],
+            "system_prompt": "",
+            "messages": [],
+        },
+        {
+            "agent_id": 2,
+            "name": "Grandchild",
+            "description": "",
+            "parent_id": 1,
+            "sub_agent_ids": [],
+            "system_prompt": "",
+            "messages": [],
+        },
+    ]
+    assert validate_record(dict(good, agents=chained)) is None
+
+
 def test_list_sessions_returns_sorted_summaries_and_skips_bad_files(tmp_path):
     """3 个合法按 updated_at 倒序；4 个坏文件计数跳过；.tmp 与非 json 忽略."""
     store = SessionStore(tmp_path)

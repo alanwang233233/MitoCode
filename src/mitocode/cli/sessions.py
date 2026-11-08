@@ -478,6 +478,11 @@ def validate_record(record: object) -> Optional[str]:
     ``messages`` field, a ``main_agent_id`` present among the agents, and
     closed ``parent_id`` references.
 
+    The duplicate-id and parent-cycle checks mirror
+    :meth:`~mitocode.core.agent.agent_orchestrator.AgentOrchestrator.restore_tree`
+    exactly, so a record that lists and loads is a record that restores: the
+    two layers cannot disagree about what a usable tree is.
+
     Args:
         record: Parsed JSON value of a candidate session file.
 
@@ -506,12 +511,15 @@ def validate_record(record: object) -> Optional[str]:
             return "every agent needs an integer agent_id"
         if not isinstance(agent.get("messages"), list):
             return f"agent {agent_id} needs a list messages field"
+        if agent_id in agent_ids:
+            return f"duplicate agent_id {agent_id}"
         agent_ids.add(agent_id)
     main_agent_id = record.get("main_agent_id")
     if not isinstance(main_agent_id, int) or isinstance(main_agent_id, bool):
         return "main_agent_id must be an integer"
     if main_agent_id not in agent_ids:
         return "main_agent_id is not among the agents"
+    parents: dict = {}
     for agent in agents:
         parent_id = agent.get("parent_id")
         if parent_id is None:
@@ -522,6 +530,18 @@ def validate_record(record: object) -> Optional[str]:
             return (
                 f"agent {agent.get('agent_id')} references missing parent {parent_id}"
             )
+        parents[agent.get("agent_id")] = parent_id
+    # A parent chain that loops back on itself can never be restored, and the
+    # loop is invisible to the checks above: every parent id exists, so only
+    # walking the chain finds it.
+    for agent_id in agent_ids:
+        visited = set()
+        current: Optional[int] = agent_id
+        while current is not None:
+            if current in visited:
+                return f"cycle detected in parent chain at agent {current}"
+            visited.add(current)
+            current = parents.get(current)
     return None
 
 
