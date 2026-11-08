@@ -6,6 +6,7 @@ import os
 import shutil
 import socket
 import stat
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Union, Awaitable
@@ -726,11 +727,11 @@ class WorkspaceLock:
             return
         self._fd = None
         try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            elif msvcrt is not None:
+            if sys.platform == "win32" and msvcrt is not None:
                 os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
                 msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            elif fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
         except OSError:
             pass
         finally:
@@ -791,23 +792,23 @@ class WorkspaceLock:
             MitoCodeWorkspaceLockError: The platform offers no locking
                 primitive, so exclusivity cannot be guaranteed.
         """
-        if fcntl is not None:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                return False
-            return True
-        if msvcrt is not None:
+        if sys.platform == "win32" and msvcrt is not None:
             try:
                 os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
                 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
             except OSError:
                 return False
             return True
-        raise MitoCodeWorkspaceLockError(
-            "This platform provides no file locking, so a single MitoCode "
-            "per workspace cannot be enforced."
-        )
+        if fcntl is None:
+            raise MitoCodeWorkspaceLockError(
+                "This platform provides no file locking, so a single MitoCode "
+                "per workspace cannot be enforced."
+            )
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        return True
 
     @staticmethod
     def _write_holder(fd: int) -> None:

@@ -359,7 +359,10 @@ def display_messages_from_record(record: Mapping[str, Any]) -> List[Any]:
         The main agent's message blocks, unknown kinds skipped, or an empty
         list when the record carries no usable ``messages``.
     """
-    agent_record = _agent_record(record, record.get("main_agent_id"))
+    main_agent_id = record.get("main_agent_id")
+    if not isinstance(main_agent_id, int) or isinstance(main_agent_id, bool):
+        return []
+    agent_record = _agent_record(record, main_agent_id)
     if agent_record is None:
         return []
     messages = agent_record.get("messages")

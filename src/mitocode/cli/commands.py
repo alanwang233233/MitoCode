@@ -25,7 +25,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    cast,
+)
 
 from rich.table import Table
 from rich.text import Text
@@ -654,7 +663,7 @@ async def _stop_active_work(state: Any) -> bool:
     reset_sessions = getattr(orchestrator, "reset_sessions", None)
     if callable(reset_sessions):
         try:
-            await reset_sessions()
+            await cast(Callable[[], Awaitable[None]], reset_sessions)()
         except Exception as exc:  # pylint: disable=broad-exception-caught
             loguru_logger.exception("Could not stop the running session")
             ctx_ui = getattr(state, "ui", None)
@@ -666,7 +675,7 @@ async def _stop_active_work(state: Any) -> bool:
     stop_all = getattr(background, "stop_all", None)
     if callable(stop_all):
         try:
-            await stop_all()
+            await cast(Callable[[], Awaitable[None]], stop_all)()
         except Exception as exc:  # pylint: disable=broad-exception-caught
             loguru_logger.exception("Could not stop the background work")
             ctx_ui = getattr(state, "ui", None)

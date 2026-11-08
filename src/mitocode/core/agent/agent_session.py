@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from typing import List, Any, Dict, Callable
+from typing import List, Any, Dict, Callable, Optional
 
 from loguru import logger as loguru_logger
 
@@ -157,7 +157,7 @@ class AgentSession:  # pylint: disable=too-many-instance-attributes
         return AgentSession(**settings)
 
     def __init__(self, **settings):
-        provider: _SampleChatProvider = settings.get("provider", None)
+        provider: Optional[_SampleChatProvider] = settings.get("provider", None)
         # The user-supplied collections are kept intact so that
         # :meth:`refresh_tools` can rebuild the merged view without losing
         # them: only the managed half of the merge is allowed to change.
