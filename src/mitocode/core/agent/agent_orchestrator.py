@@ -4,13 +4,16 @@ import asyncio
 import copy
 import re
 import traceback
-from typing import Any, Dict, List, Mapping, Sequence
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from loguru import logger as loguru_logger
 
 from .agent_runtime import AgentRuntime
 from .agent_session import AgentSession
 from .agent_state import AgentState
+from .template.apply import apply_template
+from .template.template import AgentTemplate
 from ..bridge.event_adapter import EventBridge
 from ..chat_provider.sample_chat_provider import SampleChatProvider
 from ..chat_provider.scenario_provider import ScenarioProvider
@@ -43,6 +46,7 @@ class AgentOrchestrator:  # pylint: disable=too-many-instance-attributes
         default_provider: SampleChatProvider | ScenarioProvider | None = None,
         system_prompt: str = "",
         redact_secrets: Sequence[str] = (),
+        workspace: Optional[Path] = None,
     ):
         """Create an orchestrator.
 
@@ -55,6 +59,9 @@ class AgentOrchestrator:  # pylint: disable=too-many-instance-attributes
             redact_secrets: Literal secret values (e.g. the configured API
                 key) scrubbed from error messages and error logs alongside the
                 ``sk-`` pattern. Blank entries are ignored.
+            workspace: Workspace root substituted into a template's
+                ``{workspace}`` placeholder. ``None`` leaves the placeholder
+                visible: a caller with no workspace has no path to put there.
         """
         self._sessions: Dict[int, AgentSession] = {}
         self._tasks: Dict[int, asyncio.Task | None] = {}
@@ -64,6 +71,7 @@ class AgentOrchestrator:  # pylint: disable=too-many-instance-attributes
             default_provider
         )
         self._system_prompt: str = system_prompt or ""
+        self._workspace: Optional[Path] = workspace
         self._redact_secrets: tuple[str, ...] = tuple(
             secret for secret in redact_secrets if secret and secret.strip()
         )
@@ -119,6 +127,7 @@ class AgentOrchestrator:  # pylint: disable=too-many-instance-attributes
         provider: SampleChatProvider | ScenarioProvider | None = None,
         description: str = "",
         parent_id: int | None = None,
+        template: AgentTemplate | None = None,
         **session_kwargs,
     ) -> AgentSession:
         """Create a new :class:`AgentSession` and register it.
@@ -133,6 +142,11 @@ class AgentOrchestrator:  # pylint: disable=too-many-instance-attributes
                 default_provider if not given.
             description: Optional description shown in the tree.
             parent_id: If set, the new session becomes a child of this node.
+            template: Optional agent template whose ``session_autoload`` blocks
+                are replayed into the new session before it is registered. Its
+                first block replaces the session's system prompt when that
+                block is a system message; see
+                :func:`~mitocode.core.agent.template.apply.apply_template`.
             **session_kwargs: Forwarded to :class:`AgentSession`. The
                 orchestrator's ``system_prompt`` is used unless the caller
                 passes one explicitly.
@@ -171,6 +185,10 @@ class AgentOrchestrator:  # pylint: disable=too-many-instance-attributes
             tool_manager=self._tool_manager,
             **session_kwargs,
         )
+        # Before registration: a template is part of the session's history, and
+        # nothing must be able to observe the session between the two states.
+        if template is not None:
+            apply_template(session, template, workspace=self._workspace)
         self._sessions[agent_id] = session
         self._tasks[agent_id] = None
         if parent_id is not None:
