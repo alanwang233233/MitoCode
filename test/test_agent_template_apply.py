@@ -257,7 +257,9 @@ async def test_create_session_seeds_the_new_session_from_the_template():
     )
 
     assert _roles(session) == ["system"]
-    assert session.messages[0].message == "Planner at /tmp/ws."
+    # Compared through Path rather than as a literal: the same absolute path
+    # renders with backslashes on Windows.
+    assert session.messages[0].message == f"Planner at {Path('/tmp/ws')}."
     assert orchestrator.get_session(session.agent_id) is session
 
 
