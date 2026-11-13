@@ -24,6 +24,32 @@ class MitoCodePathConvertError(MitoCodeBaseError):
     """Raised when a path argument cannot be converted to a ``Path``."""
 
 
+class MitoCodeConfigError(MitoCodeBaseError):
+    """Base class for configuration-location errors."""
+
+
+class MitoCodeConfigPathError(MitoCodeConfigError):
+    """Raised when a configuration name cannot be turned into a safe path.
+
+    Covers names that are empty, absolute, carry a drive or UNC prefix, or
+    contain a ``..`` segment, as well as requests for a project path when no
+    workspace was supplied.
+    """
+
+
+class MitoCodeConfigNotFoundError(MitoCodeConfigError, builtins.FileNotFoundError):
+    """Raised when neither the project nor the global copy of a file exists.
+
+    Also inherits ``FileNotFoundError``: callers that already handle a missing
+    file keep working, while callers that care about the configuration layer
+    can catch the more specific type.
+    """
+
+
+class MitoCodeConfigWriteError(MitoCodeConfigError):
+    """Raised when a configuration file cannot be created or opened for writing."""
+
+
 class MitoCodeWorkspaceError(MitoCodeBaseError):
     """Base class for workspace-related errors."""
 
