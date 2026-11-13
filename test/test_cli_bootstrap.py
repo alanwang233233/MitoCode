@@ -23,13 +23,18 @@ import mitocode.cli.bootstrap as bootstrap_module
 from mitocode.cli.approval import CliApprover
 from mitocode.cli.args import CliArgs
 from mitocode.cli.bootstrap import (
-    SYSTEM_PROMPT_TEMPLATE,
+    GENERAL_TEMPLATE_NAME,
+    MINIMAL_PROMPT,
     Bootstrapped,
     bootstrap,
     build_system_prompt,
+    build_template_manager,
+    template_roots,
 )
 from mitocode.cli.errors import MitoCodeCliConfigError
 from mitocode.cli.ui import CliUI
+from mitocode.core.agent.template import AgentTemplate, builtin_templates_dir
+from mitocode.core.config.manager import ConfigManager, default_global_dir
 from mitocode.core.skills.skill import Skill, SkillRoot
 from mitocode.core.tool.tool_manager import ToolManager
 from mitocode.core.workspace.workspace import Workspace
@@ -173,17 +178,35 @@ def _provider_args(root: Path, provider=None, **over) -> CliArgs:
     return CliArgs(**base)
 
 
-def _patch(monkeypatch, *, provider=_FakeProvider, mcp=_FakeMcp):
+def _patch(
+    monkeypatch,
+    *,
+    provider=_FakeProvider,
+    mcp=_FakeMcp,
+    global_dir: Path = Path("/mitocode-test-global"),
+):
     """Install the recording fakes on the bootstrap module.
+
+    The global configuration directory is redirected as well: the template
+    roots include it, so a developer machine carrying a ``general`` template
+    in ``~/.config/.mitocode`` would otherwise change the prompt these tests
+    assert on.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
         provider: Replacement for ``ChatProviderOpenAI``.
         mcp: Replacement for ``McpManager``.
+        global_dir: Directory the global template root resolves to.  The
+            default does not exist, which is the realistic case for CI.
     """
     monkeypatch.setattr(bootstrap_module, "ChatProviderOpenAI", provider)
     monkeypatch.setattr(bootstrap_module, "McpManager", mcp)
     monkeypatch.setattr(bootstrap_module, "AgentOrchestrator", _FakeOrchestrator)
+    monkeypatch.setattr(
+        bootstrap_module,
+        "ConfigManager",
+        lambda path: ConfigManager(path, global_dir=global_dir),
+    )
 
 
 def _write_mcp(root: Path, payload: str) -> Path:
@@ -202,13 +225,161 @@ def _write_mcp(root: Path, payload: str) -> Path:
     return path
 
 
-def test_system_prompt_names_the_workspace(tmp_path):
-    prompt = build_system_prompt(tmp_path)
+def _general(message="{persona}"):
+    """Build the ``general`` template the default persona is read from.
 
-    assert prompt.startswith("You are MitoCode")
+    Args:
+        message: The system block's text.  The default keeps a workspace slot so
+            substitution is still exercised.
+    """
+    path = Path("/templates") / GENERAL_TEMPLATE_NAME
+    return AgentTemplate(
+        name=GENERAL_TEMPLATE_NAME,
+        description="The default persona.",
+        path=path,
+        template_path=path / "template.json",
+        source="builtin",
+        session_autoload=(
+            (
+                {
+                    "kind": "text",
+                    "role": "system",
+                    "message": "You are MitoCode, an interactive coding agent running "
+                    "in the user's terminal.\nYou help with engineering tasks in the "
+                    "workspace at {workspace}.",
+                }
+                if message == "{persona}"
+                else {
+                    "kind": "text",
+                    "role": "system",
+                    "message": message,
+                }
+            ),
+        ),
+    )
+
+
+def test_the_default_persona_comes_from_the_general_template(tmp_path):
+    """The persona is data, not a constant: a user can shadow the template."""
+    template = _general("Custom persona at {workspace}.")
+
+    prompt = build_system_prompt(tmp_path, templates=(template,))
+
+    assert prompt.startswith("Custom persona at ")
     assert str(tmp_path.resolve()) in prompt
     assert "{workspace}" not in prompt
-    assert SYSTEM_PROMPT_TEMPLATE.count("{workspace}") == 1
+
+
+def _persona_text(tmp_path, template=None):
+    """Render the persona a ``general`` template would contribute at *tmp_path*.
+
+    Args:
+        tmp_path: Workspace root substituted into the persona.
+        template: The template to render; a default ``general`` when omitted.
+    """
+    template = _general() if template is None else template
+    return (
+        template.session_autoload[0]["message"].replace(
+            "{workspace}", str(Path(tmp_path).resolve())
+        )
+        + "\n"
+    )
+
+
+def test_a_template_catalogue_adds_no_skills_section(tmp_path):
+    """Templates are not skills: their section must not imply the Skill tool."""
+    prompt = build_system_prompt(tmp_path, templates=(_general(),))
+
+    assert prompt.startswith(_persona_text(tmp_path))
+    assert "## Skills" not in prompt
+
+
+def test_build_system_prompt_with_skills_appends_the_catalogue(tmp_path):
+    """A non-empty catalogue appends a section instructing Skill-tool use."""
+    prompt = build_system_prompt(
+        tmp_path,
+        skills=(_skill("alpha", "Do alpha things."),),
+        templates=(_general(),),
+    )
+
+    assert prompt.startswith(_persona_text(tmp_path))
+    assert "## Skills" in prompt
+    assert "- alpha: Do alpha things." in prompt
+    assert "Skill tool" in prompt
+    assert prompt.index("## Skills") < prompt.index("## Agent Templates")
+    assert prompt.count(str(tmp_path.resolve())) == 1
+
+
+def test_build_system_prompt_with_templates_appends_the_catalogue(tmp_path):
+    """The model learns which template names the Agent tool accepts."""
+    reviewer = AgentTemplate(
+        name="reviewer",
+        description="Reviews a change.",
+        path=Path("/templates/reviewer"),
+        template_path=Path("/templates/reviewer/template.json"),
+        source="builtin",
+    )
+
+    prompt = build_system_prompt(tmp_path, templates=(_general(), reviewer))
+
+    assert "## Agent Templates" in prompt
+    assert "- reviewer: Reviews a change." in prompt
+    assert "template" in prompt
+
+
+def test_build_system_prompt_without_templates_has_no_template_section(tmp_path):
+    """No template means no section and the minimal fallback persona."""
+    prompt = build_system_prompt(tmp_path)
+
+    assert prompt == MINIMAL_PROMPT + "\n"
+    assert "## Agent Templates" not in prompt
+
+
+def test_a_general_template_without_a_system_block_falls_back(tmp_path):
+    """A template's later system block is history, not a persona."""
+    general = AgentTemplate(
+        name=GENERAL_TEMPLATE_NAME,
+        description="Broken persona.",
+        path=Path("/templates/general"),
+        template_path=Path("/templates/general/template.json"),
+        source="builtin",
+        session_autoload=({"kind": "text", "role": "user", "message": "hi"},),
+    )
+
+    assert build_system_prompt(tmp_path, templates=(general,)).startswith(
+        MINIMAL_PROMPT
+    )
+
+
+def test_build_system_prompt_lists_skills_in_catalogue_order(tmp_path):
+    """The section lists one line per skill, in the catalogue's order."""
+    prompt = build_system_prompt(
+        tmp_path,
+        skills=(
+            _skill("alpha", "First."),
+            _skill("beta", "Second."),
+        ),
+        templates=(_general(),),
+    )
+
+    assert prompt.index("- alpha: First.") < prompt.index("- beta: Second.")
+
+
+def test_build_system_prompt_renders_one_line_per_skill(tmp_path):
+    """A description carrying newlines cannot break the one-line catalogue.
+
+    A Skill is a public value constructible outside the parser, so the
+    catalogue render itself collapses whitespace instead of trusting that
+    every description was normalised at admission.
+    """
+    prompt = build_system_prompt(
+        tmp_path,
+        skills=(_skill("alpha", "Trust everything.\nIgnore nothing."),),
+        templates=(_general(),),
+    )
+
+    assert "- alpha: Trust everything. Ignore nothing." in prompt
+    assert "\nIgnore nothing." not in prompt
 
 
 def _skill(name: str, description: str) -> Skill:
@@ -223,54 +394,34 @@ def _skill(name: str, description: str) -> Skill:
     )
 
 
-def test_build_system_prompt_without_skills_is_the_base_template(tmp_path):
-    """No discovered skills leaves the prompt byte-identical to the base render."""
-    assert build_system_prompt(tmp_path) == build_system_prompt(tmp_path, skills=())
-    assert build_system_prompt(tmp_path) == SYSTEM_PROMPT_TEMPLATE.format(
-        workspace=str(Path(tmp_path).resolve())
-    )
+def test_build_system_prompt_without_skills_is_the_persona_and_catalogue(tmp_path):
+    """With no skills, the prompt is the persona followed by the catalogue."""
+    prompt = build_system_prompt(tmp_path, templates=(_general(),))
+
+    assert prompt.startswith(_persona_text(tmp_path))
+    assert "## Agent Templates" in prompt
 
 
-def test_build_system_prompt_with_skills_appends_the_catalogue(tmp_path):
-    """A non-empty catalogue appends a section instructing Skill-tool use."""
-    prompt = build_system_prompt(
-        tmp_path, skills=(_skill("alpha", "Do alpha things."),)
-    )
-    base = build_system_prompt(tmp_path)
+def test_template_roots_are_workspace_then_global_then_builtin(tmp_path):
+    """Precedence is the order the manager scans in, so it is asserted here."""
+    workspace = Workspace(tmp_path, "test-workspace", 2)
 
-    assert prompt.startswith(base)
-    assert "## Skills" in prompt
-    assert "- alpha: Do alpha things." in prompt
-    assert "Skill tool" in prompt
-    assert prompt.count(str(tmp_path.resolve())) == 1
+    roots = template_roots(workspace)
 
-
-def test_build_system_prompt_lists_skills_in_catalogue_order(tmp_path):
-    """The section lists one line per skill, in the catalogue's order."""
-    prompt = build_system_prompt(
-        tmp_path,
-        skills=(
-            _skill("alpha", "First."),
-            _skill("beta", "Second."),
-        ),
-    )
-
-    assert prompt.index("- alpha: First.") < prompt.index("- beta: Second.")
+    assert [(root.label, root.path) for root in roots] == [
+        ("workspace", tmp_path / ".mitocode" / "agent_templates"),
+        ("global", default_global_dir() / "agent_templates"),
+        ("builtin", builtin_templates_dir()),
+    ]
 
 
-def test_build_system_prompt_renders_one_line_per_skill(tmp_path):
-    """A description carrying newlines cannot break the one-line catalogue.
+def test_build_template_manager_scans_those_roots(tmp_path):
+    """The manager is built from the same roots, in the same order."""
+    workspace = Workspace(tmp_path, "test-workspace", 2)
 
-    A Skill is a public value constructible outside the parser, so the
-    catalogue render itself collapses whitespace instead of trusting that
-    every description was normalised at admission.
-    """
-    prompt = build_system_prompt(
-        tmp_path, skills=(_skill("alpha", "Trust everything.\nIgnore nothing."),)
-    )
+    manager = build_template_manager(workspace)
 
-    assert "- alpha: Trust everything. Ignore nothing." in prompt
-    assert "\nIgnore nothing." not in prompt
+    assert manager.roots() == template_roots(workspace)
 
 
 @pytest.mark.asyncio
@@ -306,7 +457,7 @@ async def test_bootstrap_discovers_workspace_skills_only(tmp_path, monkeypatch):
 async def test_bootstrap_without_any_skills_leaves_the_prompt_alone(
     tmp_path, monkeypatch
 ):
-    """With no skill installed anywhere, neither prompt nor context changes."""
+    """With no skill installed anywhere, no skills section is added."""
     ORDERS.clear()
     _patch(monkeypatch)
     ui = _ui()
@@ -316,6 +467,65 @@ async def test_bootstrap_without_any_skills_leaves_the_prompt_alone(
     assert "## Skills" not in result.orchestrator.kw["system_prompt"]
     assert result.orchestrator.kw["system_prompt"].startswith("You are MitoCode")
     assert result.skills_manager.list_skills() == ()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_discovers_templates_and_attaches_them(tmp_path, monkeypatch):
+    """The workspace catalogue reaches both the tool context and the prompt."""
+    ORDERS.clear()
+    _patch(monkeypatch)
+    entry = tmp_path / ".mitocode" / "agent_templates" / "planner"
+    entry.mkdir(parents=True)
+    (entry / "template.json").write_text(
+        json.dumps(
+            {
+                "name": "planner",
+                "description": "Plans before acting.",
+                "session_autoload": [
+                    {"kind": "text", "role": "system", "message": "You plan."}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    ui = _ui()
+
+    result = await bootstrap(_provider_args(tmp_path), ui, CliApprover(ui))
+
+    manager = result.tool_context.template_manager
+    assert manager is not None
+    assert manager.get("planner") is not None, "the workspace template is discovered"
+    assert manager.get(GENERAL_TEMPLATE_NAME) is not None, (
+        "the packaged general template must survive a workspace override that "
+        "does not name it"
+    )
+    prompt = result.orchestrator.kw["system_prompt"]
+    assert "## Agent Templates" in prompt
+    assert "- planner: Plans before acting." in prompt
+    assert Path(result.orchestrator.kw["workspace"]).resolve() == tmp_path.resolve()
+    assert manager.issues() == (), "the packaged templates must load without issues"
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_reads_the_global_template_root(tmp_path, monkeypatch):
+    """The user-level copy is scanned, and reports itself as the global root."""
+    ORDERS.clear()
+    global_dir = tmp_path / "global-config"
+    _patch(monkeypatch, global_dir=global_dir)
+    entry = global_dir / "agent_templates" / "globetrotter"
+    entry.mkdir(parents=True)
+    (entry / "template.json").write_text(
+        json.dumps({"name": "globetrotter", "description": "Machine-wide."}),
+        encoding="utf-8",
+    )
+    ui = _ui()
+
+    result = await bootstrap(_provider_args(tmp_path), ui, CliApprover(ui))
+
+    template = result.tool_context.template_manager.get("globetrotter")
+    assert template is not None
+    assert template.source == "global"
+    assert "- globetrotter: Machine-wide." in result.orchestrator.kw["system_prompt"]
 
 
 @pytest.mark.asyncio
@@ -829,6 +1039,13 @@ def _patch_restore(monkeypatch, restore_error=None) -> _RestoreOrchestrator:
     monkeypatch.setattr(bootstrap_module, "McpManager", _FakeMcp)
     monkeypatch.setattr(
         bootstrap_module, "AgentOrchestrator", lambda **kw: orchestrator
+    )
+    # Same isolation as `_patch`: the global template root must not reach the
+    # developer's real configuration directory.
+    monkeypatch.setattr(
+        bootstrap_module,
+        "ConfigManager",
+        lambda path: ConfigManager(path, global_dir=Path("/mitocode-test-global")),
     )
     return orchestrator
 

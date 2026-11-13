@@ -48,7 +48,14 @@ from mitocode.cli.config import (
 from mitocode.cli.errors import MitoCodeCliConfigError
 from mitocode.cli.ui import CliUI
 from mitocode.core.agent.agent_orchestrator import AgentOrchestrator
+from mitocode.core.agent.template import (
+    AgentTemplate,
+    AgentTemplateManager,
+    TemplateRoot,
+    builtin_templates_dir,
+)
 from mitocode.core.chat_provider.chat_provider_openai import ChatProviderOpenAI
+from mitocode.core.config.manager import ConfigManager
 from mitocode.core.exception.mitocode_exception import (
     MitoCodeAppTooOldError,
     MitoCodeMcpConfigError,
@@ -81,6 +88,27 @@ SKILLS_DIR_NAME = "skills"
 """Skill directories' name under the workspace root:
 ``<workspace>/.mitocode/skills``."""
 
+TEMPLATES_DIR_NAME = "agent_templates"
+"""Template directories' name under a configuration directory:
+``<workspace>/.mitocode/agent_templates`` and ``<global>/agent_templates``."""
+
+GENERAL_TEMPLATE_NAME = "general"
+"""The packaged template whose system block is the default persona.
+
+A session that names no template is seeded with this one's prompt, so the
+persona lives in a data file the user can read and override rather than in a
+Python constant none of them can edit.
+"""
+
+MINIMAL_PROMPT = (
+    "You are MitoCode, an interactive coding agent running in the user's terminal."
+)
+"""Last-resort persona, used only when the packaged ``general`` template is gone.
+
+A corrupted install should degrade to a usable agent with a warning, not to a
+session with no instructions at all.
+"""
+
 DEFAULT_PROVIDER_BASE_URL = "https://api.openai.com/v1"
 """Endpoint passed when the credential file names none.
 
@@ -88,20 +116,6 @@ The OpenAI SDK falls back to ``OPENAI_BASE_URL`` when its ``base_url`` argument
 is ``None``; the CLI promises that provider settings come only from
 ``provider.json``, so an explicit default keeps the environment out of it.
 """
-
-SYSTEM_PROMPT_TEMPLATE = """\
-You are MitoCode, an interactive coding agent running in the user's terminal.
-You help with engineering tasks in the workspace at {workspace}.
-
-- Read files before changing them. Prefer Edit for targeted changes and Write
-  for new files; never rewrite a whole file to make one small change.
-- Use tools for facts: do not invent file contents, command output, or APIs.
-- Run tests or commands when they materially verify your work.
-- Keep answers concise and concrete; use Markdown.
-- Stay inside the workspace. Operations outside it need user approval.
-- If a task is ambiguous or destructive, ask before acting.
-"""
-"""Role instructions seeded into every CLI session, with a ``{workspace}`` slot."""
 
 SKILLS_PROMPT_SECTION = """
 
@@ -116,6 +130,20 @@ follow them before acting:
 """
 """Appended to the system prompt when at least one skill was discovered, with
 the ``- name: description`` catalogue in the ``{skills}`` slot."""
+
+TEMPLATES_PROMPT_SECTION = """
+
+## Agent Templates
+
+Templates seed a new agent's context with messages prepared earlier: a persona,
+a worked example, or the results of a previous investigation. When the Agent
+tool would do the work better from that starting point, name the template as
+its `template` argument:
+
+{templates}
+"""
+"""Appended to the system prompt when at least one template was discovered, with
+the ``- name: description`` catalogue in the ``{templates}`` slot."""
 
 _ResultT = TypeVar("_ResultT")
 
@@ -447,31 +475,78 @@ class Bootstrapped:  # pylint: disable=too-many-instance-attributes
     restore_error: str = ""
 
 
-def build_system_prompt(workspace: Path, skills: Sequence[Skill] = ()) -> str:
+def build_system_prompt(
+    workspace: Path,
+    skills: Sequence[Skill] = (),
+    templates: Sequence[AgentTemplate] = (),
+) -> str:
     """Render the default system prompt for one workspace.
+
+    The persona is not written here: it is the system block of the packaged
+    ``general`` template, so a user can read it, and can shadow it with their
+    own copy in ``.mitocode/agent_templates``, without editing this module.
 
     Args:
         workspace: Workspace root. It is resolved first so the model always
             receives an absolute path, whatever the user typed.
         skills: The discovered skill catalogue.  Empty — the default — leaves
-            the prompt byte-identical to the base template's render; a
-            non-empty catalogue appends the skills section naming each one.
+            the prompt without a skills section; a non-empty catalogue appends
+            the section naming each one.
+        templates: The discovered template catalogue.  Its ``general`` entry
+            supplies the persona; any non-empty catalogue also appends the
+            section that tells the model which templates it may pass to the
+            ``Agent`` tool.  When ``general`` is missing — a corrupted install —
+            the persona degrades to :data:`MINIMAL_PROMPT` and a warning is
+            logged rather than failing startup.
 
     Returns:
-        :data:`SYSTEM_PROMPT_TEMPLATE` with the absolute workspace path filled
-        into its ``{workspace}`` slot, plus :data:`SKILLS_PROMPT_SECTION` when
-        *skills* is non-empty.
+        The persona (its ``{workspace}`` placeholder filled in) followed by
+        :data:`SKILLS_PROMPT_SECTION` when *skills* is non-empty and
+        :data:`TEMPLATES_PROMPT_SECTION` when *templates* is non-empty.
     """
-    prompt = SYSTEM_PROMPT_TEMPLATE.format(workspace=str(Path(workspace).resolve()))
-    if not skills:
-        return prompt
-    # One line per skill, whatever a Skill value built outside the parser
-    # carries: a description with newlines would otherwise turn the catalogue
-    # into uncontrolled multi-line prompt text.
-    catalogue = "\n".join(
-        f"- {skill.name}: {' '.join(skill.description.split())}" for skill in skills
+    resolved = Path(workspace).resolve()
+    prompt = _default_persona(templates, resolved)
+    if skills:
+        # One line per skill, whatever a Skill value built outside the parser
+        # carries: a description with newlines would otherwise turn the
+        # catalogue into uncontrolled multi-line prompt text.
+        catalogue = "\n".join(
+            f"- {skill.name}: {' '.join(skill.description.split())}" for skill in skills
+        )
+        prompt += SKILLS_PROMPT_SECTION.format(skills=catalogue)
+    if templates:
+        catalogue = "\n".join(
+            f"- {template.name}: {' '.join(template.description.split())}"
+            for template in templates
+        )
+        prompt += TEMPLATES_PROMPT_SECTION.format(templates=catalogue)
+    return prompt
+
+
+def _default_persona(templates: Sequence[AgentTemplate], workspace: Path) -> str:
+    """Return the ``general`` template's persona for *workspace*.
+
+    Args:
+        templates: The discovered template catalogue.
+        workspace: Resolved workspace root substituted into ``{workspace}``.
+
+    Returns:
+        The persona, normalised to end with exactly one newline so the prompt is
+        byte-identical to the constant it replaced.  :data:`MINIMAL_PROMPT` when
+        no usable ``general`` template was discovered.
+    """
+    for template in templates:
+        if template.name != GENERAL_TEMPLATE_NAME:
+            continue
+        persona = template.system_message(workspace)
+        if persona.strip():
+            return persona.rstrip("\n") + "\n"
+    loguru_logger.warning(
+        "No '{}' agent template was discovered, so the default persona is the "
+        "built-in fallback; check that the packaged templates are installed.",
+        GENERAL_TEMPLATE_NAME,
     )
-    return prompt + SKILLS_PROMPT_SECTION.format(skills=catalogue)
+    return MINIMAL_PROMPT + "\n"
 
 
 def skills_roots(workspace: Workspace) -> Tuple[SkillRoot, ...]:
@@ -509,6 +584,45 @@ def build_skills_manager(workspace: Workspace) -> SkillsManager:
     return SkillsManager(list(skills_roots(workspace)))
 
 
+def template_roots(workspace: Workspace) -> Tuple[TemplateRoot, ...]:
+    """Return the template roots one CLI run scans, in precedence order.
+
+    The workspace copy wins over the global copy, which wins over the templates
+    shipped with the package: a project can pin a template for its own agents
+    without touching the machine-wide copy, and the packaged defaults stay
+    available underneath both.  Paths come from
+    :class:`~mitocode.core.config.manager.ConfigManager`, so "where the global
+    directory is" stays one decision made in one place.
+
+    Args:
+        workspace: Resolved workspace whose root the project copy derives from.
+
+    Returns:
+        The labelled roots in precedence order.
+    """
+    config = ConfigManager(workspace.path)
+    return (
+        TemplateRoot(label="workspace", path=config.project_path(TEMPLATES_DIR_NAME)),
+        TemplateRoot(label="global", path=config.global_path(TEMPLATES_DIR_NAME)),
+        TemplateRoot(label="builtin", path=builtin_templates_dir()),
+    )
+
+
+def build_template_manager(workspace: Workspace) -> AgentTemplateManager:
+    """Build the template manager over :func:`template_roots`.
+
+    Construction performs no disk access; the caller runs
+    :meth:`~mitocode.core.agent.template.template_manager.AgentTemplateManager.discover`.
+
+    Args:
+        workspace: Resolved workspace the first two roots derive from.
+
+    Returns:
+        The manager, roots in precedence order.
+    """
+    return AgentTemplateManager(list(template_roots(workspace)))
+
+
 async def bootstrap(
     args: CliArgs, ui: CliUI, approver: CliApprover, restore: Optional[dict] = None
 ) -> Bootstrapped:
@@ -518,9 +632,9 @@ async def bootstrap(
     before provider settings can be read from it, the tool registry has to exist
     before the orchestrator that owns it, MCP has to finish starting before
     any :class:`~mitocode.core.agent.agent_session.AgentSession` is created
-    because a session snapshots the registry in its constructor, and skills
-    have to finish being discovered before the orchestrator is built because
-    the system prompt carries their catalogue.
+    because a session snapshots the registry in its constructor, and skills and
+    templates have to finish being discovered before the orchestrator is built
+    because the system prompt carries both catalogues.
 
     A malformed *default* ``<workspace>/.mitocode/mcp.json`` only disables MCP
     and is reported through ``ui.warn``; a malformed explicit ``--mcp-config``
@@ -577,16 +691,28 @@ async def bootstrap(
         await skills_manager.discover()
         tool_context.skills_manager = skills_manager
 
+        # Template discovery shares the skills step's constraint and its
+        # guard: the catalogue feeds the system prompt, which the orchestrator
+        # is built with, and a failure here must not orphan the MCP manager.
+        template_manager = build_template_manager(resolution.workspace)
+        await template_manager.discover()
+        tool_context.template_manager = template_manager
+
         orchestrator = AgentOrchestrator(
             tool_manager=tool_manager,
             default_provider=provider,
             system_prompt=build_system_prompt(
-                resolution.workspace.path, skills=skills_manager.list_skills()
+                resolution.workspace.path,
+                skills=skills_manager.list_skills(),
+                templates=template_manager.list_templates(),
             ),
             # resolve_provider_config validated the key as non-blank, so the
             # orchestrator can scrub the literal secret out of every provider
             # failure's log line and error event.
             redact_secrets=(provider_config.api_key,),
+            # Templates are rendered against the workspace, so a child spawned
+            # with one resolves `{workspace}` to the same root its parent runs in.
+            workspace=resolution.workspace.path,
         )
         tool_context.attach_orchestrator(orchestrator)
 
@@ -785,16 +911,21 @@ __all__ = [
     "CONFIG_FILENAME",
     "DEFAULT_MCP_CONFIG_RELATIVE_PATH",
     "DEFAULT_PROVIDER_BASE_URL",
+    "GENERAL_TEMPLATE_NAME",
+    "MINIMAL_PROMPT",
     "SKILLS_DIR_NAME",
     "SKILLS_PROMPT_SECTION",
-    "SYSTEM_PROMPT_TEMPLATE",
+    "TEMPLATES_DIR_NAME",
+    "TEMPLATES_PROMPT_SECTION",
     "Bootstrapped",
     "WorkspaceResolution",
     "bootstrap",
     "build_skills_manager",
     "build_system_prompt",
+    "build_template_manager",
     "ensure_workspace",
     "load_mcp_servers",
     "resolve_workspace",
     "skills_roots",
+    "template_roots",
 ]

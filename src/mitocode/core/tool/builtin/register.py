@@ -227,6 +227,12 @@ _BUILTIN_TOOLS: Tuple[Tuple[str, Callable[..., Any], str, str, str, str], ...] =
         "parent_id defaults to the agent whose turn is making this call; an "
         "explicit parent_id must be you yourself or inside your subtree, and "
         "anything else is refused. "
+        "template names a template from the templates section of your "
+        "instructions: that template's messages are replayed into the new "
+        "agent's history before the prompt, so it starts with that context "
+        "instead of only your instructions. An unknown name is refused with "
+        "the available template names listed; omit template to start the agent "
+        "with the default persona and no seeded context. "
         "Nesting is capped at a fixed depth, and a spawn past the cap is "
         "refused with the depth named.",
         "agent.create",
