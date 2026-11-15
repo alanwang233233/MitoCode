@@ -1310,3 +1310,34 @@ async def test_a_blank_template_name_is_read_as_no_template():
 
     assert result.startswith("Created agent")
     assert "template" not in orch.created[0]
+
+
+@pytest.mark.asyncio
+async def test_query_agent_does_not_report_a_template_seeded_turn_as_output():
+    """A prepared assistant turn is context, not something the agent produced.
+
+    Without the marker, spawning with a template that ends in an assistant
+    message would make QueryAgent answer "done" before the agent ran a turn.
+    """
+    prepared = _Block(role="assistant", message="Understood. I will begin.")
+    prepared.from_template = True
+    _make_ctx(_query_orchestrator(messages=[prepared]))
+
+    result = await agent_tools.query_agent(3)
+
+    assert "none yet" in result
+    assert "Understood" not in result
+
+
+@pytest.mark.asyncio
+async def test_query_agent_still_reports_an_answer_produced_after_the_template():
+    """The marker skips only the seeded blocks, not the ones that follow."""
+    prepared = _Block(role="assistant", message="Understood. I will begin.")
+    prepared.from_template = True
+    produced = _Block(role="assistant", message="The plan is ready.")
+    _make_ctx(_query_orchestrator(messages=[prepared, produced]))
+
+    result = await agent_tools.query_agent(3)
+
+    assert "The plan is ready." in result
+    assert "Understood" not in result

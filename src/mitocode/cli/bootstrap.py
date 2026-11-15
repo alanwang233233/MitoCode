@@ -479,12 +479,16 @@ def build_system_prompt(
     workspace: Path,
     skills: Sequence[Skill] = (),
     templates: Sequence[AgentTemplate] = (),
+    persona: Optional[AgentTemplate] = None,
 ) -> str:
     """Render the default system prompt for one workspace.
 
     The persona is not written here: it is the system block of the packaged
-    ``general`` template, so a user can read it, and can shadow it with their
-    own copy in ``.mitocode/agent_templates``, without editing this module.
+    ``general`` template, passed in as *persona*.  It is a parameter rather than
+    a lookup over *templates* on purpose — the catalogue's ``general`` may be a
+    workspace copy, and a repository's content must not become the root agent's
+    instructions just because it was opened.  Whichever copy supplies the
+    persona, the caller decides by source (see :func:`_persona_template`).
 
     Args:
         workspace: Workspace root. It is resolved first so the model always
@@ -492,12 +496,12 @@ def build_system_prompt(
         skills: The discovered skill catalogue.  Empty — the default — leaves
             the prompt without a skills section; a non-empty catalogue appends
             the section naming each one.
-        templates: The discovered template catalogue.  Its ``general`` entry
-            supplies the persona; any non-empty catalogue also appends the
-            section that tells the model which templates it may pass to the
-            ``Agent`` tool.  When ``general`` is missing — a corrupted install —
-            the persona degrades to :data:`MINIMAL_PROMPT` and a warning is
-            logged rather than failing startup.
+        templates: The discovered template catalogue, listed for the model so it
+            knows which names the ``Agent`` tool accepts.
+        persona: The template whose first block is the default persona, or
+            ``None`` when none was usable.  ``None`` or a blank persona degrades
+            to :data:`MINIMAL_PROMPT` with a warning rather than failing
+            startup.
 
     Returns:
         The persona (its ``{workspace}`` placeholder filled in) followed by
@@ -505,7 +509,7 @@ def build_system_prompt(
         :data:`TEMPLATES_PROMPT_SECTION` when *templates* is non-empty.
     """
     resolved = Path(workspace).resolve()
-    prompt = _default_persona(templates, resolved)
+    prompt = _default_persona(persona, resolved)
     if skills:
         # One line per skill, whatever a Skill value built outside the parser
         # carries: a description with newlines would otherwise turn the
@@ -523,28 +527,59 @@ def build_system_prompt(
     return prompt
 
 
-def _default_persona(templates: Sequence[AgentTemplate], workspace: Path) -> str:
-    """Return the ``general`` template's persona for *workspace*.
+def _persona_template(
+    manager: AgentTemplateManager,
+) -> Optional[AgentTemplate]:
+    """Return the template that supplies the default persona, if any.
+
+    Only a template the user's own machine provides may become the root agent's
+    instructions.  The packaged copy is the default; the global copy is the
+    user's own override.  A workspace copy is repository content — opening a
+    repository must not rewrite the rules the agent runs under — so it is
+    ignored here even when it shadows the packaged one in the catalogue.
 
     Args:
-        templates: The discovered template catalogue.
+        manager: A manager whose :meth:`discover` has run.
+
+    Returns:
+        The ``general`` template from the builtin or global root, or ``None``.
+    """
+    return manager.find(GENERAL_TEMPLATE_NAME, sources=("builtin", "global"))
+
+
+def _default_persona(persona: Optional[AgentTemplate], workspace: Path) -> str:
+    """Return the persona *persona* renders for *workspace*.
+
+    Args:
+        persona: The template supplying the persona, or ``None``.
         workspace: Resolved workspace root substituted into ``{workspace}``.
 
     Returns:
         The persona, normalised to end with exactly one newline so the prompt is
         byte-identical to the constant it replaced.  :data:`MINIMAL_PROMPT` when
-        no usable ``general`` template was discovered.
+        no persona was supplied or the template has no usable system block.
     """
-    for template in templates:
-        if template.name != GENERAL_TEMPLATE_NAME:
-            continue
-        persona = template.system_message(workspace)
-        if persona.strip():
-            return persona.rstrip("\n") + "\n"
+    if persona is None:
+        loguru_logger.warning(
+            "No '{}' agent template was found in the packaged or global "
+            "template roots, so the default persona is the built-in fallback; "
+            "check that the packaged templates are installed.",
+            GENERAL_TEMPLATE_NAME,
+        )
+        return MINIMAL_PROMPT + "\n"
+
+    rendered = persona.system_message(workspace)
+    if rendered.strip():
+        return rendered.rstrip("\n") + "\n"
+
+    # Found, but its first block is not a usable system message.  Saying "not
+    # discovered" here would send the user looking for a missing install.
     loguru_logger.warning(
-        "No '{}' agent template was discovered, so the default persona is the "
-        "built-in fallback; check that the packaged templates are installed.",
-        GENERAL_TEMPLATE_NAME,
+        "The '{}' agent template at {} ({}) does not start with a non-empty "
+        "system text block, so the default persona is the built-in fallback.",
+        persona.name,
+        persona.template_path,
+        persona.source or "unlabelled root",
     )
     return MINIMAL_PROMPT + "\n"
 
@@ -705,14 +740,20 @@ async def bootstrap(
                 resolution.workspace.path,
                 skills=skills_manager.list_skills(),
                 templates=template_manager.list_templates(),
+                # Not the catalogue's `general`: that entry may be a workspace
+                # copy, and a repository must not be able to rewrite the rules
+                # the root agent runs under.
+                persona=_persona_template(template_manager),
             ),
             # resolve_provider_config validated the key as non-blank, so the
             # orchestrator can scrub the literal secret out of every provider
             # failure's log line and error event.
             redact_secrets=(provider_config.api_key,),
-            # Templates are rendered against the workspace, so a child spawned
-            # with one resolves `{workspace}` to the same root its parent runs in.
-            workspace=resolution.workspace.path,
+            # Resolved, unlike the workspace's own attribute: a relative
+            # `--workspace .` would otherwise be rendered into a child
+            # template's {workspace} text verbatim, while every path tool
+            # resolves against an absolute root.
+            workspace=Path(resolution.workspace.path).resolve(),
         )
         tool_context.attach_orchestrator(orchestrator)
 

@@ -81,14 +81,19 @@
 这条规则让现有 `.mitocode/agent_templates/plan_agent/template.json`（首个 `tool_call`
 缺 `id`）能正常加载，同时不会把真正错位的模板猜成一个错误的历史。
 
-### 另外三条「整份非法」（provider 会拒绝的历史不放过）
+### 另外四条「整份非法」（provider 会拒绝的历史不放过）
 
 - `tool_call` 的 id 重复（含手写 id 撞上自动分配的 `call_<位置>`）：两条 call 共用一个
   身份，请求要么被拒、要么结果错配；
 - `tool_call` 与其 `tool_result` 之间夹了 `text` 块：provider 要求结果紧跟调用；
+- 一批并行调用只答了一半就又发起新调用（A、B、result A、call C）：上下文编译器会把
+  已完成的那批刷成一条 assistant 消息，C 就落在 B 未应答的位置；
 - 文件末尾留着没有被应答的 `tool_call`。
 
-这三条同属「宁可在加载时说清楚，也不要留到第一次请求远端报一个看不懂的错」。
+这四条同属「宁可在加载时说清楚，也不要留到第一次请求远端报一个看不懂的错」。
+
+JSON 解码本身也设了边界：嵌套深到触发 `RecursionError`（不是 `JSONDecodeError`，几千层
+括号就能达到，1 MiB 上限拦不住）同样折算成模板定义错误，只损失该模板，不中断整轮发现。
 
 模板是**整体校验**的：任何一个块非法，整个模板被拒绝并记成 issue，不做部分加载——
 半截上下文比没有上下文更糟，而且它只会在第一次调 provider 时炸掉，用户完全看不懂。
@@ -106,6 +111,10 @@
 ```
 
 - 根不存在 → 贡献 0 个模板、0 个 issue；
+- **根本身是符号链接 → 拒绝并记 issue**。目录级的检查拦不住它：链接目标里的子目录都是
+  普通目录，顺着根走进去就会把工作区之外的内容收进目录；
+- 根的元数据探测失败（权限错误在 Python 3.10 会向外抛）→ 记 issue 并跳过该根，不中断
+  其余根；
 - 目录缺 `template.json` → 一条 issue（该目录被跳过）；
 - `template.json` 是符号链接 → 拒绝（沿用 skills 的防任意文件读取立场）；
 - 解析/校验失败 → 一条 issue。
@@ -135,28 +144,47 @@
 理由：模板自带 system 块时，作者表达的是「完整人格」，再叠一层默认提示词会得到两段
 互相打架的角色说明。现有样例正是这种形态。
 
-注意由此产生的等价关系：`general` 模板贡献默认人格，所以「不传 template」和
-「传 template=general」得到的会话基本一致，只差技能/模板目录两节。这个差异是有意保留
-的：显式点名一个模板，就等于用模板自带的人格替换默认人格。`Agent` 工具文档只说明
-「省略 template 得到默认人格、没有预置上下文」，不把这层边角写进模型可见的说明。
+注入的块会被打上 `from_template = True`。`QueryAgent` 取「最后一条 assistant 消息」时
+跳过带标记的块——模板末尾的 assistant 台词只是上下文，不是这个 agent 的产出；在它真正
+跑完一轮之前，答案必须是「还没有消息」。会话保存/恢复不保留这个标记：恢复出来的是这个
+agent 真实经历过的历史，而不是种子。
 
-### 5.3 `{workspace}` 替换
+### 5.3 默认人格的来源限定（安全边界）
+
+`general` 模板只从 **builtin 与 global** 两个根取用来当默认人格，工作区副本不参与：
+
+- 工作区里提交一份 `.mitocode/agent_templates/general/template.json`，等于用仓库内容改写
+  根 agent 的系统指令（含「越界需审批」「动手前先问」这些规则），克隆即生效，用户无感；
+- 用户自己机器上的 global 副本是本人的选择，允许覆盖内置；
+- 工作区副本仍然在目录里，`Agent(template="general")` 显式点名时照常使用——被模型主动
+  选择的模板与被静默应用的人格，是两件事。
+
+为此管理器保留「所有被接纳的模板」（含被同名 shadow 掉的），并提供
+`find(name, sources=(...))`：`get` 回答「Agent 工具按名字会拿到哪一份」，`find` 回答
+「这一类根提供过哪一份」。`bootstrap._persona_template` 用后者，只接受
+`builtin` / `global`。
+
+### 5.4 `{workspace}` 替换
 
 文本块里的字面量 `{workspace}` 在注入时替换为工作区绝对路径（`str.replace`，不是
 `.format`，所以正文里的其他花括号不会炸）。默认人格原本就带工作区路径，靠这一条
-从 Python 常量迁进模板文件。
+从 Python 常量迁进模板文件。`bootstrap` 传给 orchestrator 的 workspace 是**解析过的
+绝对路径**：`--workspace .` 不会让子代理的模板文本里出现一个 `.`。
 
 ## 6. 对模型的可见性
 
-`build_system_prompt(workspace, skills, templates)` 变为组合器：
+`build_system_prompt(workspace, skills, templates, persona)` 变为组合器：
 
 ```
-general 模板的 system 文本（替换 {workspace}）
+persona 模板的 system 文本（替换 {workspace}）   ← persona 由 bootstrap 按来源选定
   + SKILLS_PROMPT_SECTION（有技能时）
   + TEMPLATES_PROMPT_SECTION（有模板时）
 ```
 
-- `general` 缺失（内置目录被破坏）→ 退化为一行兜底文案并告警，不让启动失败；
+- `persona` 是**参数**而不是在 `templates` 里按名字查找：目录里的 `general` 可能来自
+  工作区，而默认人格不允许来自仓库内容（§5.3）；
+- 找不到可用的 `persona` → 退化为一行兜底文案并告警；找到但首块不是非空 system 文本时
+  告警另写一条，点名该模板的路径与来源，避免让人去找一个根本没丢的安装；
 - 人格部分逐字节等于原 `SYSTEM_PROMPT_TEMPLATE` 的渲染（含结尾换行）；无技能时不追加
   技能节。**但提示词整体不再与旧版相等**：内置模板目录永远非空，所以每次启动都会多出
   模板章节——这是本方案的预期产物，不是回归；

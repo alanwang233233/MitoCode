@@ -76,8 +76,9 @@ class TemplateDocument:
     """A validated ``template.json``, before it is attached to a root.
 
     Attributes:
-        name: ``name`` field; matches ``^[a-z0-9]+(-[a-z0-9]+)*$``, is at most
-            64 characters, and equals the template directory's name.
+        name: ``name`` field; matches ``^[a-z0-9]+([_-][a-z0-9]+)*$``, is at
+            most 64 characters, and equals the template directory's name.
+            Underscores are admitted alongside hyphens.
         description: ``description`` field collapsed to one whitespace-normalised
             line; 1..1024 characters after collapsing.
         session_autoload: Message blocks to replay, in order, each a plain

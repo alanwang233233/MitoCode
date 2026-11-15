@@ -128,6 +128,7 @@ class AgentTemplateManager:
                 normalised.append(TemplateRoot(label="", path=Path(root)))
         self._roots: Tuple[TemplateRoot, ...] = tuple(normalised)
         self._catalogue: Tuple[AgentTemplate, ...] = ()
+        self._all: Tuple[AgentTemplate, ...] = ()
         self._issues: Tuple[TemplateIssue, ...] = ()
 
     def roots(self) -> Tuple[TemplateRoot, ...]:
@@ -154,9 +155,10 @@ class AgentTemplateManager:
             same tuple is cached for :meth:`list_templates` and :meth:`get`, and
             the scan's issues replace whatever earlier scans had recorded.
         """
-        catalogue, issues = await asyncio.to_thread(self._scan)
+        catalogue, issues, admitted = await asyncio.to_thread(self._scan)
         self._catalogue = catalogue
         self._issues = issues
+        self._all = admitted
         for issue in issues:
             logger.warning(f"Template issue at {issue.path}: {issue.detail}")
         return catalogue
@@ -185,6 +187,38 @@ class AgentTemplateManager:
                 return template
         return None
 
+    def find(
+        self, name: str, *, sources: Sequence[str] = ()
+    ) -> Optional[AgentTemplate]:
+        """Return the first admitted template called *name*, shadowed or not.
+
+        :meth:`get` answers "what does the Agent tool get when it names this
+        template", which is the winner of the precedence rule.  Some callers
+        must instead ask "what did *this class of root* offer under that name",
+        and that is what this method is for: the winner can be a workspace
+        copy, and a caller that will not accept workspace content has to be
+        able to reach the copy the workspace shadowed.
+
+        Args:
+            name: The template name to look for.
+            sources: Root labels to accept, in the order they were scanned.
+                Empty — the default — accepts every source, which makes this
+                equivalent to :meth:`get` except that shadowed entries are
+                reachable.
+
+        Returns:
+            The first admitted match, or ``None``.  The result may be a
+            template that never reaches the catalogue because an earlier root
+            claimed its name.
+        """
+        for template in self._all:
+            if template.name != name:
+                continue
+            if sources and template.source not in sources:
+                continue
+            return template
+        return None
+
     def issues(self) -> Tuple[TemplateIssue, ...]:
         """Return the problems found by the most recent :meth:`discover`.
 
@@ -194,8 +228,12 @@ class AgentTemplateManager:
         """
         return self._issues
 
-    def _scan(self) -> Tuple[Tuple[AgentTemplate, ...], Tuple[TemplateIssue, ...]]:
-        """Walk the roots and collect the catalogue and issues.
+    def _scan(
+        self,
+    ) -> Tuple[
+        Tuple[AgentTemplate, ...], Tuple[TemplateIssue, ...], Tuple[AgentTemplate, ...]
+    ]:
+        """Walk the roots and collect the catalogue, issues and every admission.
 
         Runs inside a worker thread (via :meth:`discover`), so blocking
         filesystem calls never hold the event loop.  Nothing here raises for a
@@ -203,31 +241,80 @@ class AgentTemplateManager:
         what keeps one broken template from costing the working ones.
 
         Returns:
-            ``(catalogue, issues)`` — the valid templates sorted by name, and
-            the problems in scan order.
+            ``(catalogue, issues, admitted)`` — the valid templates sorted by
+            name, the problems in scan order, and every admitted template in
+            root order including the ones a better root shadowed (what
+            :meth:`find` searches).
         """
         templates: List[AgentTemplate] = []
+        admitted: List[AgentTemplate] = []
         issues: List[TemplateIssue] = []
         claimed: Dict[str, str] = {}
 
         for root in self._roots:
-            if not root.path.exists():
+            if not self._root_is_usable(root, issues):
                 continue
+            self._scan_root(root, templates, admitted, issues, claimed)
+
+        return (
+            tuple(sorted(templates, key=lambda item: item.name)),
+            tuple(issues),
+            tuple(admitted),
+        )
+
+    def _root_is_usable(self, root: TemplateRoot, issues: List[TemplateIssue]) -> bool:
+        """Report whether *root* may be scanned, recording why when it may not.
+
+        A symlinked root is refused rather than followed: discovery is the point
+        where content becomes a session's instructions, and a link planted where
+        the user expects a directory would serve templates from anywhere on the
+        disk.  The check comes first because the probes after it follow links
+        and, on Python 3.10, propagate their permission errors — which would
+        abort the scan instead of costing one root.
+
+        Args:
+            root: The root to judge.
+            issues: Issue accumulator; a refused root appends its reason.
+
+        Returns:
+            ``True`` when the root may be scanned.  A root that does not exist
+            is not an issue: only the packaged one is guaranteed to be there.
+        """
+        try:
+            if root.path.is_symlink():
+                issues.append(
+                    TemplateIssue(
+                        path=root.path,
+                        detail="template root is a symlink; symlinks are not "
+                        "admitted",
+                    )
+                )
+                return False
+            if not root.path.exists():
+                return False
             if not root.path.is_dir():
                 issues.append(
                     TemplateIssue(
                         path=root.path, detail="template root is not a directory"
                     )
                 )
-                continue
-            self._scan_root(root, templates, issues, claimed)
-
-        return (tuple(sorted(templates, key=lambda item: item.name)), tuple(issues))
+                return False
+        except OSError as exc:
+            issues.append(
+                TemplateIssue(
+                    path=root.path,
+                    detail=f"cannot inspect the template root: "
+                    f"{type(exc).__name__}: {exc}",
+                )
+            )
+            return False
+        return True
 
     def _scan_root(
         self,
         root: TemplateRoot,
         templates: List[AgentTemplate],
+        admitted: List[AgentTemplate],
         issues: List[TemplateIssue],
         claimed: Dict[str, str],
     ) -> None:
@@ -236,6 +323,7 @@ class AgentTemplateManager:
         Args:
             root: The root being scanned.
             templates: Catalogue accumulator shared across roots.
+            admitted: Every-admission accumulator shared across roots.
             issues: Issue accumulator shared across roots.
             claimed: Template names already taken by an earlier root, mapped to
                 a string identifying the winning root.
@@ -255,15 +343,38 @@ class AgentTemplateManager:
         for entry in entries:
             if entry.name.startswith("."):
                 continue
-            if not entry.is_dir():
+            try:
+                # `is_symlink` is an lstat: it answers without touching the
+                # target, so it must come before any probe that follows the
+                # link -- on 3.10 those propagate permission errors.
+                if entry.is_symlink():
+                    issues.append(
+                        TemplateIssue(
+                            path=entry,
+                            detail="template directory is a symlink; symlinks "
+                            "are not admitted",
+                        )
+                    )
+                    continue
+                if not entry.is_dir():
+                    continue
+            except OSError as exc:
+                issues.append(
+                    TemplateIssue(
+                        path=entry,
+                        detail=f"cannot inspect the template entry: "
+                        f"{type(exc).__name__}: {exc}",
+                    )
+                )
                 continue
-            self._scan_entry(root, entry, templates, issues, claimed)
+            self._scan_entry(root, entry, templates, admitted, issues, claimed)
 
     def _scan_entry(
         self,
         root: TemplateRoot,
         entry: Path,
         templates: List[AgentTemplate],
+        admitted: List[AgentTemplate],
         issues: List[TemplateIssue],
         claimed: Dict[str, str],
     ) -> None:
@@ -271,15 +382,17 @@ class AgentTemplateManager:
 
         An entry becomes a template only when it holds a case-sensitively named,
         non-symlink ``template.json`` whose contents validate; every other
-        outcome appends an issue.  Symlinked entries — the directory itself or
-        the file — are refused rather than followed: a template is replayed into
-        a session, and a link planted where the user saw an innocent directory
-        must not turn into an arbitrary-file read.
+        outcome appends an issue.  Symlinked directories are refused by
+        :meth:`_scan_root` before the target is touched, and a symlinked file is
+        refused here.  A name an earlier root already claimed is shadowed:
+        recorded as an issue and kept out of the catalogue, but retained among
+        the admissions so :meth:`find` can reach it.
 
         Args:
             root: The root the entry was found under.
             entry: The candidate template directory.
             templates: Catalogue accumulator shared across roots.
+            admitted: Every-admission accumulator shared across roots.
             issues: Issue accumulator shared across roots.
             claimed: Template names already taken by an earlier root, mapped to
                 a string identifying the winning root.
@@ -290,6 +403,16 @@ class AgentTemplateManager:
         document = self._load_document(entry, template_json, issues)
         if document is None:
             return
+
+        template = AgentTemplate(
+            name=document.name,
+            description=document.description,
+            path=entry,
+            template_path=template_json,
+            source=root.label,
+            session_autoload=document.session_autoload,
+        )
+        admitted.append(template)
 
         if document.name in claimed:
             issues.append(
@@ -302,26 +425,18 @@ class AgentTemplateManager:
             )
             return
         claimed[document.name] = root.label if root.label else str(root.path)
-
-        templates.append(
-            AgentTemplate(
-                name=document.name,
-                description=document.description,
-                path=entry,
-                template_path=template_json,
-                source=root.label,
-                session_autoload=document.session_autoload,
-            )
-        )
+        templates.append(template)
 
     def _locate_template_file(
         self, entry: Path, issues: List[TemplateIssue]
     ) -> Optional[Path]:
         """Reject an inadmissible directory and return its template.json path.
 
-        The structural half of admission: symlinked directories, unlistable
-        directories, directories without the template file, and symlinked
-        template files all fail here, before any content is read.
+        The structural half of admission: unlistable directories, directories
+        without the template file, and symlinked template files all fail here,
+        before any content is read.  The directory itself was already cleared of
+        symlinks by :meth:`_scan_root`, which has to happen before any probe
+        that follows a link.
 
         Args:
             entry: The candidate template directory.
@@ -330,15 +445,6 @@ class AgentTemplateManager:
         Returns:
             The template.json path to load, or ``None``.
         """
-        if entry.is_symlink():
-            issues.append(
-                TemplateIssue(
-                    path=entry,
-                    detail="template directory is a symlink; symlinks are not "
-                    "admitted",
-                )
-            )
-            return None
         try:
             children = {child.name for child in entry.iterdir()}
         except OSError as exc:

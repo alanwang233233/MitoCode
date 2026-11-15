@@ -133,6 +133,64 @@ def test_a_root_that_does_not_exist_contributes_nothing_and_no_issue(tmp_path):
     assert manager.issues() == ()
 
 
+def test_a_root_that_is_a_symlink_is_refused(tmp_path):
+    """A link where the templates should be would serve a directory elsewhere.
+
+    Entry-level checks cannot catch this one: the entries *inside* the link
+    target are ordinary directories, so following the root would admit them.
+    """
+    real = tmp_path / "elsewhere"
+    _write_template(real, "alpha", _template_json("alpha"))
+    linked_root = tmp_path / "linked-root"
+    linked_root.symlink_to(real, target_is_directory=True)
+
+    manager = _discover([linked_root])
+
+    assert manager.list_templates() == ()
+    assert "symlink" in manager.issues()[0].detail
+
+
+def test_a_broken_root_symlink_is_refused_rather_than_skipped(tmp_path):
+    """A dangling link is a configuration mistake, not a missing root."""
+    linked_root = tmp_path / "dangling"
+    linked_root.symlink_to(tmp_path / "missing-target", target_is_directory=True)
+
+    manager = _discover([linked_root])
+
+    assert manager.list_templates() == ()
+    assert "symlink" in manager.issues()[0].detail
+
+
+def test_find_reaches_a_template_a_better_root_shadowed(tmp_path):
+    """`get` answers with the winner; `find` can reach the copy it beat.
+
+    This is what lets a caller that refuses workspace content ask for the
+    packaged copy of a name even when a workspace template shadows it.
+    """
+    workspace = tmp_path / "workspace"
+    builtin = tmp_path / "builtin"
+    _write_template(workspace, "shared", _template_json("shared", "workspace copy"))
+    _write_template(builtin, "shared", _template_json("shared", "builtin copy"))
+
+    manager = _discover(
+        [TemplateRoot("workspace", workspace), TemplateRoot("builtin", builtin)]
+    )
+
+    assert manager.get("shared").source == "workspace"
+    assert manager.find("shared").source == "workspace"
+    assert manager.find("shared", sources=("builtin",)).description == "builtin copy"
+
+
+def test_find_returns_none_when_no_root_of_the_given_class_offers_the_name(tmp_path):
+    """A filtered lookup must not fall back to an untrusted copy."""
+    workspace = tmp_path / "workspace"
+    _write_template(workspace, "shared", _template_json("shared"))
+
+    manager = _discover([TemplateRoot("workspace", workspace)])
+
+    assert manager.find("shared", sources=("builtin", "global")) is None
+
+
 def test_a_root_that_is_a_file_is_recorded_as_an_issue(tmp_path):
     """A file where a directory belongs is a configuration mistake worth naming."""
     not_a_dir = tmp_path / "file"

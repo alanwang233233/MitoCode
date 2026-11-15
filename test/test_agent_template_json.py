@@ -200,6 +200,32 @@ def test_text_that_is_not_json_is_refused():
         parse_template_json("name: demo")
 
 
+def test_nesting_deeper_than_the_decoder_allows_is_a_definition_error():
+    """A few thousand brackets fit the size cap but blow the C decoder's stack.
+
+    ``json`` raises ``RecursionError`` there, not ``JSONDecodeError``; letting
+    it escape would abort discovery instead of costing one file.
+    """
+    with pytest.raises(MitoCodeTemplateDefinitionError, match="JSON"):
+        parse_template_json("[" * 20000 + "]" * 20000)
+
+
+def test_deep_nesting_inside_arguments_is_a_definition_error():
+    """The argument string is decoded separately and needs the same guard."""
+    nested = "[" * 20000 + "]" * 20000
+    with pytest.raises(MitoCodeTemplateDefinitionError, match="arguments_string"):
+        _parse(
+            session_autoload=[
+                {
+                    "kind": "tool_call",
+                    "name": "Read",
+                    "arguments_string": nested,
+                },
+                {"kind": "tool_result", "content": "x"},
+            ]
+        )
+
+
 def test_a_non_object_document_is_refused():
     """A bare list cannot carry a name."""
     with pytest.raises(MitoCodeTemplateDefinitionError, match="JSON object"):
@@ -439,6 +465,69 @@ def test_a_text_block_between_a_call_and_its_result_is_refused():
                 {"kind": "tool_result", "content": "x"},
             ]
         )
+
+
+def test_a_call_cannot_start_while_a_batch_is_only_partly_answered():
+    """A, B, result A, call C would emit C's turn before B is answered."""
+    with pytest.raises(MitoCodeTemplateDefinitionError, match="block 4"):
+        _parse(
+            session_autoload=[
+                {
+                    "kind": "tool_call",
+                    "id": "a",
+                    "name": "Read",
+                    "arguments_string": "{}",
+                },
+                {
+                    "kind": "tool_call",
+                    "id": "b",
+                    "name": "Glob",
+                    "arguments_string": "{}",
+                },
+                {"kind": "tool_result", "tool_call_id": "a", "content": "a"},
+                {
+                    "kind": "tool_call",
+                    "id": "c",
+                    "name": "Grep",
+                    "arguments_string": "{}",
+                },
+                {"kind": "tool_result", "tool_call_id": "b", "content": "b"},
+                {"kind": "tool_result", "tool_call_id": "c", "content": "c"},
+            ]
+        )
+
+
+def test_a_call_may_start_once_the_previous_batch_is_fully_answered():
+    """Sequential batches are the ordinary shape and stay valid."""
+    document = _parse(
+        session_autoload=[
+            {"kind": "tool_call", "name": "Read", "arguments_string": "{}"},
+            {"kind": "tool_result", "content": "a"},
+            {"kind": "tool_call", "name": "Grep", "arguments_string": "{}"},
+            {"kind": "tool_result", "content": "b"},
+        ]
+    )
+
+    assert [block["kind"] for block in document.session_autoload] == [
+        "tool_call",
+        "tool_result",
+        "tool_call",
+        "tool_result",
+    ]
+
+
+def test_parallel_calls_may_be_issued_before_any_result():
+    """A, B, result B, result A is a legal parallel batch."""
+    document = _parse(
+        session_autoload=[
+            {"kind": "tool_call", "id": "a", "name": "Read", "arguments_string": "{}"},
+            {"kind": "tool_call", "id": "b", "name": "Glob", "arguments_string": "{}"},
+            {"kind": "tool_result", "tool_call_id": "b", "content": "second"},
+            {"kind": "tool_result", "tool_call_id": "a", "content": "first"},
+        ]
+    )
+
+    assert len(document.session_autoload) == 4
 
 
 def test_one_bad_block_rejects_the_whole_template():

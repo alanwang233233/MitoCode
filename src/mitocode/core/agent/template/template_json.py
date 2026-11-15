@@ -112,10 +112,13 @@ def _load_document(text: str) -> Mapping[str, Any]:
     """
     try:
         parsed = json.loads(text)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         # The decoder's own message quotes the offending line, and the
         # never-quote promise covers that too; "not valid JSON" plus the file
-        # name the caller reports is the actionable part.
+        # name the caller reports is the actionable part.  ``RecursionError``
+        # is the decoder's answer to nesting deeper than the interpreter
+        # allows, which a few thousand brackets fit under the size cap -- and
+        # letting it escape would abort discovery instead of costing one file.
         raise MitoCodeTemplateDefinitionError(
             "template.json is not valid JSON"
         ) from None
@@ -224,6 +227,13 @@ def _load_blocks(raw: Any) -> Tuple[Mapping[str, Any], ...]:
     blocks: List[Dict[str, Any]] = []
     open_calls: List[int] = []
     used_ids: set[str] = set()
+    # Whether any call of the *current* parallel batch has been answered.  A
+    # new call may extend a batch that has no results yet (calls A and B issued
+    # together) but not one that is already being answered: the context
+    # builder flushes a completed call run into one assistant turn, so a call
+    # arriving after a result would be emitted as a second assistant turn while
+    # an earlier call is still unanswered -- a history the provider rejects.
+    answering = False
     for position, block in enumerate(raw, start=1):
         if not isinstance(block, Mapping):
             raise MitoCodeTemplateDefinitionError(
@@ -234,6 +244,8 @@ def _load_blocks(raw: Any) -> Tuple[Mapping[str, Any], ...]:
             _refuse_text_before_a_result(position, blocks, open_calls)
             blocks.append(_text_block(block, position))
         elif kind == "tool_call":
+            if open_calls and answering:
+                _refuse_call_before_a_result(position, blocks, open_calls)
             call = _call_block(block, position)
             # A duplicate id is the one inconsistency positional binding cannot
             # repair: two calls would share an identity, and the provider would
@@ -250,6 +262,9 @@ def _load_blocks(raw: Any) -> Tuple[Mapping[str, Any], ...]:
             open_calls.append(len(blocks) - 1)
         elif kind == "tool_result":
             blocks.append(_result_block(block, position, blocks, open_calls))
+            answering = True
+            if not open_calls:
+                answering = False
         else:
             raise MitoCodeTemplateDefinitionError(
                 f"session_autoload block {position} declares an unsupported "
@@ -291,6 +306,35 @@ def _refuse_text_before_a_result(
         f"session_autoload block {position}: a text block cannot appear before "
         f"the tool_call '{caller['name']}' at block {open_calls[0] + 1} is "
         "answered by a tool_result"
+    )
+
+
+def _refuse_call_before_a_result(
+    position: int, blocks: List[Dict[str, Any]], open_calls: List[int]
+) -> None:
+    """Refuse a new tool call while a partially answered batch is still open.
+
+    Calls may be issued in parallel (two calls, then two results), but once a
+    batch starts being answered it must be answered completely.  The context
+    builder flushes a finished call run into a single assistant turn, so a call
+    arriving mid-batch would become a second assistant turn with an earlier
+    call still unanswered — a history the provider rejects on the first
+    request.
+
+    Args:
+        position: 1-based position of the call being validated.
+        blocks: Blocks normalised so far.
+        open_calls: Indices into *blocks* of calls still awaiting a result.
+
+    Raises:
+        MitoCodeTemplateDefinitionError: The batch has unanswered calls left.
+    """
+    caller = blocks[open_calls[0]]
+    raise MitoCodeTemplateDefinitionError(
+        f"session_autoload block {position}: a tool_call cannot start while "
+        f"the tool_call '{caller['name']}' at block {open_calls[0] + 1} is "
+        "still unanswered; finish this batch's results before issuing another "
+        "call, or issue the calls together before any result"
     )
 
 
@@ -416,7 +460,7 @@ def _require_arguments(
         )
     try:
         parsed = json.loads(raw_string)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         raise MitoCodeTemplateDefinitionError(
             f"session_autoload block {position}: 'arguments_string' must be a "
             "JSON object"

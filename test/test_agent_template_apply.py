@@ -322,3 +322,22 @@ async def test_a_seeded_child_still_joins_the_tree():
         parent.agent_id,
         child.agent_id,
     ]
+
+
+def test_every_replayed_block_is_marked_as_template_content():
+    """The marker is what keeps a prepared turn out of `last message` answers."""
+    session = _session()
+
+    apply_template(
+        session,
+        _template(
+            [_text("user", "ctx"), _call("Read", "call_1"), _result("call_1", "x")]
+        ),
+    )
+
+    seeded = session.messages[1:]
+    assert seeded, "the template's blocks must actually be appended"
+    assert all(getattr(block, "from_template", False) for block in seeded)
+    assert not getattr(
+        session.messages[0], "from_template", False
+    ), "the session's own persona is not template content"

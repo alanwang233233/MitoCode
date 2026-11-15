@@ -402,13 +402,19 @@ def _field(entry: Any, key: str, default: Any = "") -> Any:
 
 
 def _last_assistant_message(session: Any) -> str:
-    """Return the text of the last assistant block on *session*.
+    """Return the text of the last assistant block *session* produced itself.
 
     Scans ``session.messages`` backwards and stops at the **first** block whose
     ``role`` is ``"assistant"``, not the first one with text in it.  Falling
     through to an older block when the newest is empty would let the model read
     a stale answer as a current one; reporting nothing is the honest answer
     while a turn is still streaming.
+
+    Blocks a template seeded are skipped: ``from_template`` marks a prepared
+    turn replayed at spawn time, and reporting it as the agent's answer would
+    tell the model that delegated work is already done.  The attribute is read
+    with a default, so a session built before templates existed — or any other
+    object shaped like one — still answers.
 
     This does not call
     :meth:`~mitocode.core.agent.agent_session.AgentSession.build_standard_context`.
@@ -438,6 +444,8 @@ def _last_assistant_message(session: Any) -> str:
         return ""
     for block in reversed(messages):
         if getattr(block, "role", None) != ASSISTANT_ROLE:
+            continue
+        if getattr(block, "from_template", False):
             continue
         text = getattr(block, "message", None)
         return text if isinstance(text, str) else ""

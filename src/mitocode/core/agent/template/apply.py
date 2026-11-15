@@ -23,6 +23,12 @@ purpose.  They are the package-level contract -- ``mitocode.core.agent``
 re-exports all three -- and the alternative would be a second, parallel block
 implementation that converts into the first one at the cost of a copy and a
 divergence waiting to happen.
+
+Every replayed block is tagged ``from_template = True``.  The transcript keeps
+one block type per role, but a reader that asks "what has this agent produced"
+must be able to tell a prepared turn from a generated one; saving and restoring
+a session drops the tag, which is correct in the other direction: a restored
+transcript is history the agent did live through, not a seed.
 """
 
 from pathlib import Path
@@ -62,6 +68,15 @@ def apply_template(
     ]
     if not blocks:
         return
+
+    for block in blocks:
+        # Kept as an attribute rather than a subclass so every reader of
+        # `session.messages` keeps seeing the same three block types.  What it
+        # buys: `QueryAgent` must not report a template's prepared assistant
+        # turn as something the new agent produced, which is exactly what a
+        # "last assistant message" scan would otherwise find before the agent
+        # has run a single turn.
+        block.from_template = True
 
     if _is_system_text(blocks[0]):
         # Replacement, not accumulation: two personas contradict each other,
