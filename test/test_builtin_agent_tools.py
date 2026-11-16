@@ -1341,3 +1341,45 @@ async def test_query_agent_still_reports_an_answer_produced_after_the_template()
 
     assert "The plan is ready." in result
     assert "Understood" not in result
+
+
+@pytest.mark.asyncio
+async def test_template_lookup_trims_surrounding_whitespace():
+    """A padded model-supplied name still resolves to the exact template."""
+    template = _Template("plan-agent")
+    orch = _Orchestrator()
+    _make_ctx(orch, template_manager=_Templates(template))
+
+    result = await agent_tools.spawn_agent("plan", "task", template=" \tplan-agent\n")
+
+    assert result.startswith("Created agent")
+    assert orch.created[0]["template"] is template
+
+
+@pytest.mark.asyncio
+async def test_template_lookup_remains_case_sensitive():
+    """Case changes must fail instead of silently selecting another persona."""
+    orch = _Orchestrator()
+    _make_ctx(orch, template_manager=_Templates(_Template("plan-agent")))
+
+    result = await agent_tools.spawn_agent("plan", "task", template="PLAN-AGENT")
+
+    assert result.startswith("Error:")
+    assert "plan-agent" in result
+    assert orch.created == []
+
+
+@pytest.mark.asyncio
+async def test_seeded_assistant_cannot_mask_a_live_textless_assistant_turn():
+    """A streaming live turn must not expose an older answer or prepared text."""
+    prepared = _Block(role="assistant", message="prepared answer")
+    prepared.from_template = True
+    produced = _Block(role="assistant", message="old live answer")
+    streaming = _Block(role="assistant", message="")
+    _make_ctx(_query_orchestrator(messages=[prepared, produced, streaming]))
+
+    result = await agent_tools.query_agent(3)
+
+    assert "none yet" in result
+    assert "prepared answer" not in result
+    assert "old live answer" not in result

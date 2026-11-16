@@ -541,3 +541,61 @@ def test_one_bad_block_rejects_the_whole_template():
         )
 
     assert not hasattr(error.value, "partial")
+
+
+@pytest.mark.parametrize("role", ["system", "user", "assistant"])
+def test_text_cannot_interrupt_a_partially_answered_parallel_batch(role):
+    """Every text role must wait for all pending parallel results."""
+    with pytest.raises(MitoCodeTemplateDefinitionError, match="block 4"):
+        _parse(
+            session_autoload=[
+                {"kind": "tool_call", "id": "a", "name": "Read", "parameter": {}},
+                {"kind": "tool_call", "id": "b", "name": "Glob", "parameter": {}},
+                {"kind": "tool_result", "tool_call_id": "b", "content": "second"},
+                {"kind": "text", "role": role, "message": "too early"},
+                {"kind": "tool_result", "tool_call_id": "a", "content": "first"},
+            ]
+        )
+
+
+def test_tool_call_ids_cannot_be_reused_in_a_later_completed_batch():
+    """Completing a batch does not free its ids for reuse in the transcript."""
+    with pytest.raises(MitoCodeTemplateDefinitionError, match="already used"):
+        _parse(
+            session_autoload=[
+                {"kind": "tool_call", "id": "a", "name": "Read", "parameter": {}},
+                {"kind": "tool_result", "tool_call_id": "a", "content": "first"},
+                {"kind": "tool_call", "id": "a", "name": "Glob", "parameter": {}},
+                {"kind": "tool_result", "tool_call_id": "a", "content": "second"},
+            ]
+        )
+
+
+def test_an_extra_result_after_a_completed_batch_is_rejected():
+    """A repeated result cannot silently become unrelated history."""
+    with pytest.raises(MitoCodeTemplateDefinitionError, match="block 3"):
+        _parse(
+            session_autoload=[
+                {"kind": "tool_call", "id": "a", "name": "Read", "parameter": {}},
+                {"kind": "tool_result", "tool_call_id": "a", "content": "first"},
+                {"kind": "tool_result", "tool_call_id": "a", "content": "duplicate"},
+            ]
+        )
+
+
+@pytest.mark.parametrize("field", ["message", "reasoning_content"])
+def test_text_validation_errors_do_not_echo_other_message_contents(field):
+    """Diagnostics identify the broken field without leaking prepared context."""
+    block = {
+        "kind": "text",
+        "role": "assistant",
+        "message": "private prepared context",
+        "reasoning_content": "private reasoning",
+    }
+    block[field] = 42
+    with pytest.raises(MitoCodeTemplateDefinitionError) as error:
+        _parse(session_autoload=[block])
+
+    assert field in str(error.value)
+    assert "block 1" in str(error.value)
+    assert "private" not in str(error.value)

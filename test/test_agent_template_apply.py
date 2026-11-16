@@ -341,3 +341,99 @@ def test_every_replayed_block_is_marked_as_template_content():
     assert not getattr(
         session.messages[0], "from_template", False
     ), "the session's own persona is not template content"
+
+
+def test_reusing_a_template_keeps_sessions_and_source_arguments_independent():
+    """Mutable nested tool arguments belong to each newly seeded session."""
+    import copy
+
+    call = _call("Read", "read", '{"paths": ["a.py"]}')
+    call["parameter"] = {"paths": ["a.py"]}
+    template = _template([call, _result("read", "contents")])
+    original = copy.deepcopy(template.session_autoload)
+    first, second = _session(), _session()
+
+    apply_template(first, template)
+    apply_template(second, template)
+    first.messages[1].parameter["paths"].append("changed.py")
+    first.messages[2].content = "changed result"
+
+    assert second.messages[1].parameter == {"paths": ["a.py"]}
+    assert second.messages[2].content == "contents"
+    assert template.session_autoload == original
+
+
+def test_parallel_results_keep_their_ids_and_order_in_provider_context():
+    """An out-of-order parallel result must still answer the right call."""
+    session = _session()
+    apply_template(
+        session,
+        _template(
+            [
+                _call("Read", "a"),
+                _call("Glob", "b"),
+                _result("b", "second", success=False),
+                _result("a", "first"),
+                _call("Grep", "c"),
+                _result("c", "third"),
+            ]
+        ),
+    )
+
+    context = session.build_standard_context()
+
+    assert [message["role"] for message in context] == [
+        "system", "assistant", "tool", "tool", "assistant", "tool"
+    ]
+    assert [call["id"] for call in context[1]["tool_calls"]] == ["a", "b"]
+    assert [(context[i]["tool_call_id"], context[i]["content"]) for i in (2, 3, 5)] == [
+        ("b", "second"), ("a", "first"), ("c", "third")
+    ]
+    assert session.messages[3].success is False
+
+
+def test_workspace_rendering_does_not_rewrite_tool_payloads(tmp_path):
+    """Message text interpolates; reasoning and tool data stay verbatim."""
+    arguments = '{"path": "{workspace}/a.py"}'
+    session = _session()
+    apply_template(
+        session,
+        _template(
+            [
+                _text("assistant", "at {workspace}", reasoning="inspect {workspace}"),
+                _call("Read", "a", arguments),
+                _result("a", "literal {workspace}"),
+            ]
+        ),
+        workspace=tmp_path,
+    )
+
+    context = session.build_standard_context()
+
+    assert context[1]["content"] == f"at {tmp_path}"
+    assert context[1]["reasoning_content"] == "inspect {workspace}"
+    assert context[2]["tool_calls"][0]["function"]["arguments"] == arguments
+    assert context[3]["content"] == "literal {workspace}"
+
+
+@pytest.mark.asyncio
+async def test_failed_template_application_leaves_no_registered_child(monkeypatch):
+    """A failed seed cannot leave a ghost agent in the registry or parent tree."""
+    orchestrator = AgentOrchestrator(default_provider=ScenarioProvider())
+    parent = await orchestrator.create_session(name="parent")
+    before = orchestrator.get_tree_snapshot()
+
+    def fail_apply(session, template, workspace=None):
+        raise ValueError("cannot seed")
+
+    monkeypatch.setattr(orchestrator_module, "apply_template", fail_apply)
+
+    with pytest.raises(ValueError, match="cannot seed"):
+        await orchestrator.create_session(
+            name="child",
+            parent_id=parent.agent_id,
+            template=_template([_text("user", "context")]),
+        )
+
+    assert orchestrator.get_tree_snapshot() == before
+    assert parent.sub_agent_ids == []

@@ -323,3 +323,73 @@ def test_a_second_discovery_replaces_the_catalogue_and_the_issues(tmp_path):
 
     assert [template.name for template in manager.list_templates()] == ["broken"]
     assert manager.issues() == ()
+
+
+@pytest.mark.parametrize("failure", ["invalid-json", "invalid-utf8", "directory", "oversize"])
+def test_unreadable_override_does_not_hide_a_valid_lower_priority_template(
+    tmp_path, failure
+):
+    """Only admitted templates claim a name, even when an override is broken."""
+    from mitocode.core.agent.template.template_json import MAX_TEMPLATE_FILE_BYTES
+
+    workspace = tmp_path / "workspace"
+    builtin = tmp_path / "builtin"
+    entry = _write_template(workspace, "shared", _template_json("shared"))
+    candidate = entry / "template.json"
+    if failure == "invalid-json":
+        candidate.write_text("{broken", encoding="utf-8")
+    elif failure == "invalid-utf8":
+        candidate.write_bytes(b"\xff\xfe")
+    elif failure == "directory":
+        candidate.unlink()
+        candidate.mkdir()
+    else:
+        with candidate.open("wb") as stream:
+            stream.truncate(MAX_TEMPLATE_FILE_BYTES + 1)
+    _write_template(builtin, "shared", _template_json("shared", "fallback"))
+
+    manager = _discover(
+        [TemplateRoot("workspace", workspace), TemplateRoot("builtin", builtin)]
+    )
+
+    assert [template.source for template in manager.list_templates()] == ["builtin"]
+    assert manager.get("shared").description == "fallback"
+    assert manager.find("shared", sources=("workspace",)) is None
+    assert len(manager.issues()) == 1
+    assert manager.issues()[0].path == candidate
+
+
+def test_file_at_exact_read_cap_is_admitted(tmp_path):
+    """The byte cap is inclusive and applies to UTF-8 bytes on disk."""
+    from mitocode.core.agent.template.template_json import MAX_TEMPLATE_FILE_BYTES
+
+    text = _template_json("boundary")
+    text += " " * (MAX_TEMPLATE_FILE_BYTES - len(text.encode("utf-8")))
+    _write_template(tmp_path, "boundary", text)
+
+    manager = _discover([tmp_path])
+
+    assert manager.get("boundary") is not None
+    assert manager.issues() == ()
+
+
+def test_rediscovery_promotes_shadowed_template_and_removes_stale_admissions(tmp_path):
+    """Both catalogue lookups must reflect deletion of a formerly winning copy."""
+    workspace = tmp_path / "workspace"
+    builtin = tmp_path / "builtin"
+    winner = _write_template(workspace, "shared", _template_json("shared"))
+    _write_template(builtin, "shared", _template_json("shared", "fallback"))
+    manager = _discover(
+        [TemplateRoot("workspace", workspace), TemplateRoot("builtin", builtin)]
+    )
+    assert manager.get("shared").source == "workspace"
+    assert manager.issues()
+
+    (winner / "template.json").unlink()
+    winner.rmdir()
+    asyncio.run(manager.discover())
+
+    assert manager.get("shared").source == "builtin"
+    assert manager.find("shared", sources=("workspace",)) is None
+    assert manager.find("shared", sources=("builtin",)) is manager.get("shared")
+    assert manager.issues() == ()
