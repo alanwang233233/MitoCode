@@ -159,3 +159,15 @@ class MitoCodeSkillNotFoundError(MitoCodeSkillError):
 
 class MitoCodeSkillReadError(MitoCodeSkillError):
     """Raised when a catalogued skill's SKILL.md cannot be read from disk."""
+
+
+class MitoCodeTemplateError(MitoCodeBaseError):
+    """Base class for Agent Template related errors."""
+
+
+class MitoCodeTemplateDefinitionError(MitoCodeTemplateError):
+    """Raised when a template.json is structurally broken or a message block is invalid."""
+
+
+class MitoCodeTemplateReadError(MitoCodeTemplateError):
+    """Raised when a catalogued template's template.json cannot be read from disk."""
