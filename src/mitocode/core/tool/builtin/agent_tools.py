@@ -70,22 +70,12 @@ whatever ``name`` holds, so an empty one is a blank node in the TUI with
 nothing for the human to click.  ``name`` is therefore the first line of the
 description truncated to :data:`MAX_NAME_CHARS` characters, falling back to
 ``sub-<id>`` when the description has no first line to take.
-
-**A template is resolved here, not by the orchestrator.**  The name the model
-passes is looked up in the catalogue hanging off the tool context, and the
-resolved template object -- not the raw blocks, and not the name -- is what
-reaches ``create_session``.  That keeps two things true at once: the agent
-package never reads a template root (the wiring layer decides which directories
-exist), and an unknown name fails here with the list of names that do exist,
-before a session is allocated.  A template that is absent from the call is
-absent from the ``create_session`` call too, so an orchestrator that knows
-nothing about templates keeps working.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 from loguru import logger as loguru_logger
 
@@ -138,17 +128,6 @@ NO_ORCHESTRATOR = (
     "request: attach one during startup with "
     "ToolContext.attach_orchestrator(orchestrator). Retrying will not help "
     "until it is attached."
-)
-
-#: What :func:`spawn_agent` answers when the caller asks for a template but no
-#: catalogue is wired.  Naming the way forward matters more than naming the
-#: missing object: the model can still spawn the agent it wanted, without the
-#: template, which is a usable answer rather than a dead end.
-NO_TEMPLATE_MANAGER = (
-    "Error: no agent templates are available, because no template manager is "
-    "attached to the tool context. This is a wiring problem rather than a bad "
-    "request: spawn the agent again without template, or attach one during "
-    "startup with ToolContext.template_manager = manager."
 )
 
 
@@ -402,19 +381,13 @@ def _field(entry: Any, key: str, default: Any = "") -> Any:
 
 
 def _last_assistant_message(session: Any) -> str:
-    """Return the text of the last assistant block *session* produced itself.
+    """Return the text of the last assistant block on *session*.
 
     Scans ``session.messages`` backwards and stops at the **first** block whose
     ``role`` is ``"assistant"``, not the first one with text in it.  Falling
     through to an older block when the newest is empty would let the model read
     a stale answer as a current one; reporting nothing is the honest answer
     while a turn is still streaming.
-
-    Blocks a template seeded are skipped: ``from_template`` marks a prepared
-    turn replayed at spawn time, and reporting it as the agent's answer would
-    tell the model that delegated work is already done.  The attribute is read
-    with a default, so a session built before templates existed — or any other
-    object shaped like one — still answers.
 
     This does not call
     :meth:`~mitocode.core.agent.agent_session.AgentSession.build_standard_context`.
@@ -444,8 +417,6 @@ def _last_assistant_message(session: Any) -> str:
         return ""
     for block in reversed(messages):
         if getattr(block, "role", None) != ASSISTANT_ROLE:
-            continue
-        if getattr(block, "from_template", False):
             continue
         text = getattr(block, "message", None)
         return text if isinstance(text, str) else ""
@@ -480,50 +451,11 @@ def _render_snapshot(entries: Sequence[Any]) -> str:
     return "\n".join(lines)
 
 
-def _resolve_template(ctx: ToolContext, name: str) -> Tuple[Optional[Any], str]:
-    """Look *name* up in the context's template catalogue.
-
-    Resolution happens here rather than in the orchestrator so that an unknown
-    name can be answered with the names that *do* exist -- the same recovery the
-    ``Skill`` tool offers for a misread skill name -- and so that a failed
-    lookup never allocates an agent id.
-
-    Args:
-        ctx: The context carrying the duck-typed ``template_manager``.
-        name: The template name the model supplied.  Matched exactly.
-
-    Returns:
-        ``(template, "")`` on success, or ``(None, error)`` where *error* is a
-        complete ``"Error: ..."`` sentence: no catalogue is wired, no template
-        is installed, or the name is unknown (with the catalogue listed so the
-        next call can succeed).
-    """
-    manager = getattr(ctx, "template_manager", None)
-    if manager is None:
-        return None, NO_TEMPLATE_MANAGER
-
-    template = manager.get(name)
-    if template is not None:
-        return template, ""
-
-    available = [item.name for item in manager.list_templates()]
-    if not available:
-        return None, (
-            f"Error: unknown agent template '{name}'. No agent templates are "
-            f"installed, so retry without template."
-        )
-    return None, (
-        f"Error: unknown agent template '{name}'. Available templates: "
-        f"{', '.join(available)}."
-    )
-
-
 @tool_boundary
 async def spawn_agent(
     description: str,
     prompt: str,
     parent_id: Optional[int] = None,
-    template: Optional[str] = None,
 ) -> str:
     """Create a sub-agent, send it *prompt*, and return its id immediately.
 
@@ -554,32 +486,17 @@ async def spawn_agent(
             ancestor would step around the depth cap.  With no agent turn
             running there is no subtree to check against, so the explicit
             parent is honoured as given.
-        template: Optional template name from the templates section of the
-            caller's instructions.  The template's messages seed the new
-            session's history, so it starts with that context instead of only
-            the prompt.  An unknown name is refused with the available names
-            listed; omitting it gives the default persona and no seeded
-            context.
 
     Returns:
         The new agent's id and name in one sentence.  Every failure is an
-        ``"Error: ..."`` string rather than an exception: an unknown parent, an
-        unknown template, a depth cap reached, or anything the orchestrator or
-        the boundary raises on the way.
+        ``"Error: ..."`` string rather than an exception: an unknown parent, a
+        depth cap reached, or anything the orchestrator or the boundary raises
+        on the way.
     """
     caller_id, ctx = current_agent_context()
     orchestrator = require_orchestrator(ctx)
     if orchestrator is None:
         return NO_ORCHESTRATOR
-
-    # A blank name is what a model sends when it means "no template"; refusing
-    # it as an unknown name would fail a request that is already correct.
-    wanted = template.strip() if isinstance(template, str) else template
-    selected, error = (None, "")
-    if wanted:
-        selected, error = _resolve_template(ctx, wanted)
-        if error:
-            return error
 
     if parent_id is None:
         parent_id = caller_id
@@ -621,15 +538,11 @@ async def spawn_agent(
             f"existing agent instead of starting a deeper one."
         )
 
-    # Only when one was asked for: an orchestrator that knows nothing about
-    # templates must keep accepting this call unchanged.
-    template_settings = {} if selected is None else {"template": selected}
     session = await orchestrator.create_session(
         name=_derive_name(description, None),
         provider=provider,
         description=description,
         parent_id=parent_id,
-        **template_settings,
     )
 
     agent_id = getattr(session, "agent_id", None)
@@ -657,11 +570,10 @@ async def spawn_agent(
     await orchestrator.send_message(agent_id, prompt)
 
     under = f" under agent {parent_id}" if parent_id is not None else " at the root"
-    seeded = f" with template {selected.name}" if selected is not None else ""
     return (
-        f"Created agent {agent_id} ({name}){under}{seeded} and sent it the "
-        f"prompt. It runs in the background: use QueryAgent({agent_id}) to ask "
-        f"what it has produced."
+        f"Created agent {agent_id} ({name}){under} and sent it the prompt. It "
+        f"runs in the background: use QueryAgent({agent_id}) to ask what it "
+        f"has produced."
     )
 
 

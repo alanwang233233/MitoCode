@@ -151,7 +151,6 @@ class _Orchestrator:
         provider: Any = None,
         description: Any = None,
         parent_id: Any = None,
-        **extra: Any,
     ) -> _Session:
         session = _Session(
             self._next_id,
@@ -167,7 +166,6 @@ class _Orchestrator:
                 "provider": provider,
                 "description": description,
                 "parent_id": parent_id,
-                **extra,
             }
         )
         self._next_id += 1
@@ -268,14 +266,12 @@ def _make_ctx(
     orchestrator: Any = None,
     max_sub_agent_depth: int = 4,
     max_output_chars: int = 30_000,
-    template_manager: Any = None,
 ) -> ToolContext:
     """Build a ToolContext around *orchestrator* and register it as current."""
     ctx = ToolContext(
         orchestrator=orchestrator,
         max_sub_agent_depth=max_sub_agent_depth,
         max_output_chars=max_output_chars,
-        template_manager=template_manager,
     )
     set_current(ctx)
     return ctx
@@ -1205,139 +1201,3 @@ async def test_boundary_a_raising_get_session_keeps_the_class_name():
     assert (
         result == "Error: RuntimeError: boom"
     ), "the boundary format is exactly right for an unexpected exception"
-
-
-# --- agent templates ---------------------------------------------------------
-
-
-class _Template:
-    """Duck-typed template: the tool reads only identity and blocks."""
-
-    def __init__(self, name: str, description: str = "A template.") -> None:
-        self.name = name
-        self.description = description
-        self.session_autoload = (
-            {"kind": "text", "role": "user", "message": f"context for {name}"},
-        )
-
-
-class _Templates:
-    """Duck-typed template manager: the catalogue the tool resolves names in."""
-
-    def __init__(self, *templates: _Template) -> None:
-        self._by_name = {template.name: template for template in templates}
-
-    def get(self, name: str) -> Optional[_Template]:
-        return self._by_name.get(name)
-
-    def list_templates(self) -> Tuple[_Template, ...]:
-        return tuple(self._by_name.values())
-
-
-@pytest.mark.asyncio
-async def test_a_named_template_is_handed_to_the_orchestrator_untouched():
-    """The tool resolves the name and passes the object through, not the blocks."""
-    template = _Template("plan-agent")
-    orch = _Orchestrator()
-    _make_ctx(orch, template_manager=_Templates(template))
-
-    result = await agent_tools.spawn_agent(
-        "write a plan", "plan it", template="plan-agent"
-    )
-
-    assert orch.created[0]["template"] is template
-    assert "plan-agent" in result, "the reply names the template the agent started with"
-
-
-@pytest.mark.asyncio
-async def test_an_unknown_template_is_refused_before_any_session_exists():
-    """A typo costs no session, and the error lists what does exist."""
-    orch = _Orchestrator()
-    _make_ctx(orch, template_manager=_Templates(_Template("plan-agent")))
-
-    result = await agent_tools.spawn_agent("d", "p", template="planner")
-
-    assert result.startswith("Error:"), "a model-readable sentence, never an exception"
-    assert "planner" in result
-    assert "plan-agent" in result, "the available names are the retry path"
-    assert orch.created == [], "nothing may be spawned for a template that is absent"
-
-
-@pytest.mark.asyncio
-async def test_an_empty_catalogue_says_so_instead_of_listing_nothing():
-    """'Available templates:' with nothing after it is not an answer."""
-    orch = _Orchestrator()
-    _make_ctx(orch, template_manager=_Templates())
-
-    result = await agent_tools.spawn_agent("d", "p", template="plan-agent")
-
-    assert result.startswith("Error:")
-    assert "No agent templates" in result
-    assert orch.created == []
-
-
-@pytest.mark.asyncio
-async def test_a_missing_template_manager_is_reported_in_prose():
-    """No manager is a wiring state, not a crash: say what still works."""
-    orch = _Orchestrator()
-    _make_ctx(orch)
-
-    result = await agent_tools.spawn_agent("d", "p", template="plan-agent")
-
-    assert result.startswith("Error:")
-    assert "without template" in result, "the model is told how to proceed"
-    assert orch.created == []
-
-
-@pytest.mark.asyncio
-async def test_a_spawn_without_a_template_does_not_mention_one():
-    """The default path must stay exactly the call it was before templates."""
-    orch = _Orchestrator()
-    _make_ctx(orch, template_manager=_Templates(_Template("plan-agent")))
-
-    await agent_tools.spawn_agent("d", "p")
-
-    assert "template" not in orch.created[0]
-
-
-@pytest.mark.asyncio
-async def test_a_blank_template_name_is_read_as_no_template():
-    """A model that sends an empty string means the default, not a lookup."""
-    orch = _Orchestrator()
-    _make_ctx(orch, template_manager=_Templates(_Template("plan-agent")))
-
-    result = await agent_tools.spawn_agent("d", "p", template="   ")
-
-    assert result.startswith("Created agent")
-    assert "template" not in orch.created[0]
-
-
-@pytest.mark.asyncio
-async def test_query_agent_does_not_report_a_template_seeded_turn_as_output():
-    """A prepared assistant turn is context, not something the agent produced.
-
-    Without the marker, spawning with a template that ends in an assistant
-    message would make QueryAgent answer "done" before the agent ran a turn.
-    """
-    prepared = _Block(role="assistant", message="Understood. I will begin.")
-    prepared.from_template = True
-    _make_ctx(_query_orchestrator(messages=[prepared]))
-
-    result = await agent_tools.query_agent(3)
-
-    assert "none yet" in result
-    assert "Understood" not in result
-
-
-@pytest.mark.asyncio
-async def test_query_agent_still_reports_an_answer_produced_after_the_template():
-    """The marker skips only the seeded blocks, not the ones that follow."""
-    prepared = _Block(role="assistant", message="Understood. I will begin.")
-    prepared.from_template = True
-    produced = _Block(role="assistant", message="The plan is ready.")
-    _make_ctx(_query_orchestrator(messages=[prepared, produced]))
-
-    result = await agent_tools.query_agent(3)
-
-    assert "The plan is ready." in result
-    assert "Understood" not in result
