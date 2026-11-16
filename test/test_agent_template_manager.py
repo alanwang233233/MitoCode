@@ -323,3 +323,75 @@ def test_a_second_discovery_replaces_the_catalogue_and_the_issues(tmp_path):
 
     assert [template.name for template in manager.list_templates()] == ["broken"]
     assert manager.issues() == ()
+
+
+def test_invalid_higher_precedence_copy_does_not_claim_a_name(tmp_path):
+    workspace, builtin = tmp_path / "workspace", tmp_path / "builtin"
+    broken = _write_template(workspace, "shared", "{broken")
+    _write_template(builtin, "shared", _template_json("shared", "fallback"))
+
+    manager = _discover(
+        [TemplateRoot("workspace", workspace), TemplateRoot("builtin", builtin)]
+    )
+
+    assert manager.get("shared").source == "builtin"
+    assert manager.find("shared", sources=("workspace",)) is None
+    assert len(manager.issues()) == 1
+    assert manager.issues()[0].path == broken / "template.json"
+
+
+@pytest.mark.parametrize("extra_bytes", [0, 1])
+def test_template_file_size_boundary(tmp_path, extra_bytes):
+    from mitocode.core.agent.template.template_json import MAX_TEMPLATE_FILE_BYTES
+
+    root = tmp_path / "root"
+    text = _template_json("sized", "Unicode: café")
+    padding = MAX_TEMPLATE_FILE_BYTES - len(text.encode("utf-8")) + extra_bytes
+    _write_template(root, "sized", text + " " * padding)
+
+    manager = _discover([root])
+
+    if extra_bytes:
+        assert manager.get("sized") is None
+        assert len(manager.issues()) == 1
+        assert "read cap" in manager.issues()[0].detail
+    else:
+        assert manager.get("sized") is not None
+        assert manager.issues() == ()
+
+
+@pytest.mark.parametrize("bad_file", ["invalid-utf8", "directory"])
+def test_unreadable_template_file_does_not_hide_valid_sibling(tmp_path, bad_file):
+    root = tmp_path / "root"
+    entry = root / "broken"
+    entry.mkdir(parents=True)
+    path = entry / "template.json"
+    if bad_file == "directory":
+        path.mkdir()
+    else:
+        path.write_bytes(b"\xff\xfe")
+    _write_template(root, "good", _template_json("good"))
+
+    manager = _discover([root])
+
+    assert [item.name for item in manager.list_templates()] == ["good"]
+    assert len(manager.issues()) == 1
+    assert manager.issues()[0].path == path
+
+
+def test_rediscovery_removes_deleted_winner_and_promotes_shadowed_copy(tmp_path):
+    workspace, builtin = tmp_path / "workspace", tmp_path / "builtin"
+    winner = _write_template(workspace, "shared", _template_json("shared"))
+    _write_template(builtin, "shared", _template_json("shared"))
+    manager = _discover(
+        [TemplateRoot("workspace", workspace), TemplateRoot("builtin", builtin)]
+    )
+    assert manager.get("shared").source == "workspace"
+
+    (winner / "template.json").unlink()
+    winner.rmdir()
+    asyncio.run(manager.discover())
+
+    assert manager.get("shared").source == "builtin"
+    assert manager.find("shared", sources=("workspace",)) is None
+    assert manager.issues() == ()

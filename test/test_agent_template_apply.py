@@ -341,3 +341,90 @@ def test_every_replayed_block_is_marked_as_template_content():
     assert not getattr(
         session.messages[0], "from_template", False
     ), "the session's own persona is not template content"
+
+
+def test_replaying_one_template_into_two_sessions_does_not_share_mutable_blocks():
+    template = _template(
+        [
+            _text("assistant", "prepared"),
+            _call("Read", "call_1", '{"paths": ["original"]}'),
+            _result("call_1", "original result"),
+        ]
+    )
+    first, second = _session(), _session()
+    apply_template(first, template)
+    apply_template(second, template)
+
+    first.messages[1].message = "changed"
+    first.messages[2].parameter["paths"].append("changed")
+    first.messages[3].content = "changed"
+
+    assert second.messages[1].message == "prepared"
+    assert second.messages[2].parameter == {"paths": ["original"]}
+    assert second.build_standard_context()[-1]["content"] == "original result"
+    assert template.session_autoload[0]["message"] == "prepared"
+    assert template.session_autoload[1]["arguments_string"] == '{"paths": ["original"]}'
+
+
+def test_workspace_substitution_is_limited_to_message_text(tmp_path):
+    session = _session()
+    apply_template(
+        session,
+        _template(
+            [
+                _text("assistant", "at {workspace}", reasoning="keep {workspace}"),
+                _call("Read", "call_1", '{"path": "{workspace}"}'),
+                _result("call_1", "literal {workspace}", success=False),
+            ]
+        ),
+        workspace=tmp_path,
+    )
+
+    assert session.messages[1].message == f"at {tmp_path}"
+    assert session.messages[1].reasoning_content == "keep {workspace}"
+    assert session.messages[2].parameter == {"path": "{workspace}"}
+    assert session.messages[3].success is False
+    assert session.build_standard_context()[-1]["content"] == "literal {workspace}"
+
+
+@pytest.mark.asyncio
+async def test_failed_template_application_does_not_register_or_attach_child(
+    monkeypatch,
+):
+    orchestrator = AgentOrchestrator(default_provider=ScenarioProvider())
+    parent = await orchestrator.create_session(name="parent")
+    before = orchestrator.get_tree_snapshot()
+
+    def fail(session, template, workspace=None):
+        raise ValueError("cannot seed history")
+
+    monkeypatch.setattr(orchestrator_module, "apply_template", fail)
+    with pytest.raises(ValueError, match="cannot seed history"):
+        await orchestrator.create_session(
+            name="child",
+            parent_id=parent.agent_id,
+            template=_template([_text("user", "seed")]),
+        )
+
+    assert orchestrator.get_tree_snapshot() == before
+    assert parent.sub_agent_ids == []
+
+
+@pytest.mark.parametrize(
+    "blocks, expected",
+    [
+        ([], ""),
+        ([_text("user", "context"), _text("system", "late")], ""),
+        (
+            [_text("system", "{workspace}: {workspace}; {other}")],
+            "{workspace}: {workspace}; {other}",
+        ),
+    ],
+)
+def test_system_message_uses_only_a_leading_persona(blocks, expected):
+    assert _template(blocks).system_message() == expected
+
+
+def test_system_message_renders_all_workspace_occurrences(tmp_path):
+    template = _template([_text("system", "{workspace}: {workspace}; {other}")])
+    assert template.system_message(tmp_path) == f"{tmp_path}: {tmp_path}; {{other}}"
