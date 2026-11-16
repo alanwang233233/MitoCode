@@ -1344,6 +1344,20 @@ async def test_query_agent_still_reports_an_answer_produced_after_the_template()
 
 
 @pytest.mark.asyncio
+async def test_template_name_surrounding_whitespace_is_ignored():
+    template = _Template("plan-agent")
+    orch = _Orchestrator()
+    _make_ctx(orch, template_manager=_Templates(template))
+
+    result = await agent_tools.spawn_agent(
+        "write a plan", "plan it", template=" \tplan-agent\n"
+    )
+
+    assert orch.created[0]["template"] is template
+    assert "plan-agent" in result
+
+
+@pytest.mark.asyncio
 async def test_template_lookup_trims_surrounding_whitespace():
     template = _Template("plan-agent")
     orch = _Orchestrator()

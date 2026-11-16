@@ -545,7 +545,93 @@ def test_one_bad_block_rejects_the_whole_template():
 
 @pytest.mark.parametrize("length", [1, 64])
 def test_name_length_boundaries_are_accepted(length):
+    """Both ends of the documented identifier length range are usable."""
     assert _parse(name="a" * length).name == "a" * length
+
+
+@pytest.mark.parametrize("name", ["", "a" * 65, None, 42, "a/b", "a-_b"])
+def test_invalid_name_boundaries_and_types_are_rejected(name):
+    with pytest.raises(MitoCodeTemplateDefinitionError, match="'name'"):
+        _parse(name=name)
+
+
+def test_description_limit_applies_after_whitespace_normalization():
+    description = "x" * 1024
+    assert _parse(description=f" \n{description}\t ").description == description
+
+
+@pytest.mark.parametrize(
+    "block, field",
+    [
+        (
+            {
+                "kind": "text",
+                "role": "assistant",
+                "message": "x",
+                "reasoning_content": None,
+            },
+            "reasoning_content",
+        ),
+        ({"kind": "tool_call", "name": "Read", "id": "", "parameter": {}}, "id"),
+        ({"kind": "tool_call", "name": "Read", "id": 1, "parameter": {}}, "id"),
+        (
+            {"kind": "tool_call", "name": "Read", "arguments_string": 1},
+            "arguments_string",
+        ),
+        ({"kind": "tool_call", "name": "Read", "parameter": []}, "parameter"),
+    ],
+)
+def test_invalid_block_fields_report_their_position(block, field):
+    with pytest.raises(MitoCodeTemplateDefinitionError, match=f"block 1.*'{field}'"):
+        _parse(session_autoload=[block])
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("success", 0),
+        ("success", "false"),
+        ("success", None),
+        ("content", None),
+        ("content", {}),
+        ("tool_call_id", 1),
+    ],
+)
+def test_result_fields_are_not_coerced(field, value):
+    result = {"kind": "tool_result", "content": "ok", field: value}
+    with pytest.raises(MitoCodeTemplateDefinitionError, match=f"block 2.*'{field}'"):
+        _parse(
+            session_autoload=[
+                {"kind": "tool_call", "name": "Read", "parameter": {}},
+                result,
+            ]
+        )
+
+
+def test_argument_string_is_authoritative_when_parameter_disagrees():
+    document = _parse(
+        session_autoload=[
+            {
+                "kind": "tool_call",
+                "name": "Read",
+                "arguments_string": '{"path": "actual"}',
+                "parameter": {"path": "stale"},
+            },
+            {"kind": "tool_result", "content": "ok"},
+        ]
+    )
+    call = document.session_autoload[0]
+    assert call["parameter"] == {"path": "actual"}
+    assert call["arguments_string"] == '{"path": "actual"}'
+
+
+def test_call_ids_cannot_be_reused_after_a_completed_batch():
+    pair = [
+        {"kind": "tool_call", "name": "Read", "id": "same", "parameter": {}},
+        {"kind": "tool_result", "content": "ok"},
+    ]
+    with pytest.raises(MitoCodeTemplateDefinitionError, match="block 3.*already used"):
+        _parse(session_autoload=pair + pair)
 
 
 def test_name_above_the_length_limit_is_rejected():
@@ -553,7 +639,7 @@ def test_name_above_the_length_limit_is_rejected():
         _parse(name="a" * 65)
 
 
-def test_description_limit_applies_after_whitespace_normalization():
+def test_description_at_limit_preserves_normalized_internal_whitespace():
     description = "x" * 1022 + " y"
     assert _parse(description=" \n" + description + "\t ").description == description
 
