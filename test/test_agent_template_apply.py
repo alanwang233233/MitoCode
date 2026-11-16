@@ -341,3 +341,69 @@ def test_every_replayed_block_is_marked_as_template_content():
     assert not getattr(
         session.messages[0], "from_template", False
     ), "the session's own persona is not template content"
+
+
+def test_reusing_a_template_creates_independent_message_blocks(tmp_path):
+    template = _template(
+        [
+            _text("system", "Work at {workspace}."),
+            _call("Read", "read", '{"path": "{workspace}/literal.py"}'),
+            _result("read", "result from {workspace}", success=False),
+        ]
+    )
+    first = _session()
+    second = _session()
+
+    apply_template(first, template, workspace=tmp_path / "first")
+    apply_template(second, template, workspace=tmp_path / "second")
+
+    assert first.system_prompt == f"Work at {tmp_path / 'first'}."
+    assert second.system_prompt == f"Work at {tmp_path / 'second'}."
+    assert all(a is not b for a, b in zip(first.messages, second.messages))
+    first.messages[1].parameter["path"] = "changed"
+    assert second.messages[1].parameter == {"path": "{workspace}/literal.py"}
+    assert second.messages[2].success is False
+    assert second.messages[2].content == "result from {workspace}"
+    assert template.session_autoload[0]["message"] == "Work at {workspace}."
+    assert (
+        template.session_autoload[1]["arguments_string"]
+        == '{"path": "{workspace}/literal.py"}'
+    )
+
+
+@pytest.mark.asyncio
+async def test_template_failure_leaves_no_child_registered(monkeypatch):
+    orchestrator = AgentOrchestrator(default_provider=ScenarioProvider())
+    parent = await orchestrator.create_session(name="parent")
+    before = orchestrator.get_tree_snapshot()
+
+    def fail_apply(session, template, workspace=None):
+        raise ValueError("synthetic replay failure")
+
+    monkeypatch.setattr(orchestrator_module, "apply_template", fail_apply)
+    with pytest.raises(ValueError, match="synthetic replay failure"):
+        await orchestrator.create_session(
+            name="child",
+            parent_id=parent.agent_id,
+            template=_template([_text("user", "context")]),
+        )
+
+    assert orchestrator.get_tree_snapshot() == before
+    assert parent.sub_agent_ids == []
+
+
+@pytest.mark.parametrize("leading_system", [False, True])
+@pytest.mark.asyncio
+async def test_template_persona_precedence_over_explicit_session_prompt(leading_system):
+    orchestrator = AgentOrchestrator(
+        default_provider=ScenarioProvider(),
+        system_prompt=BASE_PROMPT,
+    )
+    session = await orchestrator.create_session(
+        name="child",
+        system_prompt="Explicit persona.",
+        template=_template([_text("system" if leading_system else "user", "Seed.")]),
+    )
+
+    assert session.system_prompt == ("Seed." if leading_system else "Explicit persona.")
+    assert session.messages[0].message == session.system_prompt

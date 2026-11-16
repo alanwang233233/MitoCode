@@ -541,3 +541,84 @@ def test_one_bad_block_rejects_the_whole_template():
         )
 
     assert not hasattr(error.value, "partial")
+
+
+@pytest.mark.parametrize("length", [1, 64])
+def test_name_length_boundaries_are_accepted(length):
+    assert _parse(name="a" * length).name == "a" * length
+
+
+def test_name_above_the_length_limit_is_rejected():
+    with pytest.raises(MitoCodeTemplateDefinitionError, match="name"):
+        _parse(name="a" * 65)
+
+
+def test_description_limit_applies_after_whitespace_normalization():
+    description = "x" * 1022 + " y"
+    assert _parse(description=" \n" + description + "\t ").description == description
+
+
+def test_argument_string_overrides_a_conflicting_parameter_mapping():
+    arguments = '{ "path": "原文.py", "nested": {"enabled": false} }'
+    document = _parse(
+        session_autoload=[
+            {
+                "kind": "tool_call",
+                "name": "Read",
+                "arguments_string": arguments,
+                "parameter": {"path": "stale.py"},
+            },
+            {"kind": "tool_result", "content": "ok"},
+        ]
+    )
+    call = document.session_autoload[0]
+    assert call["arguments_string"] == arguments
+    assert call["parameter"] == {"path": "原文.py", "nested": {"enabled": False}}
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("success", 0),
+        ("success", 1),
+        ("success", "false"),
+        ("success", None),
+        ("content", None),
+        ("content", {}),
+        ("tool_call_id", 7),
+    ],
+)
+def test_invalid_result_fields_reject_the_entire_history(field, value):
+    result = {"kind": "tool_result", "content": "ok"}
+    result[field] = value
+    with pytest.raises(MitoCodeTemplateDefinitionError, match=field):
+        _parse(
+            session_autoload=[
+                {"kind": "tool_call", "name": "Read", "parameter": {}},
+                result,
+            ]
+        )
+
+
+def test_an_answered_call_id_cannot_be_reused_in_a_later_batch():
+    pair = [
+        {"kind": "tool_call", "name": "Read", "id": "same", "parameter": {}},
+        {"kind": "tool_result", "tool_call_id": "same", "content": "ok"},
+    ]
+    with pytest.raises(MitoCodeTemplateDefinitionError, match="already used"):
+        _parse(session_autoload=pair + pair)
+
+
+def test_parallel_results_may_arrive_in_reverse_call_order():
+    document = _parse(
+        session_autoload=[
+            {"kind": "tool_call", "name": "Read", "id": "first", "parameter": {}},
+            {"kind": "tool_call", "name": "Read", "id": "second", "parameter": {}},
+            {"kind": "tool_result", "tool_call_id": "second", "content": "two"},
+            {"kind": "tool_result", "content": "one"},
+        ]
+    )
+    assert [block["tool_call_id"] for block in document.session_autoload[2:]] == [
+        "second",
+        "first",
+    ]

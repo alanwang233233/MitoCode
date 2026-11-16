@@ -323,3 +323,104 @@ def test_a_second_discovery_replaces_the_catalogue_and_the_issues(tmp_path):
 
     assert [template.name for template in manager.list_templates()] == ["broken"]
     assert manager.issues() == ()
+
+
+@pytest.mark.parametrize("size_delta", [0, 1])
+def test_template_file_size_boundary(tmp_path, size_delta):
+    from mitocode.core.agent.template.template_json import MAX_TEMPLATE_FILE_BYTES
+
+    text = _template_json("demo")
+    padded = text + " " * (
+        MAX_TEMPLATE_FILE_BYTES - len(text.encode("utf-8")) + size_delta
+    )
+    entry = _write_template(tmp_path, "demo", padded)
+    manager = _discover([tmp_path])
+
+    if size_delta == 0:
+        assert manager.get("demo") is not None
+        assert manager.issues() == ()
+    else:
+        assert manager.get("demo") is None
+        assert len(manager.issues()) == 1
+        assert manager.issues()[0].path == entry / "template.json"
+        assert "read cap" in manager.issues()[0].detail
+
+
+@pytest.mark.parametrize("bad_file", ["invalid-utf8", "directory"])
+def test_unreadable_template_does_not_hide_valid_siblings(tmp_path, bad_file):
+    entry = tmp_path / "broken"
+    entry.mkdir()
+    template_file = entry / "template.json"
+    if bad_file == "invalid-utf8":
+        template_file.write_bytes(b"\xff\xfe")
+    else:
+        template_file.mkdir()
+    _write_template(tmp_path, "valid", _template_json("valid"))
+
+    manager = _discover([tmp_path])
+
+    assert [item.name for item in manager.list_templates()] == ["valid"]
+    assert len(manager.issues()) == 1
+    assert manager.issues()[0].path == template_file
+
+
+def test_invalid_high_priority_template_does_not_shadow_valid_fallback(tmp_path):
+    workspace = tmp_path / "workspace"
+    builtin = tmp_path / "builtin"
+    _write_template(workspace, "demo", "{broken")
+    _write_template(builtin, "demo", _template_json("demo", "Fallback persona."))
+
+    manager = _discover(
+        [
+            TemplateRoot("workspace", workspace),
+            TemplateRoot("builtin", builtin),
+        ]
+    )
+
+    assert manager.get("demo").source == "builtin"
+    assert manager.get("demo").description == "Fallback persona."
+    assert len(manager.issues()) == 1
+    assert manager.issues()[0].path == workspace / "demo" / "template.json"
+
+
+def test_a_root_listing_failure_does_not_abort_other_roots(tmp_path, monkeypatch):
+    denied = tmp_path / "denied"
+    denied.mkdir()
+    healthy = tmp_path / "healthy"
+    _write_template(healthy, "demo", _template_json("demo"))
+    original_iterdir = Path.iterdir
+
+    def guarded_iterdir(path):
+        if path == denied:
+            raise PermissionError("synthetic denied directory")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
+    manager = _discover([denied, healthy])
+
+    assert manager.get("demo") is not None
+    assert len(manager.issues()) == 1
+    assert manager.issues()[0].path == denied
+    assert "PermissionError" in manager.issues()[0].detail
+
+
+def test_rediscovery_promotes_a_previously_shadowed_template(tmp_path):
+    workspace = tmp_path / "workspace"
+    builtin = tmp_path / "builtin"
+    winner = _write_template(workspace, "demo", _template_json("demo"))
+    _write_template(builtin, "demo", _template_json("demo", "Fallback."))
+    manager = _discover(
+        [
+            TemplateRoot("workspace", workspace),
+            TemplateRoot("builtin", builtin),
+        ]
+    )
+    assert manager.get("demo").source == "workspace"
+
+    (winner / "template.json").unlink()
+    winner.rmdir()
+    asyncio.run(manager.discover())
+
+    assert manager.get("demo").source == "builtin"
+    assert manager.find("demo", sources=("workspace",)) is None
+    assert manager.issues() == ()

@@ -1341,3 +1341,40 @@ async def test_query_agent_still_reports_an_answer_produced_after_the_template()
 
     assert "The plan is ready." in result
     assert "Understood" not in result
+
+
+@pytest.mark.asyncio
+async def test_template_lookup_trims_surrounding_whitespace():
+    template = _Template("plan-agent")
+    orch = _Orchestrator()
+    _make_ctx(orch, template_manager=_Templates(template))
+
+    result = await agent_tools.spawn_agent("plan", "task", template=" \tplan-agent\n")
+
+    assert result.startswith("Created agent")
+    assert orch.created[0]["template"] is template
+
+
+@pytest.mark.asyncio
+async def test_template_lookup_remains_case_sensitive():
+    orch = _Orchestrator()
+    _make_ctx(orch, template_manager=_Templates(_Template("plan-agent")))
+
+    result = await agent_tools.spawn_agent("plan", "task", template="Plan-Agent")
+
+    assert result.startswith("Error:")
+    assert "plan-agent" in result
+    assert orch.created == []
+
+
+@pytest.mark.asyncio
+async def test_seeded_assistant_does_not_hide_a_textless_generated_turn():
+    prepared = _Block(role="assistant", message="Prepared answer.")
+    prepared.from_template = True
+    produced = _Block(role="assistant", message="")
+    _make_ctx(_query_orchestrator(messages=[prepared, produced]))
+
+    result = await agent_tools.query_agent(3)
+
+    assert "none yet" in result
+    assert "Prepared answer" not in result
