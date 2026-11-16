@@ -1383,3 +1383,17 @@ async def test_seeded_assistant_cannot_mask_a_live_textless_assistant_turn():
     assert "none yet" in result
     assert "prepared answer" not in result
     assert "old live answer" not in result
+
+
+@pytest.mark.asyncio
+async def test_template_name_surrounding_whitespace_is_ignored():
+    template = _Template("plan-agent")
+    orch = _Orchestrator()
+    _make_ctx(orch, template_manager=_Templates(template))
+
+    result = await agent_tools.spawn_agent(
+        "write a plan", "plan it", template=" \tplan-agent\n"
+    )
+
+    assert orch.created[0]["template"] is template
+    assert "plan-agent" in result
