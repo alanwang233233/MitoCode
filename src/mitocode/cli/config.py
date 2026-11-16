@@ -1,9 +1,10 @@
 """Provider credential loading and interactive setup for the MitoCode CLI.
 
-The workspace's ``.mitocode/secret/provider.json`` is the **only** source of
-provider settings: there are no command-line overrides, no environment
-variables and no ``.env`` file. That keeps a workspace self-contained and makes
-the credential's origin unambiguous.
+A workspace's ``.mitocode/secret/provider.json`` takes precedence, and the
+user-level copy under the global configuration directory is the fallback for
+people who share one credential across workspaces.  There are no command-line
+overrides, no environment variables and no ``.env`` file: the credential's
+origin is always one of those two files.
 
 Two rules shape this module:
 
@@ -33,9 +34,15 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from mitocode import MITOCODE_CONFIG_PATH
 from mitocode.cli.errors import MitoCodeCliConfigError
+from mitocode.core.config import ConfigManager
+from mitocode.core.exception.mitocode_exception import MitoCodeConfigNotFoundError
 
-SECRET_RELATIVE_PATH = Path(".mitocode") / "secret" / "provider.json"
+SECRET_NAME = "secret/provider.json"
+"""The credential file name as the configuration manager addresses it."""
+
+SECRET_RELATIVE_PATH = Path(MITOCODE_CONFIG_PATH) / SECRET_NAME
 """The provider credential file, relative to the workspace root."""
 
 DEFAULT_TIMEOUT = 60.0
@@ -84,7 +91,10 @@ class ProviderConfig:
 
 
 def secret_path(workspace: Path) -> Path:
-    """Return the credential file path for a workspace.
+    """Return the project credential file path for a workspace.
+
+    This is the file setup writes and the one existence checks look at; a read
+    may still fall back to the global copy (see :func:`resolve_provider_config`).
 
     Args:
         workspace: Workspace root.
@@ -92,25 +102,57 @@ def secret_path(workspace: Path) -> Path:
     Returns:
         ``<workspace>/.mitocode/secret/provider.json``.
     """
-    return Path(workspace) / SECRET_RELATIVE_PATH
+    return ConfigManager.for_workspace(workspace).project_path(SECRET_NAME)
 
 
-def resolve_provider_config(workspace: Path) -> ProviderConfig:
-    """Read and validate the workspace's provider credential file.
+def _resolve_secret_path(manager: ConfigManager) -> Path:
+    """Return the credential file to read: project copy first, global second.
+
+    Args:
+        manager: Configuration locator bound to the workspace.
+
+    Returns:
+        The credential file that exists.
+
+    Raises:
+        MitoCodeCliConfigError: Neither copy exists. The message names the
+            project path, because that is where setup would create it, and
+            never a credential value.
+    """
+    try:
+        return manager.path(SECRET_NAME)
+    except MitoCodeConfigNotFoundError:
+        missing = manager.project_path(SECRET_NAME)
+        raise MitoCodeCliConfigError(
+            f"No provider configuration found at '{missing}'.\n"
+            'Create it with at least "api_key" and "model", then run mitocode again.'
+        ) from None
+
+
+def resolve_provider_config(
+    workspace: Path, *, global_dir: Optional[Path] = None
+) -> ProviderConfig:
+    """Read and validate the provider credential file.
+
+    The workspace's own file wins; when it is absent the user-level copy is
+    read instead, so one credential can serve several workspaces.
 
     Args:
         workspace: Workspace root containing the credential file.
+        global_dir: Override for the user-level configuration directory; tests
+            use it to keep the real home directory out of the run.
 
     Returns:
         The validated provider configuration.
 
     Raises:
-        MitoCodeCliConfigError: The file is missing, unreadable, not valid
-            JSON, not a JSON object, or lacks ``api_key``/``model``; the
-            timeout is not a positive number. Messages name the file and the
-            field but never a value.
+        MitoCodeCliConfigError: Neither file exists, the selected file is
+            unreadable, not valid JSON, not a JSON object, or lacks
+            ``api_key``/``model``; the timeout is not a positive number.
+            Messages name the file and the field but never a value.
     """
-    path = secret_path(workspace)
+    manager = ConfigManager.for_workspace(workspace, global_dir=global_dir)
+    path = _resolve_secret_path(manager)
     data = _read_secret_file(path)
 
     api_key = _text_field(data, "api_key")

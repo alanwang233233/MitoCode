@@ -42,6 +42,12 @@ dev = [
 [tool.coverage.run]
 source = ["src/mitocode"]
 
+[tool.setuptools.package-data]
+# The templates shipped with the package are data, not code: without this a
+# wheel install would carry the loader but none of the files it scans, and
+# `general` (the default persona) would be missing at runtime.
+"mitocode.core.agent.template" = ["builtin/*/template.json"]
+
 [tool.pyright]
 typeCheckingMode = "standard"
 reportAttributeAccessIssue = true

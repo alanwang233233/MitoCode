@@ -37,6 +37,15 @@ def _write_secret(workspace: Path, payload: str) -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def _isolated_global_config(tmp_path, monkeypatch):
+    """Keep a developer's real global credential out of the test run."""
+    monkeypatch.setattr(
+        "mitocode.core.config.manager.default_global_dir",
+        lambda **_: tmp_path / "global-config",
+    )
+
+
 def _console() -> tuple[Console, StringIO]:
     buffer = StringIO()
     return (
@@ -476,3 +485,35 @@ def test_write_secret_file_refuses_a_secret_file_outside_the_workspace(tmp_path)
 
     assert not target.exists()
     assert "sk-leaked" not in str(info.value)
+
+
+def test_provider_config_falls_back_to_a_global_copy(tmp_path):
+    """A workspace without its own credential can use the user-level copy."""
+    global_dir = tmp_path / "global"
+    global_secret = global_dir / "secret" / "provider.json"
+    global_secret.parent.mkdir(parents=True)
+    global_secret.write_text(
+        json.dumps({"api_key": "global-key", "model": "global-model"}),
+        encoding="utf-8",
+    )
+
+    cfg = resolve_provider_config(tmp_path, global_dir=global_dir)
+
+    assert cfg.api_key == "global-key"
+    assert cfg.model == "global-model"
+
+
+def test_project_provider_config_wins_over_the_global_copy(tmp_path):
+    """The project credential overrides a user-level one."""
+    global_dir = tmp_path / "global"
+    global_secret = global_dir / "secret" / "provider.json"
+    global_secret.parent.mkdir(parents=True)
+    global_secret.write_text(
+        json.dumps({"api_key": "global-key", "model": "global-model"}),
+        encoding="utf-8",
+    )
+    _write_secret(tmp_path, json.dumps({"api_key": "project-key", "model": "m"}))
+
+    cfg = resolve_provider_config(tmp_path, global_dir=global_dir)
+
+    assert cfg.api_key == "project-key"

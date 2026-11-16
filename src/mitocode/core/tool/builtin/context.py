@@ -96,6 +96,12 @@ class ToolContext:
             than dereferencing.  ``Any`` rather than a concrete class, like
             ``orchestrator``: the manager is discovered by the wiring layer
             and this package stays independent of it.
+        template_manager: Duck-typed handle to the agent template catalogue the
+            ``Agent`` tool resolves its ``template`` argument against, or
+            ``None`` when the runner has no templates.  ``Any`` for the same
+            reason: the template package lives under ``core.agent``, and
+            importing it here would close the one-way dependency
+            ``tool_manager -> agent_session`` into a cycle.
         background: Registry of detached calls.  A fresh instance per context,
             built by ``default_factory`` rather than shared: handles are
             process-wide strings, so two contexts sharing one registry would
@@ -119,6 +125,7 @@ class ToolContext:
     approver: Approver = field(default_factory=AlwaysAllow)
     orchestrator: Any = None
     skills_manager: Any = None
+    template_manager: Any = None
     background: BackgroundRegistry = field(default_factory=BackgroundRegistry)
     max_output_chars: int = 30_000
     max_sub_agent_depth: int = 4
