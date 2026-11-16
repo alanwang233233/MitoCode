@@ -1309,3 +1309,30 @@ async def test_unset_effort_passes_none_in_settings(tmp_path, monkeypatch):
 
     assert result.provider.settings["reasoning_effort"] is None
     assert not any("reasoning_effort" in warning for warning in ui.warnings)
+
+
+def test_template_catalogue_normalizes_multiline_descriptions(tmp_path):
+    """Externally constructed descriptions still occupy exactly one list line."""
+    template = AgentTemplate(
+        name="reviewer",
+        description=" Reviews\n\tcode\r\nand   tests. ",
+        path=tmp_path / "reviewer",
+        template_path=tmp_path / "reviewer" / "template.json",
+        source="test",
+    )
+
+    prompt = _prompt(tmp_path, templates=(template,))
+
+    assert "- reviewer: Reviews code and tests." in prompt.splitlines()
+    assert template.description not in prompt
+
+
+@pytest.mark.parametrize("message", ["", " \t\n"])
+def test_blank_persona_falls_back_without_losing_template_catalogue(tmp_path, message):
+    """A broken persona must not remove the usable catalogue from the prompt."""
+    template = _general(message)
+
+    prompt = _prompt(tmp_path, persona=template, templates=(template,))
+
+    assert prompt.startswith(MINIMAL_PROMPT + "\n")
+    assert "- general: The default persona." in prompt
